@@ -141,9 +141,31 @@ public:
             p.drawLine(QPointF(10, 10.5), QPointF(10.5, 16)); p.drawLine(QPointF(14, 10.5), QPointF(13.5, 16)); break;
         case 23: // Zoom tool (neutral magnifier)
             p.drawEllipse(QRectF(5, 4.5, 12, 12)); p.drawLine(QPointF(15.5, 15), QPointF(20, 19.5)); break;
-        default: // Zoom in
+        case 14: // Zoom in
             p.drawEllipse(QRectF(6.0, 5.5, 10.5, 10.5)); p.drawLine(QPointF(15.0, 14.5), QPointF(19.2, 18.7));
             p.drawLine(QPointF(8.7, 10.8), QPointF(13.8, 10.8)); p.drawLine(QPointF(11.25, 8.25), QPointF(11.25, 13.35)); break;
+        case 24: // Align left
+            p.drawLine(QPointF(6.0, 7.5), QPointF(18.0, 7.5));
+            p.drawLine(QPointF(6.0, 12.0), QPointF(13.5, 12.0));
+            p.drawLine(QPointF(6.0, 16.5), QPointF(16.5, 16.5)); break;
+        case 25: // Align center
+            p.drawLine(QPointF(6.0, 7.5), QPointF(18.0, 7.5));
+            p.drawLine(QPointF(8.0, 12.0), QPointF(16.0, 12.0));
+            p.drawLine(QPointF(7.0, 16.5), QPointF(17.0, 16.5)); break;
+        case 26: // Align right
+            p.drawLine(QPointF(6.0, 7.5), QPointF(18.0, 7.5));
+            p.drawLine(QPointF(10.5, 12.0), QPointF(18.0, 12.0));
+            p.drawLine(QPointF(7.5, 16.5), QPointF(18.0, 16.5)); break;
+        case 27: // New selection (single square)
+            p.drawRect(QRectF(6.0, 6.0, 11.0, 11.0)); break;
+        case 28: // Add to selection (square with plus badge)
+            p.drawRect(QRectF(5.0, 7.5, 9.5, 9.5));
+            p.drawLine(QPointF(14.0, 9.0), QPointF(19.0, 9.0));
+            p.drawLine(QPointF(16.5, 6.5), QPointF(16.5, 11.5)); break;
+        case 29: // Subtract from selection (square with minus badge)
+            p.drawRect(QRectF(5.0, 7.5, 9.5, 9.5));
+            p.drawLine(QPointF(14.0, 9.0), QPointF(19.0, 9.0)); break;
+        default: break;
         }
 
         p.restore();

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CompositorLX VERSION 0.1.0 LANGUAGES C CXX)
+project(CompositorLX VERSION 0.2.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(FetchContent)
@@ -127,6 +127,7 @@ add_executable(compositor-lx
     src/ui/LayerListModel.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+    src/ui/SegmentedControl.h
 )
 target_link_libraries(compositor-lx PRIVATE compositor_core Qt6::Widgets Qt6::Concurrent Qt6::Network)
 target_compile_options(compositor-lx PRIVATE -Wall -Wextra -Wpedantic)

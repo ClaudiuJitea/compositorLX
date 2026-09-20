@@ -13,7 +13,7 @@ int main(int argc, char *argv[])
 {
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("CompositorLX"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.2.0"));
     QApplication::setOrganizationName(QStringLiteral("Compositor"));
     QApplication::setDesktopFileName(QStringLiteral("compositor-lx"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/compositor-lx.png")));

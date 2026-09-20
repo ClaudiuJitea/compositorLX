@@ -71,14 +71,14 @@ CompositorLX is a full-featured raster editor for Linux: layered `.comp` project
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.1.0-x86_64.AppImage
-./CompositorLX-0.1.0-x86_64.AppImage
+chmod +x CompositorLX-0.2.0-x86_64.AppImage
+./CompositorLX-0.2.0-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.1.0_amd64.deb
+sudo apt install ./compositorlx_0.2.0_amd64.deb
 compositor-lx
 ```
 

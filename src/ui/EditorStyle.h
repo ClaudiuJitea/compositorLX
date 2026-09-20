@@ -54,10 +54,130 @@ inline QString editorStyleSheet()
         QPushButton#toolbarPill { min-width: 42px; min-height: 25px; max-height: 25px; padding: 0 8px; border-radius: 12px; }
         QWidget#transformBar QWidget, QWidget#inspector QWidget { font-size: 11px; }
         QWidget#transformBar { background: #242425; border-bottom: 1px solid #414145; }
-        QWidget#transformBar QPushButton, QWidget#transformBar QToolButton, QWidget#transformBar QComboBox, QWidget#transformBar QDoubleSpinBox, QWidget#transformBar QSpinBox { min-height: 28px; max-height: 28px; }
+        QWidget#transformBar QPushButton, QWidget#transformBar QToolButton, QWidget#transformBar QComboBox, QWidget#transformBar QDoubleSpinBox, QWidget#transformBar QSpinBox { min-height: 26px; max-height: 26px; height: 26px; }
         QWidget#transformBar QLabel#sectionTitle { color: #ffffff; padding-right: 8px; }
         QWidget#transformBar QAbstractSpinBox:focus, QWidget#transformBar QComboBox:focus { border: 1px solid #67aaff; }
         QWidget#transformBar QToolButton:checked { background: #31577c; border-color: #67aaff; }
+        QWidget#segmentedControl,
+        QWidget[segmented="true"] { background: #28282a; border: 1px solid #444447; border-radius: 6px; }
+        QWidget#segmentedControl QToolButton,
+        QWidget[segmented="true"] QToolButton,
+        QWidget#segmentedControl QPushButton,
+        QWidget[segmented="true"] QPushButton {
+            background: transparent;
+            border: 0;
+            border-right: 1px solid #3c3c40;
+            border-radius: 0;
+            color: #b8bac0;
+            padding: 0 10px;
+            font-size: 11px;
+            font-weight: 500;
+            min-height: 28px;
+            max-height: 28px;
+            height: 28px;
+        }
+        QWidget#segmentedControl QToolButton[segmentIconOnly="true"],
+        QWidget[segmented="true"] QToolButton[segmentIconOnly="true"] {
+            padding: 0;
+            min-width: 32px;
+            max-width: 32px;
+        }
+        QWidget#segmentedControl QToolButton#textBold,
+        QWidget[segmented="true"] QToolButton#textBold,
+        QWidget#segmentedControl QToolButton#textItalic,
+        QWidget[segmented="true"] QToolButton#textItalic,
+        QWidget#segmentedControl QToolButton#textUnderline,
+        QWidget[segmented="true"] QToolButton#textUnderline {
+            padding: 0;
+            min-width: 32px;
+            max-width: 32px;
+            font-size: 13px;
+        }
+        QWidget#segmentedControl QToolButton#textBold,
+        QWidget[segmented="true"] QToolButton#textBold { font-weight: bold; }
+        QWidget#segmentedControl QToolButton#textItalic,
+        QWidget[segmented="true"] QToolButton#textItalic { font-style: italic; font-family: "Times New Roman", serif; font-size: 14px; }
+        QWidget#segmentedControl QToolButton#textUnderline,
+        QWidget[segmented="true"] QToolButton#textUnderline { text-decoration: underline; }
+        QWidget#segmentedControl QToolButton:hover,
+        QWidget[segmented="true"] QToolButton:hover,
+        QWidget#segmentedControl QPushButton:hover,
+        QWidget[segmented="true"] QPushButton:hover {
+            background: #353539;
+            color: #ffffff;
+        }
+        QWidget#segmentedControl QToolButton:pressed,
+        QWidget[segmented="true"] QToolButton:pressed,
+        QWidget#segmentedControl QPushButton:pressed,
+        QWidget[segmented="true"] QPushButton:pressed {
+            background: #222225;
+        }
+        QWidget#segmentedControl QToolButton:checked,
+        QWidget[segmented="true"] QToolButton:checked,
+        QWidget#transformBar QWidget#segmentedControl QToolButton:checked,
+        QWidget#transformBar QWidget[segmented="true"] QToolButton:checked {
+            background: #235587;
+            border: 0;
+            border-right: 1px solid #1a4269;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        QWidget#segmentedControl QToolButton:checked:hover,
+        QWidget[segmented="true"] QToolButton:checked:hover,
+        QWidget#transformBar QWidget#segmentedControl QToolButton:checked:hover,
+        QWidget#transformBar QWidget[segmented="true"] QToolButton:checked:hover {
+            background: #2b639c;
+            color: #ffffff;
+        }
+        QWidget#segmentedControl QToolButton[segmentPos="first"],
+        QWidget[segmented="true"] QToolButton[segmentPos="first"],
+        QWidget#segmentedControl QPushButton[segmentPos="first"],
+        QWidget[segmented="true"] QPushButton[segmentPos="first"] {
+            border-top-left-radius: 5px;
+            border-bottom-left-radius: 5px;
+        }
+        QWidget#segmentedControl QToolButton[segmentPos="last"],
+        QWidget[segmented="true"] QToolButton[segmentPos="last"],
+        QWidget#segmentedControl QPushButton[segmentPos="last"],
+        QWidget[segmented="true"] QPushButton[segmentPos="last"] {
+            border-top-right-radius: 5px;
+            border-bottom-right-radius: 5px;
+            border-right: 0;
+        }
+        QWidget#segmentedControl QToolButton[segmentPos="only"],
+        QWidget[segmented="true"] QToolButton[segmentPos="only"],
+        QWidget#segmentedControl QPushButton[segmentPos="only"],
+        QWidget[segmented="true"] QPushButton[segmentPos="only"] {
+            border-radius: 5px;
+            border-right: 0;
+        }
+        QWidget#segmentedControl QToolButton:checked[segmentPos="last"],
+        QWidget[segmented="true"] QToolButton:checked[segmentPos="last"],
+        QWidget#segmentedControl QToolButton:checked[segmentPos="only"],
+        QWidget[segmented="true"] QToolButton:checked[segmentPos="only"],
+        QWidget#segmentedControl QPushButton:checked[segmentPos="last"],
+        QWidget[segmented="true"] QPushButton:checked[segmentPos="last"],
+        QWidget#segmentedControl QPushButton:checked[segmentPos="only"],
+        QWidget[segmented="true"] QPushButton:checked[segmentPos="only"] {
+            border-right: 0;
+        }
+        QWidget#segmentedControl:disabled,
+        QWidget[segmented="true"]:disabled {
+            background: #222224;
+            border-color: #333336;
+        }
+        QWidget#segmentedControl QToolButton:disabled,
+        QWidget[segmented="true"] QToolButton:disabled,
+        QWidget#segmentedControl QPushButton:disabled,
+        QWidget[segmented="true"] QPushButton:disabled {
+            color: #58595c;
+            background: transparent;
+        }
+        QWidget#segmentedControl QToolButton:checked:disabled,
+        QWidget[segmented="true"] QToolButton:checked:disabled {
+            background: #28333e;
+            color: #708090;
+        }
         QPushButton[primary="true"]:enabled { background: #236fcb; border-color: #2d7ddd; }
         QWidget#transformBar QCheckBox { spacing: 5px; color: #dedee1; }
         QWidget#transformBar QCheckBox::indicator { width: 13px; height: 13px; }

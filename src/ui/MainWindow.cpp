@@ -12,6 +12,7 @@
 #include "ui/LayerListModel.h"
 #include "ui/ToolOptionsLayout.h"
 #include "ui/EditorIcons.h"
+#include "ui/SegmentedControl.h"
 
 #include <QAction>
 #include <QApplication>
@@ -348,11 +349,13 @@ QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, c
         case QMessageBox::Discard: return QObject::tr("Don't Save");
         case QMessageBox::Yes: return QObject::tr("Yes");
         case QMessageBox::No: return QObject::tr("No");
+        case QMessageBox::Open: return QObject::tr("Open");
         default: return QObject::tr("OK");
         }
     };
     if (defaultButton == QMessageBox::NoButton) {
         if (buttons.testFlag(QMessageBox::Save)) defaultButton = QMessageBox::Save;
+        else if (buttons.testFlag(QMessageBox::Open)) defaultButton = QMessageBox::Open;
         else if (buttons.testFlag(QMessageBox::Yes)) defaultButton = QMessageBox::Yes;
         else if (buttons.testFlag(QMessageBox::Ok)) defaultButton = QMessageBox::Ok;
     }
@@ -372,6 +375,7 @@ QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, c
     if (buttons.testFlag(QMessageBox::Cancel)) addButton(QMessageBox::Cancel);
     if (buttons.testFlag(QMessageBox::Yes)) addButton(QMessageBox::Yes);
     if (buttons.testFlag(QMessageBox::Ok)) addButton(QMessageBox::Ok);
+    if (buttons.testFlag(QMessageBox::Open)) addButton(QMessageBox::Open);
     if (buttons.testFlag(QMessageBox::Save)) addButton(QMessageBox::Save);
     layout->addLayout(actions);
     outer->addWidget(panel);
@@ -805,40 +809,70 @@ MainWindow::MainWindow(QWidget *parent)
     transformBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     auto *transformLayout = new ToolOptionsLayout(transformBar);
     auto *transformTitle = new QLabel(tr("Transform"), transformBar); transformTitle->setObjectName(QStringLiteral("sectionTitle"));
-    auto *smearMode = new QComboBox(transformBar); smearMode->addItems({tr("Liquify"), tr("Blur"), tr("Smudge")}); smearMode->setVisible(false); smearMode->setFixedWidth(100);
-    auto *cloneAligned=new QCheckBox(tr("Aligned"),transformBar);cloneAligned->setChecked(true);cloneAligned->setVisible(false);
-    auto *cloneSample=new QComboBox(transformBar);cloneSample->addItems({tr("This Layer"),tr("All Layers")});cloneSample->setVisible(false);cloneSample->setFixedWidth(105);
-    auto *healingMode=new QComboBox(transformBar);healingMode->addItems({tr("Content-Aware"),tr("Create Texture"),tr("Proximity Match")});healingMode->setVisible(false);healingMode->setFixedWidth(145);
-    auto *brushMode = new QComboBox(transformBar); brushMode->addItems({tr("Paint"), tr("Erase")}); brushMode->setVisible(false);
+    auto *smearMode = new SegmentedControl({tr("Liquify"), tr("Blur"), tr("Smudge")}, transformBar); smearMode->setVisible(false);
+    auto *cloneAligned = new QCheckBox(tr("Aligned"), transformBar); cloneAligned->setChecked(true); cloneAligned->setVisible(false);
+    auto *cloneSample = new SegmentedControl({tr("This Layer"), tr("All Layers")}, transformBar); cloneSample->setVisible(false);
+    auto *healingMode = new SegmentedControl({tr("Content-Aware"), tr("Create Texture"), tr("Proximity Match")}, transformBar); healingMode->setVisible(false);
+    auto *brushMode = new SegmentedControl({tr("Paint"), tr("Erase")}, transformBar); brushMode->setVisible(false);
     auto *shapeRadius = numberField(transformBar, QStringLiteral("Radius"), 5000); shapeRadius->setRange(0, 5000); shapeRadius->setVisible(false);
-    auto *shapeKind = new QComboBox(transformBar); shapeKind->addItems({tr("Rectangle"), tr("Ellipse")}); shapeKind->setVisible(false);
+    auto *shapeKind = new SegmentedControl({tr("Rectangle"), tr("Ellipse")}, transformBar); shapeKind->setVisible(false);
     auto *textFont = new QFontComboBox(transformBar); textFont->setObjectName(QStringLiteral("textFont")); textFont->setFixedWidth(170); textFont->setEditable(true); textFont->setInsertPolicy(QComboBox::NoInsert); textFont->setMaxVisibleItems(16); textFont->setToolTip(tr("Type to search or open the font list")); textFont->setVisible(false);
     if (textFont->completer()) { textFont->completer()->setCaseSensitivity(Qt::CaseInsensitive); textFont->completer()->setCompletionMode(QCompleter::PopupCompletion); }
     if (textFont->lineEdit()) { textFont->lineEdit()->setPlaceholderText(tr("Search fonts")); textFont->lineEdit()->setClearButtonEnabled(false); }
     auto *textSize = new QSpinBox(transformBar); textSize->setObjectName(QStringLiteral("textSize")); textSize->setRange(4, 1000); textSize->setValue(48); textSize->setSuffix(tr(" px")); textSize->setFixedWidth(88); textSize->setVisible(false);
-    auto *textBold = new QToolButton(transformBar); textBold->setObjectName(QStringLiteral("textBold")); textBold->setText(tr("B")); textBold->setCheckable(true); textBold->setToolTip(tr("Bold")); textBold->setFixedSize(30, 29); textBold->setVisible(false);
-    auto *textItalic = new QToolButton(transformBar); textItalic->setObjectName(QStringLiteral("textItalic")); textItalic->setText(tr("I")); textItalic->setCheckable(true); textItalic->setToolTip(tr("Italic")); textItalic->setFixedSize(30, 29); textItalic->setVisible(false);
-    auto *textUnderline = new QToolButton(transformBar); textUnderline->setObjectName(QStringLiteral("textUnderline")); textUnderline->setText(tr("U")); textUnderline->setCheckable(true); textUnderline->setToolTip(tr("Underline")); textUnderline->setFixedSize(30, 29); textUnderline->setVisible(false);
-    auto *textAlignment = new QComboBox(transformBar); textAlignment->setObjectName(QStringLiteral("textAlignment")); textAlignment->addItems({tr("Left"), tr("Center"), tr("Right")}); textAlignment->setFixedWidth(82); textAlignment->setVisible(false);
+    auto *textBold = new QToolButton(); textBold->setObjectName(QStringLiteral("textBold")); textBold->setText(tr("B")); textBold->setCheckable(true); textBold->setToolTip(tr("Bold")); textBold->setFixedSize(32, 28);
+    auto *textItalic = new QToolButton(); textItalic->setObjectName(QStringLiteral("textItalic")); textItalic->setText(tr("I")); textItalic->setCheckable(true); textItalic->setToolTip(tr("Italic")); textItalic->setFixedSize(32, 28);
+    auto *textUnderline = new QToolButton(); textUnderline->setObjectName(QStringLiteral("textUnderline")); textUnderline->setText(tr("U")); textUnderline->setCheckable(true); textUnderline->setToolTip(tr("Underline")); textUnderline->setFixedSize(32, 28);
+    auto *textStyleGroup = new SegmentedGroup(transformBar);
+    textStyleGroup->addButton(textBold);
+    textStyleGroup->addButton(textItalic);
+    textStyleGroup->addButton(textUnderline);
+    textStyleGroup->setVisible(false);
+    auto *textAlignment = new SegmentedControl(transformBar); textAlignment->setObjectName(QStringLiteral("textAlignment"));
+    textAlignment->addItem(editorIcon(24), tr("Align left"));
+    textAlignment->addItem(editorIcon(25), tr("Align center"));
+    textAlignment->addItem(editorIcon(26), tr("Align right"));
+    textAlignment->setVisible(false);
     auto *textCancel = new QPushButton(tr("Cancel"), transformBar); textCancel->setObjectName(QStringLiteral("textCancel")); textCancel->setVisible(false);
     auto *textDone = new QPushButton(tr("Done"), transformBar); textDone->setObjectName(QStringLiteral("textDone")); textDone->setVisible(false);
     brushMode->setObjectName(QStringLiteral("brushMode")); shapeKind->setObjectName(QStringLiteral("shapeKind"));
-    auto *gradientShape = new QComboBox(transformBar); gradientShape->addItems({tr("Linear"), tr("Radial")}); gradientShape->setVisible(false);
-    auto *gradientStyle = new QComboBox(transformBar); gradientStyle->addItems({tr("Foreground to Transparent"), tr("Foreground to Background")}); gradientStyle->setVisible(false); gradientStyle->setFixedWidth(190);
+    auto *gradientShape = new SegmentedControl({tr("Linear"), tr("Radial")}, transformBar); gradientShape->setVisible(false);
+    auto *gradientStyle = new SegmentedControl(transformBar);
+    gradientStyle->addItem(tr("To Transparent"), QIcon(), tr("Foreground to Transparent"));
+    gradientStyle->addItem(tr("To Background"), QIcon(), tr("Foreground to Background"));
+    gradientStyle->setVisible(false);
     auto *gradientReverse = new QCheckBox(tr("Reverse"), transformBar); gradientReverse->setVisible(false);
     gradientOpacityField_ = numberField(transformBar, QStringLiteral("Opacity"), 100); gradientOpacityField_->setObjectName(QStringLiteral("gradientOpacity")); gradientOpacityField_->setRange(1, 100); gradientOpacityField_->setValue(100); gradientOpacityField_->setSuffix(QStringLiteral(" %")); gradientOpacityField_->setVisible(false);
-    auto *cropRatio = new QComboBox(transformBar); cropRatio->addItems({tr("Unconstrained"), tr("Original Ratio"), tr("1:1"), tr("4:3"), tr("16:9")}); cropRatio->setVisible(false);
-    auto *marqueeKind = new QComboBox(transformBar); marqueeKind->addItems({tr("Rectangle"), tr("Ellipse")}); marqueeKind->setVisible(false);
-    auto *lassoKind = new QComboBox(transformBar); lassoKind->addItems({tr("Freehand"), tr("Polygonal")}); lassoKind->setVisible(false);
-    auto *selectionMode = new QComboBox(transformBar); selectionMode->addItems({tr("New"), tr("Add"), tr("Subtract")}); selectionMode->setVisible(false);
+    auto *cropRatio = new SegmentedControl(transformBar);
+    cropRatio->addItem(tr("Free"), QIcon(), tr("Unconstrained"));
+    cropRatio->addItem(tr("Original"), QIcon(), tr("Original Ratio"));
+    cropRatio->addItem(tr("1:1"), QIcon(), tr("1:1 Square"));
+    cropRatio->addItem(tr("4:3"), QIcon(), tr("4:3"));
+    cropRatio->addItem(tr("16:9"), QIcon(), tr("16:9"));
+    cropRatio->setVisible(false);
+    auto *marqueeKind = new SegmentedControl({tr("Rectangle"), tr("Ellipse")}, transformBar); marqueeKind->setVisible(false);
+    auto *lassoKind = new SegmentedControl({tr("Freehand"), tr("Polygonal")}, transformBar); lassoKind->setVisible(false);
+    auto *selectionMode = new SegmentedControl(transformBar);
+    selectionMode->addItem(tr("New"), editorIcon(27), tr("New selection"));
+    selectionMode->addItem(tr("Add"), editorIcon(28), tr("Add to selection (Shift)"));
+    selectionMode->addItem(tr("Subtract"), editorIcon(29), tr("Subtract from selection (Alt)"));
+    selectionMode->setVisible(false);
     auto *selectionAntialias = new QCheckBox(tr("Anti-alias"), transformBar); selectionAntialias->setChecked(true); selectionAntialias->setVisible(false);
     auto *wandTolerance = new QSpinBox(transformBar); wandTolerance->setRange(0, 255); wandTolerance->setValue(32); wandTolerance->setPrefix(tr("Tolerance ")); wandTolerance->setVisible(false);
-    auto *wandSampleSize = new QComboBox(transformBar); wandSampleSize->addItems({tr("Point Sample"), tr("3 by 3 Average"), tr("5 by 5 Average")}); wandSampleSize->setVisible(false);
-    auto *wandSample = new QComboBox(transformBar); wandSample->addItems({tr("This Layer"), tr("All Layers")}); wandSample->setVisible(false);
+    auto *wandSampleSize = new SegmentedControl(transformBar);
+    wandSampleSize->addItem(tr("Point"), QIcon(), tr("Point Sample"));
+    wandSampleSize->addItem(tr("3×3"), QIcon(), tr("3 by 3 Average"));
+    wandSampleSize->addItem(tr("5×5"), QIcon(), tr("5 by 5 Average"));
+    wandSampleSize->setVisible(false);
+    auto *wandSample = new SegmentedControl({tr("This Layer"), tr("All Layers")}, transformBar); wandSample->setVisible(false);
     auto *wandContiguous = new QCheckBox(tr("Contiguous"), transformBar); wandContiguous->setChecked(true); wandContiguous->setVisible(false);
     auto *selectionAmount = new QSpinBox(transformBar); selectionAmount->setRange(1, 500); selectionAmount->setValue(1); selectionAmount->setSuffix(tr(" px")); selectionAmount->setVisible(false);
-    auto *expandSelection = new QPushButton(tr("Expand"), transformBar); expandSelection->setVisible(false);
-    auto *contractSelection = new QPushButton(tr("Contract"), transformBar); contractSelection->setVisible(false);
+    auto *expandSelection = new QPushButton(tr("Expand")); expandSelection->setObjectName(QStringLiteral("expandSelection"));
+    auto *contractSelection = new QPushButton(tr("Contract")); contractSelection->setObjectName(QStringLiteral("contractSelection"));
+    auto *selectionModifyGroup = new SegmentedGroup(transformBar);
+    selectionModifyGroup->addButton(expandSelection);
+    selectionModifyGroup->addButton(contractSelection);
+    selectionModifyGroup->setVisible(false);
     marqueeKind->setObjectName(QStringLiteral("marqueeKind")); lassoKind->setObjectName(QStringLiteral("lassoKind"));
     selectionMode->setObjectName(QStringLiteral("selectionMode")); selectionAntialias->setObjectName(QStringLiteral("selectionAntialias"));
     wandTolerance->setObjectName(QStringLiteral("wandTolerance")); wandSampleSize->setObjectName(QStringLiteral("wandSampleSize"));
@@ -859,9 +893,12 @@ MainWindow::MainWindow(QWidget *parent)
     auto *link = new QToolButton(transformBar); link->setObjectName(QStringLiteral("transformRatioLock")); link->setIcon(editorIcon(16)); link->setIconSize(QSize(18, 18)); link->setCheckable(true); link->setChecked(true); link->setToolTip(tr("Keep width and height proportional")); link->setFixedSize(29, 29);
     scaleField_ = numberField(transformBar, QStringLiteral("Scale"), 3200); scaleField_->setObjectName(QStringLiteral("transformScale")); scaleField_->setSuffix(QStringLiteral(" %")); scaleField_->setRange(0.1, 3200); scaleField_->setValue(100); scaleField_->setFixedWidth(105);
     rotationField_ = numberField(transformBar, QStringLiteral("°"), 360); rotationField_->setObjectName(QStringLiteral("transformRotation")); rotationField_->setRange(-360, 360); rotationField_->setFixedWidth(72); rotationField_->setToolTip(tr("Rotation"));
-    sampling_ = new QComboBox(transformBar); sampling_->setObjectName(QStringLiteral("transformSampling")); sampling_->addItems({tr("High quality"), tr("Smooth"), tr("Nearest")}); sampling_->setFixedWidth(112); sampling_->setToolTip(tr("Resampling quality"));
-    auto *flipH = new QPushButton(tr("Flip H"), transformBar); flipH->setObjectName(QStringLiteral("transformFlipHorizontal")); flipH->setFixedWidth(57); flipH->setToolTip(tr("Flip horizontally"));
-    auto *flipV = new QPushButton(tr("Flip V"), transformBar); flipV->setObjectName(QStringLiteral("transformFlipVertical")); flipV->setFixedWidth(57); flipV->setToolTip(tr("Flip vertically"));
+    sampling_ = new SegmentedControl({tr("High quality"), tr("Smooth"), tr("Nearest")}, transformBar); sampling_->setObjectName(QStringLiteral("transformSampling")); sampling_->setToolTip(tr("Resampling quality"));
+    auto *flipH = new QPushButton(tr("Flip H")); flipH->setObjectName(QStringLiteral("transformFlipHorizontal")); flipH->setFixedWidth(57); flipH->setToolTip(tr("Flip horizontally"));
+    auto *flipV = new QPushButton(tr("Flip V")); flipV->setObjectName(QStringLiteral("transformFlipVertical")); flipV->setFixedWidth(57); flipV->setToolTip(tr("Flip vertically"));
+    auto *flipGroup = new SegmentedGroup(transformBar);
+    flipGroup->addButton(flipH);
+    flipGroup->addButton(flipV);
     transformCancel_ = new QPushButton(tr("Cancel"), transformBar); transformCancel_->setObjectName(QStringLiteral("transformCancel")); transformCancel_->setEnabled(false);
     transformApply_ = new QPushButton(tr("Apply"), transformBar); transformApply_->setObjectName(QStringLiteral("primaryButton")); transformApply_->setEnabled(false);
     transformLayout->addGroup({transformTitle});
@@ -869,19 +906,29 @@ MainWindow::MainWindow(QWidget *parent)
     transformLayout->addGroup({xField_, yField_});
     transformLayout->addGroup({widthField_, link, heightField_});
     transformLayout->addGroup({scaleField_, rotationField_});
-    transformLayout->addGroup({flipH, flipV, sampling_});
-    transformLayout->addGroup({brushMode, smearMode, healingMode, shapeKind, shapeRadius, cropRatio});
+    transformLayout->addGroup({flipGroup});
+    transformLayout->addGroup({sampling_});
+    transformLayout->addGroup({brushMode, smearMode, healingMode, cropRatio});
+    transformLayout->addGroup({shapeKind});
+    transformLayout->addGroup({shapeRadius});
     transformLayout->addGroup({brushSizeField_, brushHardnessField_, brushOpacityField_});
-    transformLayout->addGroup({cloneAligned, cloneSample});
+    transformLayout->addGroup({cloneAligned});
+    transformLayout->addGroup({cloneSample});
     transformLayout->addGroup({textFont, textSize});
-    textFont->setFixedWidth(210); textSize->setFixedWidth(100); textAlignment->setFixedWidth(104);
-    transformLayout->addGroup({textBold, textItalic, textUnderline, textAlignment});
-    transformLayout->addGroup({gradientShape, gradientStyle});
+    textFont->setFixedWidth(210); textSize->setFixedWidth(100);
+    transformLayout->addGroup({textStyleGroup});
+    transformLayout->addGroup({textAlignment});
+    transformLayout->addGroup({gradientShape});
+    transformLayout->addGroup({gradientStyle});
     transformLayout->addGroup({gradientOpacityField_, gradientReverse});
-    transformLayout->addGroup({marqueeKind, lassoKind, selectionMode, selectionAntialias});
-    transformLayout->addGroup({wandTolerance, wandContiguous});
-    transformLayout->addGroup({wandSampleSize, wandSample});
-    transformLayout->addGroup({selectionAmount, expandSelection, contractSelection});
+    transformLayout->addGroup({marqueeKind});
+    transformLayout->addGroup({lassoKind});
+    transformLayout->addGroup({selectionMode});
+    transformLayout->addGroup({wandTolerance});
+    transformLayout->addGroup({selectionAntialias, wandContiguous});
+    transformLayout->addGroup({wandSampleSize});
+    transformLayout->addGroup({wandSample});
+    transformLayout->addGroup({selectionAmount, selectionModifyGroup});
     transformLayout->addGroup({textCancel, textDone, transformCancel_, transformApply_});
     textDone->setProperty("primary", true);
     textDone->setToolTip(tr("Commit text (Ctrl+Enter)")); textCancel->setToolTip(tr("Discard text edits (Esc)"));
@@ -896,14 +943,14 @@ MainWindow::MainWindow(QWidget *parent)
     textAlignment->setToolTip(tr("Paragraph alignment (applies to the whole text layer)"));
     for (int i = 0; i < transformLayout->count(); ++i) {
         QWidget *control = transformLayout->itemAt(i)->widget();
-        control->setFixedHeight(30);
+        control->setFixedHeight(28);
         if (auto *field = qobject_cast<QDoubleSpinBox *>(control)) {
             field->setAccessibleName(field->prefix().trimmed());
         }
         // Fixed widths predate the themed padding and arrows. Let Qt measure
         // the complete control, including every option or the numeric range.
         if (auto *combo = qobject_cast<QComboBox *>(control)) combo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-        if (qobject_cast<QComboBox *>(control) || qobject_cast<QAbstractSpinBox *>(control) || qobject_cast<QPushButton *>(control)) {
+        if (qobject_cast<QComboBox *>(control) || qobject_cast<QAbstractSpinBox *>(control) || qobject_cast<QPushButton *>(control) || qobject_cast<SegmentedGroup *>(control)) {
             control->setMinimumWidth(0);
             control->setMaximumWidth(QWIDGETSIZE_MAX);
             control->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
@@ -961,27 +1008,27 @@ MainWindow::MainWindow(QWidget *parent)
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
     connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushHardness_ = value / 100.0; });
     connect(brushOpacityField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushOpacity_ = value / 100.0; });
-    connect(brushMode, &QComboBox::currentIndexChanged, canvas_, [this](int index) { canvas_->setTool(index == 1 ? CanvasWidget::Tool::Eraser : CanvasWidget::Tool::Brush); });
-    connect(shapeKind, &QComboBox::currentIndexChanged, canvas_, [this](int index) { canvas_->setEllipticalShape(index == 1); });
+    connect(brushMode, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setTool(index == 1 ? CanvasWidget::Tool::Eraser : CanvasWidget::Tool::Brush); });
+    connect(shapeKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setEllipticalShape(index == 1); });
     connect(canvas_, &CanvasWidget::shapeKindChanged, shapeKind, [shapeKind](bool elliptical) { shapeKind->setCurrentIndex(elliptical ? 1 : 0); });
-    connect(marqueeKind, &QComboBox::currentIndexChanged, canvas_, [this](int index) { canvas_->setMarqueeElliptical(index == 1); });
-    connect(lassoKind, &QComboBox::currentIndexChanged, canvas_, [this](int index) { canvas_->setPolygonalLasso(index == 1); });
+    connect(marqueeKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setMarqueeElliptical(index == 1); });
+    connect(lassoKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setPolygonalLasso(index == 1); });
     connect(canvas_, &CanvasWidget::marqueeKindChanged, marqueeKind, [marqueeKind](bool elliptical) { marqueeKind->setCurrentIndex(elliptical ? 1 : 0); });
     connect(canvas_, &CanvasWidget::lassoKindChanged, lassoKind, [lassoKind](bool polygonal) { lassoKind->setCurrentIndex(polygonal ? 1 : 0); });
-    connect(selectionMode, &QComboBox::currentIndexChanged, canvas_, &CanvasWidget::setSelectionMode);
+    connect(selectionMode, &SegmentedControl::currentIndexChanged, canvas_, &CanvasWidget::setSelectionMode);
     connect(selectionAntialias, &QCheckBox::toggled, canvas_, &CanvasWidget::setSelectionAntialiased);
     connect(expandSelection, &QPushButton::clicked, this, [this, selectionAmount] { if (session_.expandSelection(selectionAmount->value())) syncDocumentViews(false); });
     connect(contractSelection, &QPushButton::clicked, this, [this, selectionAmount] { if (session_.contractSelection(selectionAmount->value())) syncDocumentViews(false); });
-    connect(cropRatio, &QComboBox::currentIndexChanged, this, [this, cropRatio](int index) {
+    connect(cropRatio, &SegmentedControl::currentIndexChanged, this, [this, cropRatio](int index) {
         const double ratios[] = {0, document_ ? double(document_->canvasSize.width()) / document_->canvasSize.height() : 0, 1, 4.0/3.0, 16.0/9.0};
         canvas_->setCropRatio(ratios[std::clamp(index, 0, 4)]);
     });
-    const std::array<QWidget *, 12> moveControls{autoSelect, showTransformControls_, xField_, yField_, widthField_, heightField_, link,
-                                                scaleField_, rotationField_, sampling_, flipH, flipV};
+    const std::array<QWidget *, 11> moveControls{autoSelect, showTransformControls_, xField_, yField_, widthField_, heightField_, link,
+                                                scaleField_, rotationField_, sampling_, flipGroup};
     connect(canvas_, &CanvasWidget::toolChanged, this, [this, transformTitle, cropRatio, smearMode, cloneAligned, cloneSample,
-            healingMode, brushMode, shapeKind, shapeRadius, textFont, textSize, textBold, textItalic, textUnderline, textAlignment, textCancel, textDone, gradientShape, gradientStyle, gradientReverse, marqueeKind, lassoKind,
-            selectionMode, selectionAntialias, wandTolerance, wandSampleSize, wandSample, wandContiguous, expandSelection,
-            contractSelection, selectionAmount, moveControls, toolButtons](CanvasWidget::Tool tool) {
+            healingMode, brushMode, shapeKind, shapeRadius, textFont, textSize, textStyleGroup, textAlignment, textCancel, textDone, gradientShape, gradientStyle, gradientReverse, marqueeKind, lassoKind,
+            selectionMode, selectionAntialias, wandTolerance, wandSampleSize, wandSample, wandContiguous, selectionModifyGroup,
+            selectionAmount, moveControls, toolButtons](CanvasWidget::Tool tool) {
         if (tool != CanvasWidget::Tool::Text)
             if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(true);
         if (tool != CanvasWidget::Tool::Move && transformOriginalDocument_) finishPersistentTransform(true);
@@ -999,7 +1046,7 @@ MainWindow::MainWindow(QWidget *parent)
         healingMode->setVisible(tool == CanvasWidget::Tool::Healing);
         shapeKind->setVisible(tool == CanvasWidget::Tool::Shape); shapeRadius->setVisible(tool == CanvasWidget::Tool::Shape && shapeKind->currentIndex() == 0);
         const bool text = tool == CanvasWidget::Tool::Text;
-        textFont->setVisible(text); textSize->setVisible(text); textBold->setVisible(text); textItalic->setVisible(text); textUnderline->setVisible(text); textAlignment->setVisible(text);
+        textFont->setVisible(text); textSize->setVisible(text); textStyleGroup->setVisible(text); textAlignment->setVisible(text);
         textCancel->setVisible(text); textDone->setVisible(text);
         transformCancel_->setVisible(move || tool == CanvasWidget::Tool::Crop);
         transformApply_->setVisible(move || tool == CanvasWidget::Tool::Crop);
@@ -1010,7 +1057,7 @@ MainWindow::MainWindow(QWidget *parent)
                                                                              || (tool == CanvasWidget::Tool::Marquee && marqueeKind->currentIndex() == 1));
         wandTolerance->setVisible(tool == CanvasWidget::Tool::Wand); wandSampleSize->setVisible(tool == CanvasWidget::Tool::Wand);
         wandSample->setVisible(tool == CanvasWidget::Tool::Wand); wandContiguous->setVisible(tool == CanvasWidget::Tool::Wand);
-        expandSelection->setVisible(selection); contractSelection->setVisible(selection); selectionAmount->setVisible(selection);
+        selectionModifyGroup->setVisible(selection); selectionAmount->setVisible(selection);
         if (brush) transformTitle->setText(tool == CanvasWidget::Tool::Healing ? tr("Spot Healing") : tool == CanvasWidget::Tool::Clone ? tr("Clone Stamp")
             : tool == CanvasWidget::Tool::Blur ? tr("Smear") : tool == CanvasWidget::Tool::Eraser ? tr("Eraser") : tr("Brush"));
         else if (selection) transformTitle->setText(tool == CanvasWidget::Tool::Marquee ? tr("Marquee") : tool == CanvasWidget::Tool::Lasso ? tr("Lasso") : tr("Magic Wand"));
@@ -1029,10 +1076,10 @@ MainWindow::MainWindow(QWidget *parent)
             : tool == CanvasWidget::Tool::Hand ? 13 : tool == CanvasWidget::Tool::Zoom ? 14 : -1;
         if (selected >= 0) toolButtons.at(selected)->setChecked(true);
     });
-    connect(marqueeKind, &QComboBox::currentIndexChanged, this, [this, selectionAntialias, marqueeKind](int) {
+    connect(marqueeKind, &SegmentedControl::currentIndexChanged, this, [this, selectionAntialias, marqueeKind](int) {
         selectionAntialias->setVisible(canvas_->tool() == CanvasWidget::Tool::Marquee && marqueeKind->currentIndex() == 1);
     });
-    connect(shapeKind, &QComboBox::currentIndexChanged, this, [this, shapeRadius, shapeKind](int) {
+    connect(shapeKind, &SegmentedControl::currentIndexChanged, this, [this, shapeRadius, shapeKind](int) {
         shapeRadius->setVisible(canvas_->tool() == CanvasWidget::Tool::Shape && shapeKind->currentIndex() == 0);
     });
     canvasStack_ = new QStackedWidget(workspace);
@@ -1300,7 +1347,7 @@ MainWindow::MainWindow(QWidget *parent)
         }
         session_.redrawSelectedShapes(); session_.endEdit(); updateInspector(); canvas_->invalidateDocument(); refreshTitle();
     });
-    connect(sampling_, &QComboBox::currentIndexChanged, this, [this](int index) {
+    connect(sampling_, &SegmentedControl::currentIndexChanged, this, [this](int index) {
         Layer *layer = session_.activeLayer(); if (!layer || sampling_->signalsBlocked()) return;
         beginPersistentTransform(QStringLiteral("Transform Layer"));
         const Sampling modes[] = {Sampling::HighQuality, Sampling::Smooth, Sampling::Nearest};
@@ -1413,8 +1460,8 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(canvas_, &CanvasWidget::gradientCommitRequested, this, [this] { finishGradient(true); });
     connect(canvas_, &CanvasWidget::gradientCancelRequested, this, [this] { finishGradient(false); });
-    connect(gradientShape, &QComboBox::currentIndexChanged, canvas_, &CanvasWidget::refreshPendingGradient);
-    connect(gradientStyle, &QComboBox::currentIndexChanged, canvas_, &CanvasWidget::refreshPendingGradient);
+    connect(gradientShape, &SegmentedControl::currentIndexChanged, canvas_, &CanvasWidget::refreshPendingGradient);
+    connect(gradientStyle, &SegmentedControl::currentIndexChanged, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(gradientReverse, &QCheckBox::toggled, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(gradientOpacityField_, &QDoubleSpinBox::valueChanged, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(canvas_, &CanvasWidget::shapeRequested, this, [this](const QRectF &rect, bool ellipse, double cornerRadius) {
@@ -1436,7 +1483,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(textBold, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
     connect(textItalic, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
     connect(textUnderline, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
-    connect(textAlignment, &QComboBox::currentIndexChanged, this, [applyInlineTextFormat](int) { applyInlineTextFormat(); });
+    connect(textAlignment, &SegmentedControl::currentIndexChanged, this, [applyInlineTextFormat](int) { applyInlineTextFormat(); });
     const auto beginInlineText = [this, textFont, textSize, textBold, textItalic, textUnderline, textAlignment, textDone, textCancel, applyInlineTextFormat]
         (const QRectF &box, const QString &initialText, bool areaText, const std::optional<QUuid> &layerId, const QColor &color) {
         if (auto *existing = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) existing->finish(true);
@@ -3278,14 +3325,14 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
 
 void MainWindow::showAbout()
 {
-    showMessage(this, tr("About CompositorLX"), tr("CompositorLX 0.1"),
+    showMessage(this, tr("About CompositorLX"), tr("CompositorLX 0.2.0"),
                 tr("Linux port of Compositor · Qt 6 Widgets + C++20"));
 }
 
 void MainWindow::checkForUpdates()
 {
     auto *network = new QNetworkAccessManager(this);
-    QNetworkRequest request(QUrl(QStringLiteral("https://api.github.com/repos/robbietilton/Compositor/releases/latest")));
+    QNetworkRequest request(QUrl(QStringLiteral("https://api.github.com/repos/ClaudiuJitea/compositorLX/releases/latest")));
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("CompositorLX/%1").arg(QCoreApplication::applicationVersion()));
     QNetworkReply *reply = network->get(request);
     connect(reply, &QNetworkReply::finished, this, [this, reply, network] {

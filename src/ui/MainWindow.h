@@ -29,6 +29,7 @@ namespace compositor {
 class CanvasWidget;
 class Document;
 class LayerListModel;
+class SegmentedControl;
 
 class MainWindow final : public QMainWindow {
 public:
@@ -113,7 +114,7 @@ private:
     QLabel *foregroundSwatch_ = nullptr;
     QLabel *backgroundSwatch_ = nullptr;
     QComboBox *blendMode_ = nullptr;
-    QComboBox *sampling_ = nullptr;
+    SegmentedControl *sampling_ = nullptr;
     QCheckBox *showTransformControls_ = nullptr;
     QSlider *opacitySlider_ = nullptr;
     QDoubleSpinBox *xField_ = nullptr;

@@ -43,24 +43,32 @@ private:
         const auto m = contentsMargins();
         const int left = rect.x() + m.left(), right = rect.x() + rect.width() - m.right();
         int x = left, y = rect.y() + m.top(), rowHeight = 0;
+        constexpr int itemSpacing = 6;
+        constexpr int groupSpacing = 20;
+        constexpr int controlHeight = 28;
         for (int i = 0; i < items_.size();) {
             const int start = i, group = items_[i].group;
             int groupWidth = 0;
-            for (; i < items_.size() && items_[i].group == group; ++i)
-                if (!items_[i].item->isEmpty()) groupWidth += items_[i].item->sizeHint().width() + 5;
-            if (!groupWidth) continue;
-            groupWidth -= 5;
+            int visibleCount = 0;
+            for (; i < items_.size() && items_[i].group == group; ++i) {
+                if (!items_[i].item->isEmpty()) {
+                    groupWidth += items_[i].item->sizeHint().width();
+                    ++visibleCount;
+                }
+            }
+            if (!visibleCount) continue;
+            groupWidth += (visibleCount - 1) * itemSpacing;
             if (x > left && x + groupWidth > right) { x = left; y += rowHeight + 7; rowHeight = 0; }
             for (int j = start; j < i; ++j) {
                 auto *item = items_[j].item;
                 if (item->isEmpty()) continue;
                 const QSize size = item->sizeHint();
                 if (x > left && x + size.width() > right) { x = left; y += rowHeight + 7; rowHeight = 0; }
-                if (apply) item->setGeometry(QRect(QPoint(x, y), size));
-                x += size.width() + 5;
-                rowHeight = std::max(rowHeight, size.height());
+                if (apply) item->setGeometry(QRect(x, y, size.width(), controlHeight));
+                x += size.width() + itemSpacing;
+                rowHeight = std::max(rowHeight, controlHeight);
             }
-            x += 13;
+            x += (groupSpacing - itemSpacing);
         }
         return y - rect.y() + rowHeight + m.bottom();
     }
