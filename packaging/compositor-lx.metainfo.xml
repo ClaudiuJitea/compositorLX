@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.compositor.CompositorLX</id>
+  <name>CompositorLX</name>
+  <summary>Layer-based raster image compositor</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>CompositorLX is the native Qt Linux edition of Compositor. It edits layered images with masks, selections, adjustments, painting, transforms, filters, and non-destructive project storage.</p>
+  </description>
+  <launchable type="desktop-id">compositor-lx.desktop</launchable>
+  <url type="homepage">https://github.com/ClaudiuJitea/compositorLX</url>
+  <developer id="com.compositor"><name>Compositor maintainers</name></developer>
+  <content_rating type="oars-1.1" />
+  <provides><binary>compositor-lx</binary></provides>
+  <categories><category>Graphics</category></categories>
+</component>

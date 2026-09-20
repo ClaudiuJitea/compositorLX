@@ -1,0 +1,9 @@
+/build/
+/build-*/
+/.package-tools/
+/artifacts/
+/.cache/
+compile_commands.json
+.DS_Store
+*.user
+CMakeUserPresets.json
