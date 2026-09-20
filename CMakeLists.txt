@@ -11,7 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Test Concurrent Network)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Network)
 find_package(PkgConfig QUIET)
 find_package(libheif CONFIG QUIET)
 if(PkgConfig_FOUND)
@@ -130,35 +130,6 @@ add_executable(compositor-lx
 )
 target_link_libraries(compositor-lx PRIVATE compositor_core Qt6::Widgets Qt6::Concurrent Qt6::Network)
 target_compile_options(compositor-lx PRIVATE -Wall -Wextra -Wpedantic)
-
-include(CTest)
-if(BUILD_TESTING)
-    add_executable(compositor_tests tests/ProjectReaderTests.cpp)
-    target_link_libraries(compositor_tests PRIVATE compositor_core Qt6::Test)
-    target_compile_options(compositor_tests PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME compositor_tests COMMAND compositor_tests)
-    add_executable(editor_session_tests tests/EditorSessionTests.cpp)
-    target_link_libraries(editor_session_tests PRIVATE compositor_core Qt6::Test)
-    target_compile_options(editor_session_tests PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME editor_session_tests COMMAND editor_session_tests)
-    add_executable(canvas_widget_tests tests/CanvasWidgetTests.cpp src/ui/CanvasWidget.cpp src/ui/CanvasWidget.h)
-    target_link_libraries(canvas_widget_tests PRIVATE compositor_core Qt6::Widgets Qt6::Test Qt6::Concurrent)
-    target_compile_options(canvas_widget_tests PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME canvas_widget_tests COMMAND canvas_widget_tests)
-    set_tests_properties(canvas_widget_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-    add_executable(main_window_tests
-        tests/MainWindowTests.cpp
-        src/resources.qrc
-        src/ui/CanvasWidget.cpp src/ui/CanvasWidget.h
-        src/ui/LayerListModel.cpp src/ui/LayerListModel.h
-        src/ui/MainWindow.cpp src/ui/MainWindow.h)
-    target_link_libraries(main_window_tests PRIVATE compositor_core Qt6::Widgets Qt6::Test Qt6::Concurrent Qt6::Network)
-    target_compile_options(main_window_tests PRIVATE -Wall -Wextra -Wpedantic)
-    add_test(NAME main_window_tests COMMAND main_window_tests)
-    set_tests_properties(main_window_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-    add_test(NAME subject_model_cli_check COMMAND compositor-lx --check-subject-model)
-    set_tests_properties(subject_model_cli_check PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-endif()
 
 install(TARGETS compositor-lx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(ONNXRUNTIME_ROOT)

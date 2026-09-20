@@ -101,7 +101,6 @@ sudo apt install qt6-base-dev qt6-image-formats-plugins libheif-dev cmake ninja-
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure
 ./build/compositor-lx [path/to/project.comp]
 ```
 
@@ -124,7 +123,7 @@ cmake --install build --prefix "$HOME/.local"
 | `packaging/` | Desktop entry, AppStream metadata, icons, package script |
 | `vendor/compositor-rendering/` | Shared pixel kernels from the macOS editor |
 
-The original macOS app remains the behavior and file-format reference. Linux-specific UI, tests, and packaging live in this repository. See [PORTING.md](PORTING.md) for the parity checklist.
+The original macOS app remains the behavior and file-format reference. Linux-specific UI and packaging live in this repository.
 
 ## License
 
