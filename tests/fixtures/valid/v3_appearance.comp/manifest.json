@@ -1,0 +1,34 @@
+{
+  "activeLayerID": "33333333-3333-3333-3333-333333333333",
+  "colorSpace": "sRGB",
+  "documentID": "00000003-0000-0000-0000-000000000003",
+  "format": "com.compositor.project",
+  "height": 64,
+  "layers": [
+    {
+      "blendMode": "Multiply",
+      "id": "33333333-3333-3333-3333-333333333333",
+      "imageFile": "33333333-3333-3333-3333-333333333333.png",
+      "isVisible": true,
+      "name": "BlendLayer",
+      "opacity": 0.75,
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 3,
+  "width": 64
+}

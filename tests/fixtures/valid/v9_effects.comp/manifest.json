@@ -1,0 +1,106 @@
+{
+  "activeLayerID": "DDDDDDDD-1111-2222-3333-000000000002",
+  "colorSpace": "sRGB",
+  "documentID": "0000000D-0000-0000-0000-00000000000D",
+  "format": "com.compositor.project",
+  "height": 64,
+  "layers": [
+    {
+      "id": "DDDDDDDD-1111-2222-3333-000000000001",
+      "imageFile": "DDDDDDDD-1111-2222-3333-000000000001.png",
+      "isVisible": true,
+      "name": "Background",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    },
+    {
+      "effects": {
+        "colorOverlay": {
+          "blue": 0.4,
+          "enabled": true,
+          "green": 0.1,
+          "opacity": 0.65,
+          "red": 0.9
+        },
+        "innerGlow": {
+          "blue": 0.5,
+          "enabled": true,
+          "green": 1.0,
+          "opacity": 0.7,
+          "red": 0.5,
+          "size": 8.0
+        },
+        "innerShadow": {
+          "angle": 135.0,
+          "blue": 0.05,
+          "blur": 4.0,
+          "distance": 6.0,
+          "enabled": true,
+          "green": 0.05,
+          "opacity": 0.5,
+          "red": 0.05
+        },
+        "outerGlow": {
+          "blue": 0.5,
+          "enabled": true,
+          "green": 1.0,
+          "opacity": 0.8,
+          "red": 1.0,
+          "size": 15.0
+        },
+        "shadow": {
+          "angle": 45.0,
+          "blue": 0.3,
+          "blur": 10.0,
+          "distance": 15.0,
+          "enabled": true,
+          "green": 0.2,
+          "opacity": 0.75,
+          "red": 0.2
+        },
+        "stroke": {
+          "blue": 0.2,
+          "enabled": true,
+          "green": 0.8,
+          "inside": false,
+          "opacity": 0.9,
+          "red": 0.1,
+          "size": 4.0
+        }
+      },
+      "id": "DDDDDDDD-1111-2222-3333-000000000002",
+      "imageFile": "DDDDDDDD-1111-2222-3333-000000000002.png",
+      "isVisible": true,
+      "name": "EffectsLayer",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 9,
+  "width": 64
+}

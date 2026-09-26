@@ -1,0 +1,67 @@
+{
+  "activeLayerID": "88888888-8888-8888-8888-888888888882",
+  "colorSpace": "sRGB",
+  "documentID": "00000008-0000-0000-0000-000000000008",
+  "format": "com.compositor.project",
+  "guides": [
+    {
+      "axis": "horizontal",
+      "id": "88888888-AAAA-1111-2222-333333333333",
+      "position": 32.0
+    },
+    {
+      "axis": "vertical",
+      "id": "88888888-BBBB-1111-2222-333333333333",
+      "position": 16.0
+    }
+  ],
+  "height": 64,
+  "layers": [
+    {
+      "blendMode": "Normal",
+      "id": "88888888-8888-8888-8888-888888888881",
+      "isGroup": true,
+      "isVisible": true,
+      "name": "DimmedFolder",
+      "opacity": 0.4,
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    },
+    {
+      "id": "88888888-8888-8888-8888-888888888882",
+      "imageFile": "88888888-8888-8888-8888-888888888882.png",
+      "isVisible": true,
+      "name": "Child",
+      "parentID": "88888888-8888-8888-8888-888888888881",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 8,
+  "width": 64
+}

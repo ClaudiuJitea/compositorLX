@@ -4,6 +4,7 @@
 #include "io/ProjectReader.h"
 #include "io/ProjectWriter.h"
 #include "io/ImageImporter.h"
+#include "io/PSDReader.h"
 #include "rendering/LayerRenderer.h"
 #include "rendering/TextLayout.h"
 #include "rendering/RasterOperations.h"
@@ -13,6 +14,17 @@
 #include "ui/ToolOptionsLayout.h"
 #include "ui/EditorIcons.h"
 #include "ui/SegmentedControl.h"
+#include "ui/EffectsDialog.h"
+#include "ui/CameraRawDialog.h"
+#include "ui/RawDevelopDialog.h"
+#include "io/RawImporter.h"
+#include "io/SvgImporter.h"
+#include "ui/CanvasRulerWidget.h"
+#include "ui/TrimDialog.h"
+#include "ui/NumericScrub.h"
+#include "ui/ShortcutManager.h"
+#include "ui/KeyboardShortcutsDialog.h"
+#include "ui/InlineTextEditor.h"
 
 #include <QAction>
 #include <QApplication>
@@ -38,8 +50,10 @@
 #include <QFileInfo>
 #include <QEventLoop>
 #include <QFutureWatcher>
+#include <QtConcurrent>
 #include <QHBoxLayout>
 #include <QFormLayout>
+#include <QListWidget>
 #include <QFontComboBox>
 #include <QImageReader>
 #include <QInputDialog>
@@ -53,6 +67,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QMessageBox>
+#include <QDrag>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QImageWriter>
@@ -91,6 +106,11 @@
 #include <array>
 #include <cmath>
 #include <functional>
+
+static inline void initCompositorResources()
+{
+    Q_INIT_RESOURCE(resources);
+}
 
 namespace compositor {
 
@@ -167,117 +187,6 @@ protected:
     }
 };
 
-class InlineTextEditor final : public QTextEdit {
-public:
-    explicit InlineTextEditor(QWidget *parent) : QTextEdit(parent)
-    {
-        setObjectName(QStringLiteral("inlineTextEditor"));
-        setAcceptRichText(false);
-        setFrameShape(QFrame::NoFrame);
-        setAutoFillBackground(false); viewport()->setAutoFillBackground(false);
-        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        parent->installEventFilter(this);
-        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        auto *grip = new QLabel(QStringLiteral("⌟"), this);
-        grip->setObjectName(QStringLiteral("inlineTextGrip"));
-        grip->setAlignment(Qt::AlignCenter);
-        grip->setAttribute(Qt::WA_TransparentForMouseEvents);
-        grip_ = grip;
-    }
-    std::function<void(bool)> finished;
-    QRectF canvasBox;
-    bool areaText = true;
-    void syncCanvasGeometry()
-    {
-        if (canvasBox.isEmpty() || finishing_) return;
-        auto *canvas = static_cast<CanvasWidget *>(parentWidget());
-        const qreal zoom = canvas->zoom();
-        const QRect geometry = canvas->widgetRectForDocumentRect(canvasBox).toAlignedRect();
-        const QMargins margins(qRound(4 * zoom), qRound(3 * zoom), qRound(4 * zoom), qRound(3 * zoom));
-        if (viewportMargins() != margins) setViewportMargins(margins);
-        setGeometry(geometry);
-        const int wrapWidth = std::max(1, qRound((canvasBox.width() - 8) * zoom));
-        if (areaText && lineWrapColumnOrWidth() != wrapWidth) setLineWrapColumnOrWidth(wrapWidth);
-    }
-    void growPointText()
-    {
-        if (areaText || wasResized_ || finishing_) return;
-        const qreal zoom = static_cast<CanvasWidget *>(parentWidget())->zoom();
-        const QSizeF content = document()->size();
-        canvasBox.setSize(QSizeF(std::max(40.0, document()->idealWidth() / zoom + 8),
-                                std::max(20.0, content.height() / zoom + 6)));
-        syncCanvasGeometry();
-    }
-    [[nodiscard]] bool wasResized() const { return wasResized_; }
-    void finish(bool commit)
-    {
-        if (finishing_) return;
-        finishing_ = true;
-        // A replacement editor may be created before deferred deletion runs.
-        setObjectName(QString()); hide();
-        if (parentWidget()) parentWidget()->setFocus(Qt::OtherFocusReason);
-        if (finished) finished(commit);
-        deleteLater();
-    }
-protected:
-    bool eventFilter(QObject *watched, QEvent *event) override
-    {
-        if (watched == parentWidget() && (event->type() == QEvent::Resize || event->type() == QEvent::Paint)) syncCanvasGeometry();
-        return QTextEdit::eventFilter(watched, event);
-    }
-    void keyPressEvent(QKeyEvent *event) override
-    {
-        if (event->key() == Qt::Key_Escape) { finish(false); event->accept(); return; }
-        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) && event->modifiers().testFlag(Qt::ControlModifier)) { finish(true); event->accept(); return; }
-        QTextEdit::keyPressEvent(event);
-    }
-    void mousePressEvent(QMouseEvent *event) override
-    {
-        if (QRect(width() - 18, height() - 18, 18, 18).contains(event->position().toPoint())) {
-            resizing_ = true; resizeStart_ = event->globalPosition(); originalSize_ = size(); setCursor(Qt::SizeFDiagCursor); event->accept(); return;
-        }
-        QTextEdit::mousePressEvent(event);
-    }
-    void mouseMoveEvent(QMouseEvent *event) override
-    {
-        if (resizing_) {
-            const QPointF delta = event->globalPosition() - resizeStart_;
-            resize(std::max(120, originalSize_.width() + qRound(delta.x())), std::max(48, originalSize_.height() + qRound(delta.y())));
-            event->accept(); return;
-        }
-        setCursor(QRect(width() - 18, height() - 18, 18, 18).contains(event->position().toPoint()) ? Qt::SizeFDiagCursor : Qt::IBeamCursor);
-        QTextEdit::mouseMoveEvent(event);
-    }
-    void mouseReleaseEvent(QMouseEvent *event) override
-    {
-        if (resizing_) {
-            resizing_ = false; wasResized_ = true; areaText = true;
-            canvasBox.setSize(static_cast<CanvasWidget *>(parentWidget())->documentRectForWidgetRect(geometry()).size());
-            setWordWrapMode(QTextOption::WordWrap); setLineWrapMode(QTextEdit::FixedPixelWidth); syncCanvasGeometry();
-            setCursor(Qt::IBeamCursor); event->accept(); return;
-        }
-        QTextEdit::mouseReleaseEvent(event);
-    }
-    void resizeEvent(QResizeEvent *event) override
-    {
-        QTextEdit::resizeEvent(event);
-        if (grip_) grip_->setGeometry(width() - 18, height() - 18, 16, 16);
-    }
-    void paintEvent(QPaintEvent *event) override
-    {
-        QTextEdit::paintEvent(event);
-        QPainter painter(viewport()); painter.setPen(QPen(QColor(94, 167, 242), 1));
-        painter.drawRect(viewport()->rect().adjusted(0, 0, -1, -1));
-    }
-private:
-    QLabel *grip_ = nullptr;
-    bool resizing_ = false;
-    bool wasResized_ = false;
-    bool finishing_ = false;
-    QPointF resizeStart_;
-    QSize originalSize_;
-};
-
 int runFloatingDialog(QDialog &dialog)
 {
     MainWindow *window = dynamic_cast<MainWindow *>(dialog.parentWidget());
@@ -301,11 +210,20 @@ int runFloatingDialog(QDialog &dialog)
     return dialog.result();
 }
 
+static std::function<std::optional<QMessageBox::StandardButton>(const QString &title, const QString &text)> sMessageDialogHook = nullptr;
+
 QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, const QString &text,
                                         const QString &detail = QString(),
                                         QMessageBox::StandardButtons buttons = QMessageBox::Ok,
                                         QMessageBox::StandardButton defaultButton = QMessageBox::NoButton)
 {
+    if (sMessageDialogHook) {
+        auto simulated = sMessageDialogHook(title, text);
+        if (simulated.has_value()) {
+            return *simulated;
+        }
+    }
+
     QDialog dialog(parent);
     dialog.setObjectName(QStringLiteral("modernMessageDialog"));
     dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
@@ -416,6 +334,37 @@ QWidget *sliderField(QSpinBox *field)
     QObject::connect(slider, &QSlider::valueChanged, field, [field](int position) { field->setValue(qRound(field->minimum() + position / 1000.0 * (field->maximum() - field->minimum()))); });
     QObject::connect(field, &QSpinBox::valueChanged, slider, [slider, positionFor](int value) { const QSignalBlocker blocker(slider); slider->setValue(positionFor(value)); });
     layout->addWidget(slider, 1); layout->addWidget(field); return container;
+}
+
+ScrubLabel *addScrubRow(QFormLayout *form, const QString &text, QDoubleSpinBox *field, bool logarithmic = false, bool includeSlider = true)
+{
+    const double sens = field->decimals() > 0 ? std::pow(10.0, -field->decimals()) : 1.0;
+    const double stepVal = sens;
+    field->setSingleStep(sens);
+    auto *label = new ScrubLabel(text, field, sens, stepVal, form->parentWidget());
+    if (!field->objectName().isEmpty()) {
+        label->setObjectName(field->objectName() + QStringLiteral("Label"));
+    }
+    if (includeSlider) {
+        form->addRow(label, sliderField(field, logarithmic));
+    } else {
+        form->addRow(label, field);
+    }
+    return label;
+}
+
+ScrubLabel *addScrubRow(QFormLayout *form, const QString &text, QSpinBox *field, bool includeSlider = true)
+{
+    auto *label = new ScrubLabel(text, field, 1.0, 1.0, form->parentWidget());
+    if (!field->objectName().isEmpty()) {
+        label->setObjectName(field->objectName() + QStringLiteral("Label"));
+    }
+    if (includeSlider) {
+        form->addRow(label, sliderField(field));
+    } else {
+        form->addRow(label, field);
+    }
+    return label;
 }
 
 class HueSpectrumWidget final : public QWidget {
@@ -634,7 +583,13 @@ class LayerDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
-    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const override { return {220, 54}; }
+    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &index) const override
+    {
+        if (index.data(LayerListModel::IsEffectRole).toBool()) {
+            return {220, 24};
+        }
+        return {220, 54};
+    }
 
     QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &, const QModelIndex &) const override
     {
@@ -656,6 +611,28 @@ public:
 
     void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
+        if (index.data(LayerListModel::IsEffectRole).toBool()) {
+            p->save();
+            const QRect r = option.rect;
+            if (option.state.testFlag(QStyle::State_Selected)) p->fillRect(r.adjusted(2, 1, -2, -1), QColor(64, 64, 64));
+            const bool checked = index.data(Qt::CheckStateRole).toInt() == Qt::Checked;
+            const int depth = index.data(Qt::UserRole + 1).toInt();
+            const int indent = std::min(depth, 8) * 18;
+            const int eyeX = r.left() + 38 + indent;
+
+            p->setRenderHint(QPainter::Antialiasing);
+            p->setPen(QPen(checked ? QColor(189, 195, 201) : QColor(102, 106, 111), 1.4));
+            p->drawEllipse(QRectF(eyeX, r.center().y() - 4, 15, 8));
+            if (checked) { p->setBrush(QColor(189, 195, 201)); p->drawEllipse(QPointF(eyeX + 7.5, r.center().y()), 2.1, 2.1); }
+
+            const int textX = eyeX + 24;
+            p->setPen(checked ? QColor(220, 222, 226) : QColor(140, 143, 148));
+            QFont font = option.font; font.setPixelSize(11); p->setFont(font);
+            p->drawText(QRect(textX, r.top(), r.right() - textX - 8, r.height()), Qt::AlignVCenter | Qt::AlignLeft, index.data().toString());
+            p->restore();
+            return;
+        }
+
         p->save();
         const QRect r = option.rect;
         if (option.state.testFlag(QStyle::State_Selected)) p->fillRect(r.adjusted(2, 1, -2, -1), QColor(64, 64, 64));
@@ -692,12 +669,23 @@ public:
         }
 
         const int textX = textStart;
+        const bool hasEffects = index.data(LayerListModel::HasEffectsRole).toBool();
+        const int textRight = hasEffects ? r.right() - 36 : r.right() - 7;
         p->setPen(QColor(235, 237, 240));
         QFont mainFont = option.font; mainFont.setPixelSize(11); p->setFont(mainFont);
-        p->drawText(QRect(textX, r.top() + 8, r.right() - textX - 7, 21), Qt::AlignVCenter | Qt::AlignLeft, index.data().toString());
+        p->drawText(QRect(textX, r.top() + 8, textRight - textX, 21), Qt::AlignVCenter | Qt::AlignLeft, index.data().toString());
         p->setPen(QColor(145, 148, 153));
         QFont smallFont = option.font; smallFont.setPixelSize(10); p->setFont(smallFont);
-        p->drawText(QRect(textX, r.top() + 28, r.right() - textX - 7, 17), Qt::AlignVCenter | Qt::AlignLeft, index.data(Qt::UserRole).toString());
+        p->drawText(QRect(textX, r.top() + 28, textRight - textX, 17), Qt::AlignVCenter | Qt::AlignLeft, index.data(Qt::UserRole).toString());
+
+        if (hasEffects) {
+            const bool expanded = index.data(LayerListModel::EffectsExpandedRole).toBool();
+            p->setPen(QColor(160, 164, 170));
+            QFont fxFont = option.font; fxFont.setPixelSize(10); p->setFont(fxFont);
+            p->drawText(QRect(r.right() - 34, r.top() + 18, 30, 20), Qt::AlignCenter,
+                        expanded ? QStringLiteral("fx ⌄") : QStringLiteral("fx ›"));
+        }
+
         p->restore();
     }
 };
@@ -716,47 +704,115 @@ QToolButton *toolButton(QWidget *parent, int icon, const QString &tip, bool sele
     return button;
 }
 
-QDoubleSpinBox *numberField(QWidget *parent, const QString &prefix, double maximum = 1000000.0)
+QDoubleSpinBox *numberField(QWidget *parent, const QString &label, double maximum = 1000000.0,
+                            ScrubLabel **outLabel = nullptr, double sensitivity = 1.0,
+                            std::optional<double> step = std::nullopt)
 {
     auto *field = new QDoubleSpinBox(parent);
-    field->setPrefix(prefix + QStringLiteral("  "));
+    if (!outLabel) {
+        field->setPrefix(label + QStringLiteral("  "));
+    }
     field->setRange(-maximum, maximum);
     field->setDecimals(0);
     field->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    field->setMinimumWidth(84);
+    field->setMinimumWidth(outLabel ? 54 : 84);
     field->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     field->setKeyboardTracking(false);
+    if (outLabel) {
+        field->setAccessibleName(label);
+        *outLabel = new ScrubLabel(label, field, sensitivity, step, parent);
+    }
     return field;
 }
 
 QJsonObject levelsAdjustment(const LevelsSettings &settings)
 {
-    QJsonArray ranges; for (const LevelRange &range : settings.ranges) ranges.append(QJsonObject{{QStringLiteral("black"), range.black}, {QStringLiteral("gamma"), range.gamma},
-        {QStringLiteral("white"), range.white}, {QStringLiteral("outputBlack"), range.outputBlack}, {QStringLiteral("outputWhite"), range.outputWhite}});
-    return {{QStringLiteral("kind"), QStringLiteral("Levels")}, {QStringLiteral("levels"), QJsonObject{{QStringLiteral("channel"), QStringLiteral("RGB")}, {QStringLiteral("ranges"), ranges}}}};
+    return RasterOperations::levelsSettingsToJson(settings);
 }
 
 QJsonObject curvesAdjustment(const CurvesSettings &settings)
 {
-    QJsonArray channels; for (const auto &curve : settings.channels) { QJsonArray points; for (const CurvePoint &point : curve) points.append(QJsonObject{{QStringLiteral("x"), point.x}, {QStringLiteral("y"), point.y}}); channels.append(points); }
-    return {{QStringLiteral("kind"), QStringLiteral("Curves")}, {QStringLiteral("curves"), QJsonObject{{QStringLiteral("channel"), QStringLiteral("RGB")}, {QStringLiteral("channels"), channels}}}};
+    return RasterOperations::curvesSettingsToJson(settings);
 }
 
 QJsonObject hueAdjustment(const HueSaturationSettings &settings)
 {
-    static const QStringList names{QStringLiteral("Master"),QStringLiteral("Reds"),QStringLiteral("Yellows"),QStringLiteral("Greens"),QStringLiteral("Cyans"),QStringLiteral("Blues"),QStringLiteral("Magentas")};
-    QJsonArray adjustments,bands;
-    for(int i=0;i<names.size();++i){const RangeAdjustment &a=settings.adjustments[size_t(i)];adjustments.append(names[i]);adjustments.append(QJsonObject{{QStringLiteral("hue"),a.hue},{QStringLiteral("saturation"),a.saturation},{QStringLiteral("lightness"),a.lightness}});const HueBand &b=settings.bands[size_t(i)];bands.append(names[i]);bands.append(QJsonObject{{QStringLiteral("falloffStart"),b.falloffStart},{QStringLiteral("rangeStart"),b.rangeStart},{QStringLiteral("rangeEnd"),b.rangeEnd},{QStringLiteral("falloffEnd"),b.falloffEnd}});}
-    const QJsonObject hsv{{QStringLiteral("range"),names.at(int(settings.range))},{QStringLiteral("colorize"),settings.colorize},{QStringLiteral("invertRange"),settings.invertRange},{QStringLiteral("adjustments"),adjustments},{QStringLiteral("bands"),bands}};
-    const RangeAdjustment &master=settings.adjustments[size_t(ColorRange::Master)];
-    return {{QStringLiteral("kind"),QStringLiteral("Hue/Saturation")},{QStringLiteral("hue"),master.hue},{QStringLiteral("saturation"),master.saturation},{QStringLiteral("lightness"),master.lightness},{QStringLiteral("colorize"),settings.colorize},{QStringLiteral("hsvSettings"),hsv}};
+    return RasterOperations::hueSaturationSettingsToJson(settings);
 }
 
+class PSDConversionDialog final : public QDialog {
+public:
+    PSDConversionDialog(const QString &fileName, const QVector<PSDConversion> &conversions, QWidget *parent = nullptr)
+        : QDialog(parent)
+    {
+        setWindowTitle(QCoreApplication::translate("MainWindow", "Open “%1”?").arg(fileName));
+        setMinimumSize(520, 360);
+        auto *layout = new QVBoxLayout(this);
+        layout->setSpacing(12);
+
+        auto *title = new QLabel(QCoreApplication::translate("MainWindow", "Open “%1”?").arg(fileName), this);
+        QFont f = title->font();
+        f.setBold(true);
+        f.setPointSize(f.pointSize() + 2);
+        title->setFont(f);
+        layout->addWidget(title);
+
+        auto *subtitle = new QLabel(QCoreApplication::translate("MainWindow", "Compositor will convert these Photoshop features. Nothing is applied until you continue."), this);
+        subtitle->setStyleSheet(QStringLiteral("color: #999;"));
+        subtitle->setWordWrap(true);
+        layout->addWidget(subtitle);
+
+        auto *list = new QListWidget(this);
+        list->setAlternatingRowColors(true);
+        for (const auto &conv : conversions) {
+            auto *item = new QListWidgetItem(list);
+            auto *widget = new QWidget(list);
+            auto *wLayout = new QVBoxLayout(widget);
+            wLayout->setContentsMargins(6, 4, 6, 4);
+            wLayout->setSpacing(2);
+
+            auto *layerLabel = new QLabel(conv.layerName, widget);
+            QFont lf = layerLabel->font();
+            lf.setBold(true);
+            layerLabel->setFont(lf);
+
+            auto *msgLabel = new QLabel(conv.message, widget);
+            msgLabel->setWordWrap(true);
+
+            wLayout->addWidget(layerLabel);
+            wLayout->addWidget(msgLabel);
+            item->setSizeHint(widget->sizeHint());
+            list->setItemWidget(item, widget);
+        }
+        layout->addWidget(list, 1);
+
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
+        auto *importBtn = buttons->addButton(QCoreApplication::translate("MainWindow", "Import"), QDialogButtonBox::AcceptRole);
+        importBtn->setDefault(true);
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        layout->addWidget(buttons);
+    }
+};
+
 } // namespace
+
+void restoreLayer(Document *doc, EditorSession &session, const QUuid &target, const Layer &original)
+{
+    Q_UNUSED(doc);
+    session.rollbackLayer(target, original);
+}
+
+void MainWindow::setMessageDialogHook(std::function<std::optional<QMessageBox::StandardButton>(const QString &title, const QString &text)> hook)
+{
+    sMessageDialogHook = std::move(hook);
+}
+
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    initCompositorResources();
     setAcceptDrops(true);
     setMinimumSize(900, 590);
     resize(1440, 860);
@@ -773,13 +829,12 @@ MainWindow::MainWindow(QWidget *parent)
     auto *tabLayout = new QHBoxLayout(tabBar);
     tabLayout->setContentsMargins(10, 4, 12, 4);
     tabLayout->setSpacing(5);
-    auto *menuRestoreButton = new QToolButton(tabBar);
-    menuRestoreButton->setText(QStringLiteral("≡"));
-    menuRestoreButton->setToolTip(tr("Show or hide menu bar (Ctrl+Shift+M) · Right-click for all commands"));
-    menuRestoreButton->setAccessibleName(tr("Show or hide menu bar"));
-    menuRestoreButton->setObjectName(QStringLiteral("menuRestoreButton"));
-    menuRestoreButton->setFixedSize(25, 25);
-    tabLayout->addWidget(menuRestoreButton);
+    menuRestoreButton_ = new QToolButton(tabBar);
+    menuRestoreButton_->setText(QStringLiteral("≡"));
+    menuRestoreButton_->setObjectName(QStringLiteral("menuRestoreButton"));
+    menuRestoreButton_->setFixedSize(25, 25);
+    updateMenuRestoreButton();
+    tabLayout->addWidget(menuRestoreButton_);
     auto *newButton = new QToolButton(tabBar);
     newButton->setText(QStringLiteral("+"));
     newButton->setToolTip(tr("New canvas tab"));
@@ -793,6 +848,11 @@ MainWindow::MainWindow(QWidget *parent)
     tabs_->addTab(tr("Untitled")); installTabCloseButton(0); tabs_->setCurrentIndex(0); tabs_->setMinimumWidth(155); tabs_->setFixedHeight(29);
     workspaceTabs_.push_back(session_);
     tabRecoveryPaths_.push_back(newRecoveryPath());
+    tabWatchers_.push_back(nullptr);
+    tabDigests_.push_back(std::nullopt);
+    tabPendingExternalChange_.push_back(false);
+    tabPendingExternalDigest_.push_back(std::nullopt);
+    tabPendingExternalDoc_.push_back(nullptr);
     tabLayout->addWidget(tabs_);
     tabLayout->addStretch();
     auto *fitTop = new QPushButton(tr("Fit"), tabBar); fitTop->setObjectName(QStringLiteral("toolbarPill"));
@@ -809,17 +869,37 @@ MainWindow::MainWindow(QWidget *parent)
     transformBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     auto *transformLayout = new ToolOptionsLayout(transformBar);
     auto *transformTitle = new QLabel(tr("Transform"), transformBar); transformTitle->setObjectName(QStringLiteral("sectionTitle"));
-    auto *smearMode = new SegmentedControl({tr("Liquify"), tr("Blur"), tr("Smudge")}, transformBar); smearMode->setVisible(false);
+    smearMode_ = new SegmentedControl({tr("Liquify"), tr("Blur"), tr("Smudge")}, transformBar);
+    smearMode_->setObjectName(QStringLiteral("smearMode"));
+    smearMode_->setToolTip(tr("Liquify pushes pixels · Blur softens · Smudge drags color along"));
+    smearMode_->setVisible(false);
+    auto *smearMode = smearMode_;
+    connect(smearMode_, &SegmentedControl::currentIndexChanged, this, [this](int) {
+        updateSmearStatusHint();
+    });
     auto *cloneAligned = new QCheckBox(tr("Aligned"), transformBar); cloneAligned->setChecked(true); cloneAligned->setVisible(false);
     auto *cloneSample = new SegmentedControl({tr("This Layer"), tr("All Layers")}, transformBar); cloneSample->setVisible(false);
     auto *healingMode = new SegmentedControl({tr("Content-Aware"), tr("Create Texture"), tr("Proximity Match")}, transformBar); healingMode->setVisible(false);
     auto *brushMode = new SegmentedControl({tr("Paint"), tr("Erase")}, transformBar); brushMode->setVisible(false);
-    auto *shapeRadius = numberField(transformBar, QStringLiteral("Radius"), 5000); shapeRadius->setRange(0, 5000); shapeRadius->setVisible(false);
-    auto *shapeKind = new SegmentedControl({tr("Rectangle"), tr("Ellipse")}, transformBar); shapeKind->setVisible(false);
+    shapeRadiusField_ = numberField(transformBar, QStringLiteral("Radius"), 5000, &shapeRadiusLabel_, 1.0); shapeRadiusField_->setObjectName(QStringLiteral("shapeRadius")); shapeRadiusField_->setRange(0, 5000); shapeRadiusField_->setVisible(false);
+    shapeRadiusLabel_->setObjectName(QStringLiteral("shapeRadiusLabel")); shapeRadiusLabel_->setVisible(false); shapeRadiusLabel_->setToolTip(tr("Corner Radius"));
+    auto *shapeRadius = shapeRadiusField_;
+    shapeLineWidthField_ = numberField(transformBar, QStringLiteral("Width"), 5000, &shapeLineWidthLabel_, 1.0); shapeLineWidthField_->setObjectName(QStringLiteral("shapeLineWidth")); shapeLineWidthField_->setRange(1, 5000); shapeLineWidthField_->setValue(2); shapeLineWidthField_->setVisible(false);
+    shapeLineWidthLabel_->setObjectName(QStringLiteral("shapeLineWidthLabel")); shapeLineWidthLabel_->setVisible(false); shapeLineWidthLabel_->setToolTip(tr("Stroke Width"));
+    auto *shapeLineWidth = shapeLineWidthField_;
+    auto *shapeKind = new SegmentedControl({tr("Rectangle"), tr("Ellipse"), tr("Line")}, transformBar); shapeKind->setObjectName(QStringLiteral("shapeKind")); shapeKind->setVisible(false);
     auto *textFont = new QFontComboBox(transformBar); textFont->setObjectName(QStringLiteral("textFont")); textFont->setFixedWidth(170); textFont->setEditable(true); textFont->setInsertPolicy(QComboBox::NoInsert); textFont->setMaxVisibleItems(16); textFont->setToolTip(tr("Type to search or open the font list")); textFont->setVisible(false);
     if (textFont->completer()) { textFont->completer()->setCaseSensitivity(Qt::CaseInsensitive); textFont->completer()->setCompletionMode(QCompleter::PopupCompletion); }
     if (textFont->lineEdit()) { textFont->lineEdit()->setPlaceholderText(tr("Search fonts")); textFont->lineEdit()->setClearButtonEnabled(false); }
-    auto *textSize = new QSpinBox(transformBar); textSize->setObjectName(QStringLiteral("textSize")); textSize->setRange(4, 1000); textSize->setValue(48); textSize->setSuffix(tr(" px")); textSize->setFixedWidth(88); textSize->setVisible(false);
+    textSizeField_ = new QSpinBox(transformBar); textSizeField_->setObjectName(QStringLiteral("textSize")); textSizeField_->setRange(4, 1000); textSizeField_->setValue(48); textSizeField_->setSuffix(tr(" px")); textSizeField_->setFixedWidth(88); textSizeField_->setVisible(false);
+    textSizeLabel_ = new ScrubLabel(tr("Size"), textSizeField_, 1.0, 1.0, transformBar); textSizeLabel_->setObjectName(QStringLiteral("textSizeLabel")); textSizeLabel_->setVisible(false); textSizeLabel_->setToolTip(tr("Font Size"));
+    auto *textSize = textSizeField_;
+    textTrackingField_ = new QDoubleSpinBox(transformBar); textTrackingField_->setObjectName(QStringLiteral("textTracking")); textTrackingField_->setRange(-100.0, 1000.0); textTrackingField_->setValue(0.0); textTrackingField_->setDecimals(1); textTrackingField_->setSuffix(tr(" px")); textTrackingField_->setFixedWidth(88); textTrackingField_->setKeyboardTracking(false); textTrackingField_->setVisible(false);
+    textTrackingLabel_ = new ScrubLabel(tr("Tracking"), textTrackingField_, 1.0, 1.0, transformBar); textTrackingLabel_->setObjectName(QStringLiteral("textTrackingLabel")); textTrackingLabel_->setVisible(false); textTrackingLabel_->setToolTip(tr("Tracking / Letter Spacing"));
+    auto *textTracking = textTrackingField_;
+    textLeadingField_ = new QDoubleSpinBox(transformBar); textLeadingField_->setObjectName(QStringLiteral("textLeading")); textLeadingField_->setRange(0.0, 1000.0); textLeadingField_->setValue(0.0); textLeadingField_->setDecimals(1); textLeadingField_->setSuffix(tr(" px")); textLeadingField_->setFixedWidth(88); textLeadingField_->setKeyboardTracking(false); textLeadingField_->setVisible(false);
+    textLeadingLabel_ = new ScrubLabel(tr("Leading"), textLeadingField_, 1.0, 1.0, transformBar); textLeadingLabel_->setObjectName(QStringLiteral("textLeadingLabel")); textLeadingLabel_->setVisible(false); textLeadingLabel_->setToolTip(tr("Leading / Line Spacing"));
+    auto *textLeading = textLeadingField_;
     auto *textBold = new QToolButton(); textBold->setObjectName(QStringLiteral("textBold")); textBold->setText(tr("B")); textBold->setCheckable(true); textBold->setToolTip(tr("Bold")); textBold->setFixedSize(32, 28);
     auto *textItalic = new QToolButton(); textItalic->setObjectName(QStringLiteral("textItalic")); textItalic->setText(tr("I")); textItalic->setCheckable(true); textItalic->setToolTip(tr("Italic")); textItalic->setFixedSize(32, 28);
     auto *textUnderline = new QToolButton(); textUnderline->setObjectName(QStringLiteral("textUnderline")); textUnderline->setText(tr("U")); textUnderline->setCheckable(true); textUnderline->setToolTip(tr("Underline")); textUnderline->setFixedSize(32, 28);
@@ -842,13 +922,17 @@ MainWindow::MainWindow(QWidget *parent)
     gradientStyle->addItem(tr("To Background"), QIcon(), tr("Foreground to Background"));
     gradientStyle->setVisible(false);
     auto *gradientReverse = new QCheckBox(tr("Reverse"), transformBar); gradientReverse->setVisible(false);
-    gradientOpacityField_ = numberField(transformBar, QStringLiteral("Opacity"), 100); gradientOpacityField_->setObjectName(QStringLiteral("gradientOpacity")); gradientOpacityField_->setRange(1, 100); gradientOpacityField_->setValue(100); gradientOpacityField_->setSuffix(QStringLiteral(" %")); gradientOpacityField_->setVisible(false);
+    gradientOpacityField_ = numberField(transformBar, QStringLiteral("Opacity"), 100, &gradientOpacityLabel_, 1.0); gradientOpacityField_->setObjectName(QStringLiteral("gradientOpacity")); gradientOpacityField_->setRange(1, 100); gradientOpacityField_->setValue(100); gradientOpacityField_->setSuffix(QStringLiteral(" %")); gradientOpacityField_->setVisible(false);
+    gradientOpacityLabel_->setObjectName(QStringLiteral("gradientOpacityLabel")); gradientOpacityLabel_->setVisible(false); gradientOpacityLabel_->setToolTip(tr("Gradient Opacity"));
     auto *cropRatio = new SegmentedControl(transformBar);
+    cropRatio->setObjectName(QStringLiteral("cropRatio"));
     cropRatio->addItem(tr("Free"), QIcon(), tr("Unconstrained"));
     cropRatio->addItem(tr("Original"), QIcon(), tr("Original Ratio"));
     cropRatio->addItem(tr("1:1"), QIcon(), tr("1:1 Square"));
     cropRatio->addItem(tr("4:3"), QIcon(), tr("4:3"));
+    cropRatio->addItem(tr("3:4"), QIcon(), tr("3:4"));
     cropRatio->addItem(tr("16:9"), QIcon(), tr("16:9"));
+    cropRatio->addItem(tr("9:16"), QIcon(), tr("9:16"));
     cropRatio->setVisible(false);
     auto *marqueeKind = new SegmentedControl({tr("Rectangle"), tr("Ellipse")}, transformBar); marqueeKind->setVisible(false);
     auto *lassoKind = new SegmentedControl({tr("Freehand"), tr("Polygonal")}, transformBar); lassoKind->setVisible(false);
@@ -858,41 +942,71 @@ MainWindow::MainWindow(QWidget *parent)
     selectionMode->addItem(tr("Subtract"), editorIcon(29), tr("Subtract from selection (Alt)"));
     selectionMode->setVisible(false);
     auto *selectionAntialias = new QCheckBox(tr("Anti-alias"), transformBar); selectionAntialias->setChecked(true); selectionAntialias->setVisible(false);
-    auto *wandTolerance = new QSpinBox(transformBar); wandTolerance->setRange(0, 255); wandTolerance->setValue(32); wandTolerance->setPrefix(tr("Tolerance ")); wandTolerance->setVisible(false);
+    wandToleranceField_ = new QSpinBox(transformBar); wandToleranceField_->setRange(0, 255); wandToleranceField_->setValue(32); wandToleranceField_->setObjectName(QStringLiteral("wandTolerance")); wandToleranceField_->setVisible(false);
+    wandToleranceLabel_ = new ScrubLabel(tr("Tolerance"), wandToleranceField_, 1.0, 1.0, transformBar); wandToleranceLabel_->setObjectName(QStringLiteral("wandToleranceLabel")); wandToleranceLabel_->setVisible(false); wandToleranceLabel_->setToolTip(tr("Tolerance"));
+    auto *wandTolerance = wandToleranceField_;
     auto *wandSampleSize = new SegmentedControl(transformBar);
     wandSampleSize->addItem(tr("Point"), QIcon(), tr("Point Sample"));
     wandSampleSize->addItem(tr("3×3"), QIcon(), tr("3 by 3 Average"));
     wandSampleSize->addItem(tr("5×5"), QIcon(), tr("5 by 5 Average"));
     wandSampleSize->setVisible(false);
+    auto *wandModeControl = new SegmentedControl({tr("Wand"), tr("Object")}, transformBar); wandModeControl->setObjectName(QStringLiteral("wandModeControl")); wandModeControl->setVisible(false);
+    objectEdgeOffsetField_ = new QSpinBox(transformBar); objectEdgeOffsetField_->setRange(-10, 10); objectEdgeOffsetField_->setValue(0); objectEdgeOffsetField_->setSuffix(tr(" px")); objectEdgeOffsetField_->setObjectName(QStringLiteral("objectEdgeOffset")); objectEdgeOffsetField_->setVisible(false);
+    objectEdgeOffsetLabel_ = new ScrubLabel(tr("Edge Offset"), objectEdgeOffsetField_, 1.0, 1.0, transformBar); objectEdgeOffsetLabel_->setObjectName(QStringLiteral("objectEdgeOffsetLabel")); objectEdgeOffsetLabel_->setVisible(false); objectEdgeOffsetLabel_->setToolTip(tr("Edge Offset"));
+    auto *objectEdgeOffset = objectEdgeOffsetField_;
+    auto *objectSmoothEdges = new QCheckBox(tr("Smooth"), transformBar); objectSmoothEdges->setChecked(true); objectSmoothEdges->setObjectName(QStringLiteral("objectSmoothEdges")); objectSmoothEdges->setVisible(false);
     auto *wandSample = new SegmentedControl({tr("This Layer"), tr("All Layers")}, transformBar); wandSample->setVisible(false);
     auto *wandContiguous = new QCheckBox(tr("Contiguous"), transformBar); wandContiguous->setChecked(true); wandContiguous->setVisible(false);
-    auto *selectionAmount = new QSpinBox(transformBar); selectionAmount->setRange(1, 500); selectionAmount->setValue(1); selectionAmount->setSuffix(tr(" px")); selectionAmount->setVisible(false);
+    selectionAmountField_ = new QSpinBox(transformBar); selectionAmountField_->setRange(1, 500); selectionAmountField_->setValue(1); selectionAmountField_->setSuffix(tr(" px")); selectionAmountField_->setObjectName(QStringLiteral("selectionAmount")); selectionAmountField_->setVisible(false);
+    selectionAmountLabel_ = new ScrubLabel(tr("Amount"), selectionAmountField_, 1.0, 1.0, transformBar); selectionAmountLabel_->setObjectName(QStringLiteral("selectionAmountLabel")); selectionAmountLabel_->setVisible(false); selectionAmountLabel_->setToolTip(tr("Amount"));
+    auto *selectionAmount = selectionAmountField_;
     auto *expandSelection = new QPushButton(tr("Expand")); expandSelection->setObjectName(QStringLiteral("expandSelection"));
     auto *contractSelection = new QPushButton(tr("Contract")); contractSelection->setObjectName(QStringLiteral("contractSelection"));
+    auto *featherSelection = new QPushButton(tr("Feather")); featherSelection->setObjectName(QStringLiteral("featherSelection"));
     auto *selectionModifyGroup = new SegmentedGroup(transformBar);
     selectionModifyGroup->addButton(expandSelection);
     selectionModifyGroup->addButton(contractSelection);
+    selectionModifyGroup->addButton(featherSelection);
     selectionModifyGroup->setVisible(false);
     marqueeKind->setObjectName(QStringLiteral("marqueeKind")); lassoKind->setObjectName(QStringLiteral("lassoKind"));
     selectionMode->setObjectName(QStringLiteral("selectionMode")); selectionAntialias->setObjectName(QStringLiteral("selectionAntialias"));
     wandTolerance->setObjectName(QStringLiteral("wandTolerance")); wandSampleSize->setObjectName(QStringLiteral("wandSampleSize"));
     wandSample->setObjectName(QStringLiteral("wandSample")); wandContiguous->setObjectName(QStringLiteral("wandContiguous"));
-    brushSizeField_ = numberField(transformBar, QStringLiteral("Size"), 2000); brushSizeField_->setRange(1, 2000); brushSizeField_->setValue(brushDiameter_); brushSizeField_->setSuffix(QStringLiteral(" px")); brushSizeField_->setVisible(false);
-    brushHardnessField_ = numberField(transformBar, QStringLiteral("Hardness"), 100); brushHardnessField_->setRange(0, 100); brushHardnessField_->setValue(100); brushHardnessField_->setSuffix(QStringLiteral(" %")); brushHardnessField_->setVisible(false);
-    brushOpacityField_ = numberField(transformBar, QStringLiteral("Opacity"), 100); brushOpacityField_->setRange(1, 100); brushOpacityField_->setValue(100); brushOpacityField_->setSuffix(QStringLiteral(" %")); brushOpacityField_->setVisible(false);
-    brushSizeField_->setObjectName(QStringLiteral("brushSize")); brushHardnessField_->setObjectName(QStringLiteral("brushHardness")); brushOpacityField_->setObjectName(QStringLiteral("brushOpacity"));
+    brushSizeField_ = numberField(transformBar, QStringLiteral("Size"), 2000, &brushSizeLabel_, 1.0);
+    brushSizeField_->setRange(1, 2000); brushSizeField_->setValue(brushDiameter_); brushSizeField_->setSuffix(QStringLiteral(" px"));
+    brushSizeField_->setVisible(false); brushSizeLabel_->setVisible(false);
+    brushHardnessField_ = numberField(transformBar, QStringLiteral("Hardness"), 100, &brushHardnessLabel_, 1.0);
+    brushHardnessField_->setRange(0, 100); brushHardnessField_->setValue(100); brushHardnessField_->setSuffix(QStringLiteral(" %"));
+    brushHardnessField_->setVisible(false); brushHardnessLabel_->setVisible(false);
+    brushOpacityField_ = numberField(transformBar, QStringLiteral("Opacity"), 100, &brushOpacityLabel_, 1.0);
+    brushOpacityField_->setRange(1, 100); brushOpacityField_->setValue(100); brushOpacityField_->setSuffix(QStringLiteral(" %"));
+    brushOpacityField_->setVisible(false); brushOpacityLabel_->setVisible(false);
+    brushSmoothingField_ = numberField(transformBar, QStringLiteral("Smoothing"), 100, &brushSmoothingLabel_, 1.0);
+    brushSmoothingField_->setRange(0, 100); brushSmoothingField_->setValue(0); brushSmoothingField_->setSuffix(QStringLiteral(" %"));
+    brushSmoothingField_->setVisible(false); brushSmoothingLabel_->setVisible(false);
+    brushSizeField_->setObjectName(QStringLiteral("brushSize")); brushHardnessField_->setObjectName(QStringLiteral("brushHardness"));
+    brushOpacityField_->setObjectName(QStringLiteral("brushOpacity")); brushSmoothingField_->setObjectName(QStringLiteral("brushSmoothing"));
+    brushSizeLabel_->setObjectName(QStringLiteral("brushSizeLabel")); brushHardnessLabel_->setObjectName(QStringLiteral("brushHardnessLabel"));
+    brushOpacityLabel_->setObjectName(QStringLiteral("brushOpacityLabel")); brushSmoothingLabel_->setObjectName(QStringLiteral("brushSmoothingLabel"));
+    brushSizeLabel_->setToolTip(tr("Brush Size")); brushHardnessLabel_->setToolTip(tr("Brush Hardness"));
+    brushOpacityLabel_->setToolTip(tr("Brush Opacity")); brushSmoothingLabel_->setToolTip(tr("Brush Smoothing"));
     auto *autoSelect = new QCheckBox(tr("Auto Select"), transformBar); autoSelect->setObjectName(QStringLiteral("transformAutoSelect"));
     showTransformControls_ = new QCheckBox(tr("Show Controls"), transformBar); showTransformControls_->setObjectName(QStringLiteral("transformShowControls")); showTransformControls_->setChecked(true);
-    xField_ = numberField(transformBar, QStringLiteral("X"));
-    yField_ = numberField(transformBar, QStringLiteral("Y"));
-    widthField_ = numberField(transformBar, QStringLiteral("W"));
-    heightField_ = numberField(transformBar, QStringLiteral("H"));
+    xField_ = numberField(transformBar, QStringLiteral("X"), 1000000.0, &xLabel_, 1.0, 1.0);
+    yField_ = numberField(transformBar, QStringLiteral("Y"), 1000000.0, &yLabel_, 1.0, 1.0);
+    widthField_ = numberField(transformBar, QStringLiteral("W"), 1000000.0, &widthLabel_, 1.0, 1.0);
+    heightField_ = numberField(transformBar, QStringLiteral("H"), 1000000.0, &heightLabel_, 1.0, 1.0);
     xField_->setObjectName(QStringLiteral("transformX")); yField_->setObjectName(QStringLiteral("transformY"));
     widthField_->setObjectName(QStringLiteral("transformWidth")); heightField_->setObjectName(QStringLiteral("transformHeight"));
-    xField_->setFixedWidth(78); yField_->setFixedWidth(78); widthField_->setFixedWidth(82); heightField_->setFixedWidth(82);
+    xLabel_->setObjectName(QStringLiteral("transformXLabel")); yLabel_->setObjectName(QStringLiteral("transformYLabel"));
+    widthLabel_->setObjectName(QStringLiteral("transformWidthLabel")); heightLabel_->setObjectName(QStringLiteral("transformHeightLabel"));
+    xLabel_->setToolTip(tr("Horizontal position in canvas pixels")); yLabel_->setToolTip(tr("Vertical position in canvas pixels"));
+    widthLabel_->setToolTip(tr("Layer width in pixels")); heightLabel_->setToolTip(tr("Layer height in pixels"));
+    xField_->setFixedWidth(64); yField_->setFixedWidth(64); widthField_->setFixedWidth(68); heightField_->setFixedWidth(68);
     auto *link = new QToolButton(transformBar); link->setObjectName(QStringLiteral("transformRatioLock")); link->setIcon(editorIcon(16)); link->setIconSize(QSize(18, 18)); link->setCheckable(true); link->setChecked(true); link->setToolTip(tr("Keep width and height proportional")); link->setFixedSize(29, 29);
     scaleField_ = numberField(transformBar, QStringLiteral("Scale"), 3200); scaleField_->setObjectName(QStringLiteral("transformScale")); scaleField_->setSuffix(QStringLiteral(" %")); scaleField_->setRange(0.1, 3200); scaleField_->setValue(100); scaleField_->setFixedWidth(105);
-    rotationField_ = numberField(transformBar, QStringLiteral("°"), 360); rotationField_->setObjectName(QStringLiteral("transformRotation")); rotationField_->setRange(-360, 360); rotationField_->setFixedWidth(72); rotationField_->setToolTip(tr("Rotation"));
+    rotationField_ = numberField(transformBar, QStringLiteral("°"), 360, &rotationLabel_, 1.0, 1.0); rotationField_->setObjectName(QStringLiteral("transformRotation")); rotationField_->setRange(-360, 360); rotationField_->setFixedWidth(64); rotationField_->setToolTip(tr("Rotation"));
+    rotationLabel_->setObjectName(QStringLiteral("transformRotationLabel")); rotationLabel_->setToolTip(tr("Rotation"));
     sampling_ = new SegmentedControl({tr("High quality"), tr("Smooth"), tr("Nearest")}, transformBar); sampling_->setObjectName(QStringLiteral("transformSampling")); sampling_->setToolTip(tr("Resampling quality"));
     auto *flipH = new QPushButton(tr("Flip H")); flipH->setObjectName(QStringLiteral("transformFlipHorizontal")); flipH->setFixedWidth(57); flipH->setToolTip(tr("Flip horizontally"));
     auto *flipV = new QPushButton(tr("Flip V")); flipV->setObjectName(QStringLiteral("transformFlipVertical")); flipV->setFixedWidth(57); flipV->setToolTip(tr("Flip vertically"));
@@ -903,32 +1017,34 @@ MainWindow::MainWindow(QWidget *parent)
     transformApply_ = new QPushButton(tr("Apply"), transformBar); transformApply_->setObjectName(QStringLiteral("primaryButton")); transformApply_->setEnabled(false);
     transformLayout->addGroup({transformTitle});
     transformLayout->addGroup({autoSelect, showTransformControls_});
-    transformLayout->addGroup({xField_, yField_});
-    transformLayout->addGroup({widthField_, link, heightField_});
-    transformLayout->addGroup({scaleField_, rotationField_});
+    transformLayout->addGroup({xLabel_, xField_, yLabel_, yField_});
+    transformLayout->addGroup({widthLabel_, widthField_, link, heightLabel_, heightField_});
+    transformLayout->addGroup({scaleField_, rotationLabel_, rotationField_});
     transformLayout->addGroup({flipGroup});
     transformLayout->addGroup({sampling_});
     transformLayout->addGroup({brushMode, smearMode, healingMode, cropRatio});
     transformLayout->addGroup({shapeKind});
-    transformLayout->addGroup({shapeRadius});
-    transformLayout->addGroup({brushSizeField_, brushHardnessField_, brushOpacityField_});
+    transformLayout->addGroup({shapeRadiusLabel_, shapeRadiusField_, shapeLineWidthLabel_, shapeLineWidthField_});
+    transformLayout->addGroup({brushSizeLabel_, brushSizeField_, brushHardnessLabel_, brushHardnessField_,
+                               brushOpacityLabel_, brushOpacityField_, brushSmoothingLabel_, brushSmoothingField_});
     transformLayout->addGroup({cloneAligned});
     transformLayout->addGroup({cloneSample});
-    transformLayout->addGroup({textFont, textSize});
-    textFont->setFixedWidth(210); textSize->setFixedWidth(100);
+    transformLayout->addGroup({textFont, textSizeLabel_, textSizeField_, textTrackingLabel_, textTrackingField_, textLeadingLabel_, textLeadingField_});
+    textFont->setFixedWidth(210); textSize->setFixedWidth(70); textTracking->setFixedWidth(70); textLeading->setFixedWidth(70);
     transformLayout->addGroup({textStyleGroup});
     transformLayout->addGroup({textAlignment});
     transformLayout->addGroup({gradientShape});
     transformLayout->addGroup({gradientStyle});
-    transformLayout->addGroup({gradientOpacityField_, gradientReverse});
+    transformLayout->addGroup({gradientOpacityLabel_, gradientOpacityField_, gradientReverse});
     transformLayout->addGroup({marqueeKind});
     transformLayout->addGroup({lassoKind});
     transformLayout->addGroup({selectionMode});
-    transformLayout->addGroup({wandTolerance});
-    transformLayout->addGroup({selectionAntialias, wandContiguous});
+    transformLayout->addGroup({wandModeControl});
+    transformLayout->addGroup({wandToleranceLabel_, wandToleranceField_, objectEdgeOffsetLabel_, objectEdgeOffsetField_});
+    transformLayout->addGroup({selectionAntialias, wandContiguous, objectSmoothEdges});
     transformLayout->addGroup({wandSampleSize});
     transformLayout->addGroup({wandSample});
-    transformLayout->addGroup({selectionAmount, selectionModifyGroup});
+    transformLayout->addGroup({selectionAmountLabel_, selectionAmountField_, selectionModifyGroup});
     transformLayout->addGroup({textCancel, textDone, transformCancel_, transformApply_});
     textDone->setProperty("primary", true);
     textDone->setToolTip(tr("Commit text (Ctrl+Enter)")); textCancel->setToolTip(tr("Discard text edits (Esc)"));
@@ -979,7 +1095,11 @@ MainWindow::MainWindow(QWidget *parent)
                 : i == 6 ? CanvasWidget::Tool::Healing : i == 7 ? CanvasWidget::Tool::Clone : i == 8 ? CanvasWidget::Tool::Blur
                 : i == 9 ? CanvasWidget::Tool::Gradient : i == 10 ? CanvasWidget::Tool::Shape : i == 11 ? CanvasWidget::Tool::Text : i == 12 ? CanvasWidget::Tool::Eyedropper : i == 13 ? CanvasWidget::Tool::Hand
                 : i == 14 ? CanvasWidget::Tool::Zoom : CanvasWidget::Tool::Other;
-            canvas_->setTool(tool);
+            if (tool == CanvasWidget::Tool::Blur && canvas_->tool() == CanvasWidget::Tool::Blur) {
+                cycleSmearMode();
+            } else {
+                canvas_->setTool(tool);
+            }
         });
         railLayout->addWidget(button, 0, Qt::AlignHCenter);
     }
@@ -994,6 +1114,7 @@ MainWindow::MainWindow(QWidget *parent)
     workspaceLayout->addWidget(rail);
 
     canvas_ = new CanvasWidget(workspace);
+    canvas_->setEditorSession(&session_);
     connect(autoSelect, &QCheckBox::toggled, canvas_, &CanvasWidget::setTransformAutoSelect);
     connect(link, &QToolButton::toggled, canvas_, &CanvasWidget::setLockTransformRatio);
     connect(showTransformControls_, &QCheckBox::toggled, canvas_, &CanvasWidget::setShowTransformControls);
@@ -1005,12 +1126,33 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::transformCancelRequested, this, [this] { finishPersistentTransform(false); });
     connect(canvas_, &CanvasWidget::transformApplyRequested, this, [this] { finishPersistentTransform(true); });
     connect(shapeRadius, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeCornerRadius);
+    connect(shapeLineWidth, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeLineWidth);
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
     connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushHardness_ = value / 100.0; });
     connect(brushOpacityField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushOpacity_ = value / 100.0; });
+    connect(brushSmoothingField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
+        brushSmoothing_ = value;
+        session_.setBrushSmoothing(value);
+        canvas_->setBrushSmoothing(value);
+    });
     connect(brushMode, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setTool(index == 1 ? CanvasWidget::Tool::Eraser : CanvasWidget::Tool::Brush); });
-    connect(shapeKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setEllipticalShape(index == 1); });
-    connect(canvas_, &CanvasWidget::shapeKindChanged, shapeKind, [shapeKind](bool elliptical) { shapeKind->setCurrentIndex(elliptical ? 1 : 0); });
+    connect(shapeKind, &SegmentedControl::currentIndexChanged, canvas_, [this, shapeRadius, shapeLineWidth](int index) {
+        const ShapeKind kind = (index == 2 ? ShapeKind::Line : index == 1 ? ShapeKind::Ellipse : ShapeKind::Rectangle);
+        canvas_->setShapeKind(kind);
+        const bool isShape = canvas_->tool() == CanvasWidget::Tool::Shape;
+        shapeRadius->setVisible(isShape && kind == ShapeKind::Rectangle);
+        shapeRadiusLabel_->setVisible(isShape && kind == ShapeKind::Rectangle);
+        shapeLineWidth->setVisible(isShape && kind == ShapeKind::Line);
+        shapeLineWidthLabel_->setVisible(isShape && kind == ShapeKind::Line);
+    });
+    connect(canvas_, &CanvasWidget::shapeKindChanged, shapeKind, [shapeKind, shapeRadius, shapeLineWidth, this](ShapeKind kind) {
+        shapeKind->setCurrentIndex(kind == ShapeKind::Line ? 2 : kind == ShapeKind::Ellipse ? 1 : 0);
+        const bool isShape = canvas_->tool() == CanvasWidget::Tool::Shape;
+        shapeRadius->setVisible(isShape && kind == ShapeKind::Rectangle);
+        shapeRadiusLabel_->setVisible(isShape && kind == ShapeKind::Rectangle);
+        shapeLineWidth->setVisible(isShape && kind == ShapeKind::Line);
+        shapeLineWidthLabel_->setVisible(isShape && kind == ShapeKind::Line);
+    });
     connect(marqueeKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setMarqueeElliptical(index == 1); });
     connect(lassoKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setPolygonalLasso(index == 1); });
     connect(canvas_, &CanvasWidget::marqueeKindChanged, marqueeKind, [marqueeKind](bool elliptical) { marqueeKind->setCurrentIndex(elliptical ? 1 : 0); });
@@ -1019,15 +1161,44 @@ MainWindow::MainWindow(QWidget *parent)
     connect(selectionAntialias, &QCheckBox::toggled, canvas_, &CanvasWidget::setSelectionAntialiased);
     connect(expandSelection, &QPushButton::clicked, this, [this, selectionAmount] { if (session_.expandSelection(selectionAmount->value())) syncDocumentViews(false); });
     connect(contractSelection, &QPushButton::clicked, this, [this, selectionAmount] { if (session_.contractSelection(selectionAmount->value())) syncDocumentViews(false); });
-    connect(cropRatio, &SegmentedControl::currentIndexChanged, this, [this, cropRatio](int index) {
-        const double ratios[] = {0, document_ ? double(document_->canvasSize.width()) / document_->canvasSize.height() : 0, 1, 4.0/3.0, 16.0/9.0};
-        canvas_->setCropRatio(ratios[std::clamp(index, 0, 4)]);
+    connect(featherSelection, &QPushButton::clicked, this, [this, selectionAmount] {
+        const int amount = std::clamp(selectionAmount->value(), 1, 250);
+        if (session_.featherSelection(amount)) {
+            session_.setSelectionFeatherAmount(amount);
+            syncDocumentViews(false);
+        }
     });
-    const std::array<QWidget *, 11> moveControls{autoSelect, showTransformControls_, xField_, yField_, widthField_, heightField_, link,
-                                                scaleField_, rotationField_, sampling_, flipGroup};
+    connect(wandModeControl, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) {
+        canvas_->setWandMode(index == 1 ? CanvasWidget::WandMode::Object : CanvasWidget::WandMode::Wand);
+    });
+    connect(canvas_, &CanvasWidget::wandModeChanged, wandModeControl, [wandModeControl, wandTolerance, wandSampleSize, wandContiguous, objectEdgeOffset, objectSmoothEdges, this](CanvasWidget::WandMode mode) {
+        const bool isObject = (mode == CanvasWidget::WandMode::Object);
+        {
+            const QSignalBlocker blocker(wandModeControl);
+            wandModeControl->setCurrentIndex(isObject ? 1 : 0);
+        }
+        const bool isWandTool = (canvas_->tool() == CanvasWidget::Tool::Wand);
+        wandTolerance->setVisible(isWandTool && !isObject);
+        wandToleranceLabel_->setVisible(isWandTool && !isObject);
+        wandSampleSize->setVisible(isWandTool && !isObject);
+        wandContiguous->setVisible(isWandTool && !isObject);
+        objectEdgeOffset->setVisible(isWandTool && isObject);
+        objectEdgeOffsetLabel_->setVisible(isWandTool && isObject);
+        objectSmoothEdges->setVisible(isWandTool && isObject);
+    });
+    connect(cropRatio, &SegmentedControl::currentIndexChanged, this, [this](int index) {
+        const double ratios[] = {0, document_ ? double(document_->canvasSize.width()) / document_->canvasSize.height() : 0, 1, 4.0/3.0, 3.0/4.0, 16.0/9.0, 9.0/16.0};
+        canvas_->setCropRatio(ratios[std::clamp(index, 0, 6)]);
+    });
+    const std::array<QWidget *, 16> moveControls{autoSelect, showTransformControls_,
+                                                xLabel_, xField_, yLabel_, yField_,
+                                                widthLabel_, widthField_, link,
+                                                heightLabel_, heightField_,
+                                                scaleField_, rotationLabel_, rotationField_,
+                                                sampling_, flipGroup};
     connect(canvas_, &CanvasWidget::toolChanged, this, [this, transformTitle, cropRatio, smearMode, cloneAligned, cloneSample,
-            healingMode, brushMode, shapeKind, shapeRadius, textFont, textSize, textStyleGroup, textAlignment, textCancel, textDone, gradientShape, gradientStyle, gradientReverse, marqueeKind, lassoKind,
-            selectionMode, selectionAntialias, wandTolerance, wandSampleSize, wandSample, wandContiguous, selectionModifyGroup,
+            healingMode, brushMode, shapeKind, shapeRadius, shapeLineWidth, textFont, textSize, textTracking, textLeading, textStyleGroup, textAlignment, textCancel, textDone, gradientShape, gradientStyle, gradientReverse, marqueeKind, lassoKind,
+            selectionMode, selectionAntialias, wandModeControl, wandTolerance, wandSampleSize, wandSample, wandContiguous, objectEdgeOffset, objectSmoothEdges, selectionModifyGroup,
             selectionAmount, moveControls, toolButtons](CanvasWidget::Tool tool) {
         if (tool != CanvasWidget::Tool::Text)
             if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(true);
@@ -1037,30 +1208,68 @@ MainWindow::MainWindow(QWidget *parent)
         const bool move = tool == CanvasWidget::Tool::Move;
         const bool selection = tool == CanvasWidget::Tool::Marquee || tool == CanvasWidget::Tool::Lasso || tool == CanvasWidget::Tool::Wand;
         for (QWidget *control : moveControls) control->setVisible(move);
-        brushSizeField_->setVisible(brush); brushHardnessField_->setVisible(brush); brushOpacityField_->setVisible(brush);
+        brushSizeLabel_->setVisible(brush); brushSizeField_->setVisible(brush);
+        brushHardnessLabel_->setVisible(brush); brushHardnessField_->setVisible(brush);
+        brushOpacityLabel_->setVisible(brush); brushOpacityField_->setVisible(brush);
+        brushOpacityLabel_->setText(tool == CanvasWidget::Tool::Blur ? tr("Strength") : tr("Opacity"));
+        brushOpacityLabel_->setToolTip(tool == CanvasWidget::Tool::Blur ? tr("Strength") : tr("Brush Opacity"));
+        if (tool == CanvasWidget::Tool::Blur) {
+            updateSmearStatusHint();
+        }
+        const bool smoothingVisible = (tool == CanvasWidget::Tool::Brush || tool == CanvasWidget::Tool::Eraser);
+        brushSmoothingLabel_->setVisible(smoothingVisible);
+        brushSmoothingField_->setVisible(smoothingVisible);
         brushMode->setVisible(tool == CanvasWidget::Tool::Brush || tool == CanvasWidget::Tool::Eraser);
         if (tool == CanvasWidget::Tool::Brush || tool == CanvasWidget::Tool::Eraser) { const QSignalBlocker blocker(brushMode); brushMode->setCurrentIndex(tool == CanvasWidget::Tool::Eraser ? 1 : 0); }
         cropRatio->setVisible(tool == CanvasWidget::Tool::Crop);
+        if (tool == CanvasWidget::Tool::Crop && !canvas_->cropRect().has_value()) {
+            const QSignalBlocker blocker(cropRatio);
+            cropRatio->setCurrentIndex(0);
+            canvas_->setCropRatio(0);
+        }
         smearMode->setVisible(tool == CanvasWidget::Tool::Blur);
         cloneAligned->setVisible(tool == CanvasWidget::Tool::Clone); cloneSample->setVisible(tool == CanvasWidget::Tool::Clone);
         healingMode->setVisible(tool == CanvasWidget::Tool::Healing);
-        shapeKind->setVisible(tool == CanvasWidget::Tool::Shape); shapeRadius->setVisible(tool == CanvasWidget::Tool::Shape && shapeKind->currentIndex() == 0);
+        shapeKind->setVisible(tool == CanvasWidget::Tool::Shape);
+        const bool shapeRect = (tool == CanvasWidget::Tool::Shape && canvas_->shapeKind() == ShapeKind::Rectangle);
+        const bool shapeLine = (tool == CanvasWidget::Tool::Shape && canvas_->shapeKind() == ShapeKind::Line);
+        shapeRadius->setVisible(shapeRect);
+        shapeRadiusLabel_->setVisible(shapeRect);
+        shapeLineWidth->setVisible(shapeLine);
+        shapeLineWidthLabel_->setVisible(shapeLine);
         const bool text = tool == CanvasWidget::Tool::Text;
-        textFont->setVisible(text); textSize->setVisible(text); textStyleGroup->setVisible(text); textAlignment->setVisible(text);
+        textFont->setVisible(text);
+        textSizeLabel_->setVisible(text); textSize->setVisible(text);
+        textTrackingLabel_->setVisible(text); textTracking->setVisible(text);
+        textLeadingLabel_->setVisible(text); textLeading->setVisible(text);
+        textStyleGroup->setVisible(text); textAlignment->setVisible(text);
         textCancel->setVisible(text); textDone->setVisible(text);
         transformCancel_->setVisible(move || tool == CanvasWidget::Tool::Crop);
         transformApply_->setVisible(move || tool == CanvasWidget::Tool::Crop);
         gradientShape->setVisible(tool == CanvasWidget::Tool::Gradient); gradientStyle->setVisible(tool == CanvasWidget::Tool::Gradient);
-        gradientReverse->setVisible(tool == CanvasWidget::Tool::Gradient); gradientOpacityField_->setVisible(tool == CanvasWidget::Tool::Gradient);
+        gradientReverse->setVisible(tool == CanvasWidget::Tool::Gradient);
+        gradientOpacityLabel_->setVisible(tool == CanvasWidget::Tool::Gradient);
+        gradientOpacityField_->setVisible(tool == CanvasWidget::Tool::Gradient);
         marqueeKind->setVisible(tool == CanvasWidget::Tool::Marquee); lassoKind->setVisible(tool == CanvasWidget::Tool::Lasso);
         selectionMode->setVisible(selection); selectionAntialias->setVisible(tool == CanvasWidget::Tool::Lasso || tool == CanvasWidget::Tool::Wand
                                                                              || (tool == CanvasWidget::Tool::Marquee && marqueeKind->currentIndex() == 1));
-        wandTolerance->setVisible(tool == CanvasWidget::Tool::Wand); wandSampleSize->setVisible(tool == CanvasWidget::Tool::Wand);
-        wandSample->setVisible(tool == CanvasWidget::Tool::Wand); wandContiguous->setVisible(tool == CanvasWidget::Tool::Wand);
-        selectionModifyGroup->setVisible(selection); selectionAmount->setVisible(selection);
+        wandModeControl->setVisible(tool == CanvasWidget::Tool::Wand);
+        const bool isObject = (canvas_->wandMode() == CanvasWidget::WandMode::Object);
+        const bool isWandTool = (tool == CanvasWidget::Tool::Wand);
+        wandTolerance->setVisible(isWandTool && !isObject);
+        wandToleranceLabel_->setVisible(isWandTool && !isObject);
+        wandSampleSize->setVisible(isWandTool && !isObject);
+        wandSample->setVisible(isWandTool);
+        wandContiguous->setVisible(isWandTool && !isObject);
+        objectEdgeOffset->setVisible(isWandTool && isObject);
+        objectEdgeOffsetLabel_->setVisible(isWandTool && isObject);
+        objectSmoothEdges->setVisible(isWandTool && isObject);
+        selectionModifyGroup->setVisible(selection);
+        selectionAmountField_->setVisible(selection);
+        selectionAmountLabel_->setVisible(selection);
         if (brush) transformTitle->setText(tool == CanvasWidget::Tool::Healing ? tr("Spot Healing") : tool == CanvasWidget::Tool::Clone ? tr("Clone Stamp")
             : tool == CanvasWidget::Tool::Blur ? tr("Smear") : tool == CanvasWidget::Tool::Eraser ? tr("Eraser") : tr("Brush"));
-        else if (selection) transformTitle->setText(tool == CanvasWidget::Tool::Marquee ? tr("Marquee") : tool == CanvasWidget::Tool::Lasso ? tr("Lasso") : tr("Magic Wand"));
+        else if (selection) transformTitle->setText(tool == CanvasWidget::Tool::Marquee ? tr("Marquee") : tool == CanvasWidget::Tool::Lasso ? tr("Lasso") : (canvas_->wandMode() == CanvasWidget::WandMode::Object ? tr("Object Selection") : tr("Magic Wand")));
         else if (tool == CanvasWidget::Tool::Crop) transformTitle->setText(tr("Crop"));
         else if (tool == CanvasWidget::Tool::Gradient) transformTitle->setText(tr("Gradient"));
         else if (tool == CanvasWidget::Tool::Shape) transformTitle->setText(tr("Shape"));
@@ -1078,9 +1287,6 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(marqueeKind, &SegmentedControl::currentIndexChanged, this, [this, selectionAntialias, marqueeKind](int) {
         selectionAntialias->setVisible(canvas_->tool() == CanvasWidget::Tool::Marquee && marqueeKind->currentIndex() == 1);
-    });
-    connect(shapeKind, &SegmentedControl::currentIndexChanged, this, [this, shapeRadius, shapeKind](int) {
-        shapeRadius->setVisible(canvas_->tool() == CanvasWidget::Tool::Shape && shapeKind->currentIndex() == 0);
     });
     canvasStack_ = new QStackedWidget(workspace);
     auto *startPage = new QWidget(canvasStack_); startPage->setObjectName(QStringLiteral("newCanvasPage"));
@@ -1111,7 +1317,37 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(openStart, &QPushButton::clicked, this, &MainWindow::chooseProject);
     connect(importStart, &QPushButton::clicked, this, &MainWindow::importImages);
-    workspaceLayout->addWidget(canvasStack_, 1);
+    auto *canvasContainer = new QWidget(workspace);
+    auto *canvasGrid = new QGridLayout(canvasContainer);
+    canvasGrid->setContentsMargins(0, 0, 0, 0);
+    canvasGrid->setSpacing(0);
+
+    rulerCorner_ = new CanvasRulerCornerWidget(canvasContainer);
+    rulerCorner_->setObjectName(QStringLiteral("rulerCorner"));
+    horizontalRuler_ = new CanvasRulerWidget(CanvasGuide::Axis::Horizontal, session_, canvas_, canvasContainer);
+    horizontalRuler_->setObjectName(QStringLiteral("horizontalRuler"));
+    verticalRuler_ = new CanvasRulerWidget(CanvasGuide::Axis::Vertical, session_, canvas_, canvasContainer);
+    verticalRuler_->setObjectName(QStringLiteral("verticalRuler"));
+
+    canvasGrid->addWidget(rulerCorner_, 0, 0);
+    canvasGrid->addWidget(horizontalRuler_, 0, 1);
+    canvasGrid->addWidget(verticalRuler_, 1, 0);
+    canvasGrid->addWidget(canvasStack_, 1, 1);
+    canvasGrid->setRowStretch(1, 1);
+    canvasGrid->setColumnStretch(1, 1);
+
+    connect(horizontalRuler_, &CanvasRulerWidget::guideChanged, this, [this] { syncDocumentViews(false); });
+    connect(verticalRuler_, &CanvasRulerWidget::guideChanged, this, [this] { syncDocumentViews(false); });
+    connect(canvas_, &CanvasWidget::guideChanged, this, [this] { syncDocumentViews(false); });
+    const auto updateRulers = [this] {
+        if (horizontalRuler_ && horizontalRuler_->isVisible()) horizontalRuler_->update();
+        if (verticalRuler_ && verticalRuler_->isVisible()) verticalRuler_->update();
+    };
+    connect(canvas_, &CanvasWidget::zoomChanged, this, updateRulers);
+    connect(canvas_, &CanvasWidget::viewportChanged, this, updateRulers);
+
+    updateRulerVisibility();
+    workspaceLayout->addWidget(canvasContainer, 1);
 
     layerModel_ = new LayerListModel(this);
     auto *inspector = new QWidget(workspace); inspector->setObjectName(QStringLiteral("inspector")); inspector->setFixedWidth(252);
@@ -1125,24 +1361,36 @@ MainWindow::MainWindow(QWidget *parent)
     auto *appearance = new QWidget(inspector); appearance->setObjectName(QStringLiteral("appearancePanel")); appearance->setFixedHeight(83);
     auto *appearanceLayout = new QVBoxLayout(appearance); appearanceLayout->setContentsMargins(12, 8, 12, 8); appearanceLayout->setSpacing(6);
     auto *blendRow = new QHBoxLayout; auto *blendLabel = new QLabel(tr("Blend"), appearance);
-    blendMode_ = new QComboBox(appearance); blendMode_->addItems({tr("Normal"), tr("Multiply"), tr("Screen"), tr("Overlay"), tr("Darken"), tr("Lighten"), tr("Difference"),tr("Color Dodge"),tr("Color Burn"),tr("Hue"),tr("Saturation"),tr("Color"),tr("Luminosity")});
+    blendMode_ = new QComboBox(appearance); blendMode_->addItems({
+        tr("Normal"),
+        tr("Darken"), tr("Multiply"), tr("Color Burn"), tr("Linear Burn"),
+        tr("Lighten"), tr("Screen"), tr("Color Dodge"), tr("Linear Dodge (Add)"),
+        tr("Overlay"), tr("Soft Light"), tr("Hard Light"), tr("Vivid Light"), tr("Linear Light"), tr("Pin Light"), tr("Hard Mix"),
+        tr("Difference"), tr("Exclusion"), tr("Subtract"), tr("Divide"),
+        tr("Hue"), tr("Saturation"), tr("Color"), tr("Luminosity")
+    });
     blendMode_->setObjectName(QStringLiteral("blendMode"));
     blendMode_->view()->installEventFilter(this);
     blendRow->addWidget(blendLabel); blendRow->addWidget(blendMode_, 1); appearanceLayout->addLayout(blendRow);
-    auto *opacityRow = new QHBoxLayout; auto *opacityLabel = new QLabel(tr("Opacity"), appearance);
+    auto *opacityRow = new QHBoxLayout;
     opacitySlider_ = new SnapSlider(Qt::Horizontal, appearance); opacitySlider_->setObjectName(QStringLiteral("layerOpacity")); opacitySlider_->setRange(0, 100); opacitySlider_->setValue(100);
+    layerOpacityLabel_ = new ScrubLabel(tr("Opacity"), opacitySlider_, 1.0, 1.0, appearance);
+    layerOpacityLabel_->setObjectName(QStringLiteral("layerOpacityLabel"));
+    layerOpacityLabel_->setToolTip(tr("Layer Opacity"));
     auto *opacityValue = new QLabel(QStringLiteral("100  %"), appearance); opacityValue->setMinimumWidth(43); opacityValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    opacityRow->addWidget(opacityLabel); opacityRow->addWidget(opacitySlider_, 1); opacityRow->addWidget(opacityValue); appearanceLayout->addLayout(opacityRow);
+    opacityRow->addWidget(layerOpacityLabel_); opacityRow->addWidget(opacitySlider_, 1); opacityRow->addWidget(opacityValue); appearanceLayout->addLayout(opacityRow);
     inspectorLayout->addWidget(appearance);
     layerView_ = new QListView(inspector);
     layerView_->setObjectName(QStringLiteral("layerList"));
     layerView_->setModel(layerModel_);
     layerView_->setItemDelegate(new LayerDelegate(layerView_));
     layerView_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    layerView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     layerView_->setDragEnabled(true); layerView_->setAcceptDrops(true); layerView_->setDropIndicatorShown(true);
     layerView_->setDragDropMode(QAbstractItemView::DragDrop); layerView_->setDefaultDropAction(Qt::MoveAction);
     layerView_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     layerView_->viewport()->setMouseTracking(true);
+    layerView_->installEventFilter(this);
     layerView_->viewport()->installEventFilter(this);
     inspectorLayout->addWidget(layerView_, 1);
     auto *layerFooter = new QWidget(inspector); layerFooter->setObjectName(QStringLiteral("layerFooter")); layerFooter->setFixedHeight(36);
@@ -1157,6 +1405,20 @@ MainWindow::MainWindow(QWidget *parent)
     auto *addGroup = layerButton(18, QStringLiteral("addGroupButton"), tr("New folder"));
     auto *duplicate = layerButton(19, QStringLiteral("duplicateLayerButton"), tr("Duplicate layer"));
     auto *addMask = layerButton(20, QStringLiteral("addMaskButton"), tr("Add layer mask"));
+    auto *addEffect = layerButton(30, QStringLiteral("addEffectButton"), tr("Layer effects"));
+    addEffect->setPopupMode(QToolButton::InstantPopup);
+    auto *effectsMenu = new QMenu(addEffect);
+    for (LayerEffectKind kind : {LayerEffectKind::Stroke, LayerEffectKind::DropShadow, LayerEffectKind::ColorOverlay,
+                                 LayerEffectKind::InnerShadow, LayerEffectKind::OuterGlow, LayerEffectKind::InnerGlow}) {
+        auto *action = effectsMenu->addAction(layerEffectKindToString(kind) + QStringLiteral("…"));
+        connect(action, &QAction::triggered, this, [this, kind]() {
+            if (!document_ || !document_->activeLayerId || !session_.canEditEffects()) return;
+            const QUuid target = *document_->activeLayerId;
+            session_.addLayerEffect(target, kind);
+            layerEffectsDialog(target, kind);
+        });
+    }
+    addEffect->setMenu(effectsMenu);
     layerMenuButton_ = layerButton(21, QStringLiteral("layerActionsButton"), tr("More layer actions"));
     layerMenuButton_->setPopupMode(QToolButton::InstantPopup);
     footerLayout->addStretch();
@@ -1181,6 +1443,10 @@ MainWindow::MainWindow(QWidget *parent)
         session_.toggleLayerVisibility(id);
         syncDocumentViews();
     });
+    connect(layerModel_, &LayerListModel::effectVisibilityToggleRequested, this, [this](const QUuid &id, LayerEffectKind kind) {
+        session_.toggleLayerEffect(id, kind);
+        syncDocumentViews();
+    });
     connect(layerModel_, &LayerListModel::renameRequested, this, [this](const QUuid &id, const QString &name) {
         session_.renameLayer(id, name); syncDocumentViews(false);
     });
@@ -1200,6 +1466,19 @@ MainWindow::MainWindow(QWidget *parent)
         session_.endEdit();
         if (changed) syncDocumentViews();
     });
+    connect(layerModel_, &LayerListModel::maskDropRequested, this, [this](const QUuid &sourceId, const QUuid &targetId) {
+        if (!document_) return;
+        if (session_.copyLayerMask(sourceId, targetId)) {
+            syncDocumentViews();
+        }
+    });
+    connect(layerModel_, &LayerListModel::effectDropRequested, this, [this](const QUuid &sourceId, LayerEffectKind kind, const QUuid &targetId) {
+        if (!document_) return;
+        if (session_.copyLayerEffect(kind, sourceId, targetId)) {
+            selectedEffect_ = EffectSelection{targetId, kind};
+            syncDocumentViews();
+        }
+    });
     connect(layerView_->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] {
         if (!document_) return;
         if (transformOriginalDocument_) finishPersistentTransform(true);
@@ -1210,6 +1489,14 @@ MainWindow::MainWindow(QWidget *parent)
         std::optional<QUuid> primary;
         const QModelIndex current = layerView_->currentIndex();
         if (const auto id = layerModel_->layerId(current)) primary = id;
+        if (layerModel_->isEffect(current)) {
+            const auto kind = layerModel_->effectKind(current);
+            if (primary && kind) {
+                selectedEffect_ = EffectSelection{*primary, *kind};
+            }
+        } else {
+            selectedEffect_ = std::nullopt;
+        }
         if (session_.hasFloatingSelection()) {
             session_.commitSelectionTransform();
             bool hasValid = false;
@@ -1227,6 +1514,26 @@ MainWindow::MainWindow(QWidget *parent)
     connect(layerView_, &QListView::clicked, this, [this](const QModelIndex &index) {
         if (!document_ || !index.isValid()) return;
         const auto id = layerModel_->layerId(index); if (!id) return;
+
+        if (layerModel_->isEffect(index)) {
+            const auto kind = layerModel_->effectKind(index);
+            if (!kind) return;
+            const int depth = index.data(Qt::UserRole + 1).toInt();
+            const int indent = std::min(depth, 8) * 18;
+            const int eyeX = 38 + indent;
+            const int x = layerView_->viewport()->mapFromGlobal(QCursor::pos()).x();
+            if (x >= eyeX - 6 && x <= eyeX + 22) {
+                session_.toggleLayerEffect(*id, *kind);
+                syncDocumentViews();
+                return;
+            }
+            selectedEffect_ = EffectSelection{*id, *kind};
+            session_.selectLayer(*id);
+            syncDocumentViews(false);
+            return;
+        }
+
+        selectedEffect_ = std::nullopt;
         const auto found = std::find_if(document_->layers.cbegin(), document_->layers.cend(), [&](const Layer &candidate){ return candidate.id == *id; });
         if (found == document_->layers.cend()) return;
         const Layer &layer = *found;
@@ -1234,6 +1541,15 @@ MainWindow::MainWindow(QWidget *parent)
         const int thumbnail = 34 + std::min(depth, 8) * 18;
         const int x = layerView_->viewport()->mapFromGlobal(QCursor::pos()).x();
         if (layer.group && x >= thumbnail - 9 && x < thumbnail + 8) { layerModel_->toggleExpanded(layer.id); return; }
+
+        if (layerModel_->data(index, LayerListModel::HasEffectsRole).toBool()) {
+            const QRect rowRect = layerView_->visualRect(index);
+            if (x >= rowRect.right() - 36 && x <= rowRect.right()) {
+                layerModel_->toggleEffectsExpanded(layer.id);
+                return;
+            }
+        }
+
         const Qt::KeyboardModifiers modifiers = QApplication::keyboardModifiers();
         if (modifiers.testFlag(Qt::ControlModifier) && x >= thumbnail && x <= thumbnail + 80) {
             const SelectionMode mode = modifiers.testFlag(Qt::AltModifier) ? SelectionMode::Subtract
@@ -1252,13 +1568,76 @@ MainWindow::MainWindow(QWidget *parent)
         session_.selectMaskTarget(!layer.mask.isNull() && x >= thumbnail + 42 && x <= thumbnail + 80);
         updateInspector(); canvas_->update();
     });
-    connect(layerView_, &QListView::doubleClicked, this, [this](const QModelIndex &) {
+    connect(layerView_, &QListView::doubleClicked, this, [this](const QModelIndex &index) {
+        if (!document_ || !index.isValid()) return;
+        if (layerModel_->isEffect(index)) {
+            const auto id = layerModel_->layerId(index);
+            const auto kind = layerModel_->effectKind(index);
+            if (id && kind) {
+                layerEffectsDialog(*id, *kind);
+            }
+            return;
+        }
         const Layer *layer = session_.activeLayer(); if (!layer) return;
         if (layer->adjustment.isEmpty()) { layerView_->edit(layerView_->currentIndex()); return; }
         const QString kind = layer->adjustment.value(QStringLiteral("kind")).toString();
-        if (kind == QStringLiteral("Hue/Saturation")) hueSaturationDialog(); else if (kind == QStringLiteral("Levels")) levelsDialog();
-        else if (kind == QStringLiteral("Curves")) curvesDialog(); else if (kind == QStringLiteral("Exposure")) exposureDialog();
-        else if (kind == QStringLiteral("Gradient Map")) gradientMapDialog(); else if (kind == QStringLiteral("Grain")) grainDialog();
+        if (kind == QStringLiteral("Hue/Saturation")) hueSaturationDialog();
+        else if (kind == QStringLiteral("Levels")) levelsDialog();
+        else if (kind == QStringLiteral("Curves")) curvesDialog();
+        else if (kind == QStringLiteral("Exposure")) exposureDialog();
+        else if (kind == QStringLiteral("Gradient Map")) gradientMapDialog();
+        else if (kind == QStringLiteral("Grain")) grainDialog();
+        else if (kind == QStringLiteral("Black & White")) blackWhiteDialog();
+        else if (kind == QStringLiteral("Color Balance")) colorBalanceDialog();
+        else if (kind == QStringLiteral("Gaussian Blur")) gaussianBlurDialog();
+        else if (kind == QStringLiteral("Motion Blur")) motionBlurDialog();
+        else if (kind == QStringLiteral("Add Noise")) addNoiseDialog();
+    });
+    layerView_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(layerView_, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        if (!document_) return;
+        const QModelIndex index = layerView_->indexAt(pos);
+        QMenu menu(this);
+        if (index.isValid() && layerModel_->isEffect(index)) {
+            const auto id = layerModel_->layerId(index);
+            const auto kind = layerModel_->effectKind(index);
+            if (id && kind) {
+                auto *editAct = menu.addAction(tr("Edit %1…").arg(layerEffectKindToString(*kind)));
+                connect(editAct, &QAction::triggered, this, [this, id, kind]() {
+                    layerEffectsDialog(*id, *kind);
+                });
+                auto *toggleAct = menu.addAction(tr("Toggle Visibility"));
+                connect(toggleAct, &QAction::triggered, this, [this, id, kind]() {
+                    session_.toggleLayerEffect(*id, *kind);
+                    syncDocumentViews();
+                });
+                auto *deleteAct = menu.addAction(tr("Delete Effect"));
+                connect(deleteAct, &QAction::triggered, this, [this, id, kind]() {
+                    session_.removeLayerEffect(*id, *kind);
+                    selectedEffect_ = std::nullopt;
+                    syncDocumentViews();
+                });
+            }
+        } else if (session_.canEditEffects()) {
+            auto *effectsAct = menu.addAction(tr("Layer Effects…"));
+            connect(effectsAct, &QAction::triggered, this, [this]() {
+                layerEffectsDialog();
+            });
+            auto *addMenu = menu.addMenu(tr("Add Effect"));
+            for (LayerEffectKind kind : {LayerEffectKind::Stroke, LayerEffectKind::DropShadow, LayerEffectKind::ColorOverlay,
+                                         LayerEffectKind::InnerShadow, LayerEffectKind::OuterGlow, LayerEffectKind::InnerGlow}) {
+                auto *act = addMenu->addAction(layerEffectKindToString(kind) + QStringLiteral("…"));
+                connect(act, &QAction::triggered, this, [this, kind]() {
+                    if (!document_ || !document_->activeLayerId) return;
+                    const QUuid target = *document_->activeLayerId;
+                    session_.addLayerEffect(target, kind);
+                    layerEffectsDialog(target, kind);
+                });
+            }
+        }
+        if (!menu.isEmpty()) {
+            menu.exec(layerView_->viewport()->mapToGlobal(pos));
+        }
     });
     connect(opacitySlider_, &QSlider::valueChanged, this, [this, opacityValue](int value) {
         opacityValue->setText(QStringLiteral("%1  %").arg(value));
@@ -1271,6 +1650,13 @@ MainWindow::MainWindow(QWidget *parent)
         if (document_ && document_->activeLayerId) session_.beginEdit(QStringLiteral("Layer Opacity"));
     });
     connect(opacitySlider_, &QSlider::sliderReleased, this, [this] {
+        if (document_ && document_->activeLayerId) session_.endEdit();
+        refreshTitle();
+    });
+    connect(layerOpacityLabel_, &ScrubLabel::dragStarted, this, [this] {
+        if (document_ && document_->activeLayerId) session_.beginEdit(QStringLiteral("Layer Opacity"));
+    });
+    connect(layerOpacityLabel_, &ScrubLabel::dragEnded, this, [this] {
         if (document_ && document_->activeLayerId) session_.endEdit();
         refreshTitle();
     });
@@ -1287,13 +1673,15 @@ MainWindow::MainWindow(QWidget *parent)
     });
     const auto changeTransform = [this, link] {
         if (!document_ || !document_->activeLayerId) return;
-        if (link->isChecked() && (sender() == widthField_ || sender() == heightField_)) {
+        const bool isWidth = (sender() == widthField_ || sender() == widthLabel_);
+        const bool isHeight = (sender() == heightField_ || sender() == heightLabel_);
+        if (link->isChecked() && (isWidth || isHeight)) {
             QRectF current = session_.selectedLayerIds().size() > 1 ? session_.selectedLayersBounds() : QRectF();
             if (current.isEmpty()) {
                 if (const Layer *layer = session_.activeLayer()) current = QRectF(layer->transform.origin, layer->transform.size);
             }
             if (current.width() > 0 && current.height() > 0) {
-                if (sender() == widthField_) {
+                if (isWidth) {
                     const QSignalBlocker blocker(heightField_);
                     heightField_->setValue(std::max(1.0, widthField_->value() * current.height() / current.width()));
                 } else {
@@ -1330,6 +1718,20 @@ MainWindow::MainWindow(QWidget *parent)
     connect(widthField_, &QDoubleSpinBox::editingFinished, this, changeTransform);
     connect(heightField_, &QDoubleSpinBox::editingFinished, this, changeTransform);
     connect(rotationField_, &QDoubleSpinBox::editingFinished, this, changeTransform);
+    connect(xLabel_, &ScrubLabel::scrubValueChanged, this, [changeTransform] { changeTransform(); });
+    connect(yLabel_, &ScrubLabel::scrubValueChanged, this, [changeTransform] { changeTransform(); });
+    connect(widthLabel_, &ScrubLabel::scrubValueChanged, this, [changeTransform] { changeTransform(); });
+    connect(heightLabel_, &ScrubLabel::scrubValueChanged, this, [changeTransform] { changeTransform(); });
+    connect(rotationLabel_, &ScrubLabel::scrubValueChanged, this, [changeTransform] { changeTransform(); });
+
+    const auto startTransformScrub = [this] {
+        beginPersistentTransform(session_.isMaskSelected() ? QStringLiteral("Transform Layer Mask") : QStringLiteral("Transform Layer"));
+    };
+    xLabel_->setOnStart(startTransformScrub);
+    yLabel_->setOnStart(startTransformScrub);
+    widthLabel_->setOnStart(startTransformScrub);
+    heightLabel_->setOnStart(startTransformScrub);
+    rotationLabel_->setOnStart(startTransformScrub);
     connect(scaleField_, &QDoubleSpinBox::editingFinished, this, [this] {
         Layer *layer = session_.activeLayer(); if (!layer || session_.selectedLayerIds().size() > 1) return;
         const bool maskTarget = session_.isMaskSelected() && !layer->maskLinked;
@@ -1361,6 +1763,11 @@ MainWindow::MainWindow(QWidget *parent)
         stashCurrentTab();
         workspaceTabs_.move(from, to);
         tabRecoveryPaths_.move(from, to);
+        if (tabWatchers_.size() > std::max(from, to)) tabWatchers_.move(from, to);
+        if (tabDigests_.size() > std::max(from, to)) tabDigests_.move(from, to);
+        if (tabPendingExternalChange_.size() > std::max(from, to)) tabPendingExternalChange_.move(from, to);
+        if (tabPendingExternalDigest_.size() > std::max(from, to)) tabPendingExternalDigest_.move(from, to);
+        if (tabPendingExternalDoc_.size() > std::max(from, to)) tabPendingExternalDoc_.move(from, to);
         currentTab_ = tabs_->currentIndex();
         session_ = workspaceTabs_.at(currentTab_);
         syncDocumentViews();
@@ -1415,10 +1822,18 @@ MainWindow::MainWindow(QWidget *parent)
         session_.magicWand(point, wandTolerance->value(), wandSampleSize->currentIndex(), wandContiguous->isChecked(),
                            wandSample->currentIndex() == 1, SelectionMode(mode), selectionAntialias->isChecked()); syncDocumentViews(false);
     });
+    connect(canvas_, &CanvasWidget::objectSelectionRequested, this, [this, objectEdgeOffset, objectSmoothEdges, wandSample](const QPoint &point, int mode) {
+        selectObjectRequested(point, mode, objectEdgeOffset->value(), objectSmoothEdges->isChecked(), wandSample->currentIndex() == 1);
+    });
     connect(canvas_, &CanvasWidget::cropRequested, this, [this](const QRect &rect) {
         if (session_.crop(rect)) syncDocumentViews();
     });
+    connect(canvas_, &CanvasWidget::zoomChanged, this, [this](double z) {
+        session_.setViewportZoom(z);
+    });
     connect(canvas_, &CanvasWidget::brushStrokeStarted, this, [this](const QPointF &point, bool erasing) {
+        session_.setViewportZoom(canvas_->zoom());
+        session_.setBrushSmoothing(brushSmoothing_);
         session_.beginBrushStroke(point, foregroundColor_, brushDiameter_, brushHardness_, brushOpacity_, erasing);
         canvas_->invalidateDocument();
     });
@@ -1454,6 +1869,8 @@ MainWindow::MainWindow(QWidget *parent)
         else session_.beginWarpStroke(point, smearMode->currentIndex() == 0 ? 0 : 1, brushDiameter_, brushHardness_, brushOpacity_);
         canvas_->invalidateDocument();
     });
+    connect(canvas_, &CanvasWidget::cycleSmearModeRequested, this, &MainWindow::cycleSmearMode);
+    connect(canvas_, &CanvasWidget::cycleToolModeRequested, this, &MainWindow::cycleToolMode);
     connect(canvas_, &CanvasWidget::gradientRequested, this, [this,gradientShape,gradientStyle,gradientReverse](const QPointF &start, const QPointF &end) {
         previewGradient(start, end, gradientShape->currentIndex() == 1, gradientStyle->currentIndex() == 0,
                         gradientReverse->isChecked(), gradientOpacityField_->value() / 100.0);
@@ -1464,15 +1881,20 @@ MainWindow::MainWindow(QWidget *parent)
     connect(gradientStyle, &SegmentedControl::currentIndexChanged, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(gradientReverse, &QCheckBox::toggled, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(gradientOpacityField_, &QDoubleSpinBox::valueChanged, canvas_, &CanvasWidget::refreshPendingGradient);
-    connect(canvas_, &CanvasWidget::shapeRequested, this, [this](const QRectF &rect, bool ellipse, double cornerRadius) {
-        if (session_.addShape(rect, foregroundColor_, Qt::transparent, 0, ellipse, cornerRadius)) syncDocumentViews();
+    connect(canvas_, &CanvasWidget::shapeCreated, this, [this](ShapeKind kind, const QRectF &rect, double strokeWidth, double cornerRadius, const std::optional<QPointF> &start, const std::optional<QPointF> &end) {
+        if (session_.addShape(kind, rect, foregroundColor_, foregroundColor_, strokeWidth, cornerRadius, start, end)) syncDocumentViews();
     });
-    const auto applyInlineTextFormat = [this, textFont, textSize, textBold, textItalic, textUnderline, textAlignment] {
+    const auto applyInlineTextFormat = [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textUnderline, textAlignment] {
         auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly));
         if (!editor) return;
+        editor->tracking = textTracking->value();
+        editor->leading = textLeading->value();
         QFont font = textFont->currentFont(); font.setPixelSize(std::max(1, qRound(textSize->value() * canvas_->zoom()))); font.setBold(textBold->isChecked()); font.setItalic(textItalic->isChecked()); font.setUnderline(textUnderline->isChecked());
+        if (editor->tracking != 0.0) {
+            font.setLetterSpacing(QFont::AbsoluteSpacing, editor->tracking * canvas_->zoom());
+        }
         const QTextCursor originalCursor = editor->textCursor();
-        formatTextDocument(*editor->document(), font, foregroundColor_, textAlignment->currentIndex(), editor->areaText);
+        formatTextDocument(*editor->document(), font, foregroundColor_, textAlignment->currentIndex(), editor->areaText, editor->tracking * canvas_->zoom(), editor->leading * canvas_->zoom());
         editor->setTextCursor(originalCursor);
         editor->setCurrentFont(font);
         editor->setTextColor(foregroundColor_);
@@ -1480,15 +1902,32 @@ MainWindow::MainWindow(QWidget *parent)
     };
     connect(textFont, &QFontComboBox::currentFontChanged, this, [applyInlineTextFormat](const QFont &) { applyInlineTextFormat(); });
     connect(textSize, &QSpinBox::valueChanged, this, [applyInlineTextFormat](int) { applyInlineTextFormat(); });
+    connect(textTracking, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyInlineTextFormat](double) { applyInlineTextFormat(); });
+    connect(textLeading, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyInlineTextFormat](double) { applyInlineTextFormat(); });
     connect(textBold, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
     connect(textItalic, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
     connect(textUnderline, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
     connect(textAlignment, &SegmentedControl::currentIndexChanged, this, [applyInlineTextFormat](int) { applyInlineTextFormat(); });
-    const auto beginInlineText = [this, textFont, textSize, textBold, textItalic, textUnderline, textAlignment, textDone, textCancel, applyInlineTextFormat]
-        (const QRectF &box, const QString &initialText, bool areaText, const std::optional<QUuid> &layerId, const QColor &color) {
+    const auto beginInlineText = [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textUnderline, textAlignment, textDone, textCancel, applyInlineTextFormat]
+        (const QRectF &box, const QString &initialText, bool areaText, const std::optional<QUuid> &layerId, const QColor &color, double tracking = 0.0, double leading = 0.0) {
         if (auto *existing = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) existing->finish(true);
         auto *editor = new InlineTextEditor(canvas_);
         editor->canvasBox = box; editor->areaText = areaText;
+        editor->tracking = tracking;
+        editor->leading = leading;
+        {
+            const QSignalBlocker tb(textTracking), lb(textLeading);
+            textTracking->setValue(tracking);
+            textLeading->setValue(leading);
+        }
+        editor->trackingAdjusted = [editor, textTracking](double) {
+            const QSignalBlocker blocker(textTracking);
+            textTracking->setValue(editor->tracking);
+        };
+        editor->leadingAdjusted = [editor, textLeading](double) {
+            const QSignalBlocker blocker(textLeading);
+            textLeading->setValue(editor->leading);
+        };
         editor->syncCanvasGeometry();
         editor->setTextColor(color);
         editor->setPlainText(initialText);
@@ -1503,9 +1942,9 @@ MainWindow::MainWindow(QWidget *parent)
                 const bool fixedBox = areaText || editor->wasResized();
                 const bool changed = layerId
                     ? session_.updateText(*layerId, editor->toPlainText(), documentBox, textFont->currentFont().family(), textSize->value(), textBold->isChecked(),
-                        textItalic->isChecked(), textUnderline->isChecked(), textAlignment->currentIndex(), foregroundColor_, fixedBox)
+                        textItalic->isChecked(), textUnderline->isChecked(), textAlignment->currentIndex(), foregroundColor_, fixedBox, editor->tracking, editor->leading)
                     : session_.addText(editor->toPlainText(), documentBox, textFont->currentFont().family(), textSize->value(), textBold->isChecked(),
-                        textItalic->isChecked(), textUnderline->isChecked(), textAlignment->currentIndex(), foregroundColor_, fixedBox);
+                        textItalic->isChecked(), textUnderline->isChecked(), textAlignment->currentIndex(), foregroundColor_, fixedBox, editor->tracking, editor->leading);
                 if (changed) { syncDocumentViews(); return; }
             }
             canvas_->invalidateDocument(); syncDocumentViews(false);
@@ -1521,23 +1960,64 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::textBoxRequested, this, [this, beginInlineText](const QRectF &box, bool areaText) {
         beginInlineText(box, QString(), areaText, std::nullopt, foregroundColor_);
     });
-    connect(canvas_, &CanvasWidget::textLayerEditRequested, this, [this, textFont, textSize, textBold, textItalic, textUnderline, textAlignment, beginInlineText](const QUuid &id) {
+    connect(canvas_, &CanvasWidget::textLayerEditRequested, this, [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textUnderline, textAlignment, beginInlineText](const QUuid &id) {
         // Commit using the previous layer's controls before loading the next layer's style.
         if (auto *existing = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) existing->finish(true);
         if (!document_) return;
         auto it = std::find_if(document_->layers.begin(), document_->layers.end(), [&id](const Layer &layer) { return layer.id == id; });
         if (it == document_->layers.end()) return;
         const QJsonObject metadata = it->shape;
-        const QSignalBlocker fontBlock(textFont), sizeBlock(textSize), boldBlock(textBold), italicBlock(textItalic), underlineBlock(textUnderline), alignmentBlock(textAlignment);
-        textFont->setCurrentFont(QFont(metadata.value(QStringLiteral("fontFamily")).toString()));
-        textSize->setValue(metadata.value(QStringLiteral("pixelSize")).toInt(48));
-        textBold->setChecked(metadata.value(QStringLiteral("bold")).toBool()); textItalic->setChecked(metadata.value(QStringLiteral("italic")).toBool());
-        textUnderline->setChecked(metadata.value(QStringLiteral("underline")).toBool()); textAlignment->setCurrentIndex(std::clamp(metadata.value(QStringLiteral("alignment")).toInt(), 0, 2));
-        const QColor color(metadata.value(QStringLiteral("fill")).toString());
-        if (color.isValid()) { foregroundColor_ = color; canvas_->setPaletteForeground(color); foregroundSwatch_->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(color.name(QColor::HexRgb))); }
-        const QRectF box(it->transform.origin, it->transform.size); const QString text = metadata.value(QStringLiteral("text")).toString(); const bool areaText = metadata.value(QStringLiteral("areaText")).toBool();
+        const QSignalBlocker fontBlock(textFont), sizeBlock(textSize), trackingBlock(textTracking), leadingBlock(textLeading), boldBlock(textBold), italicBlock(textItalic), underlineBlock(textUnderline), alignmentBlock(textAlignment);
+        QString textContent;
+        QString fontName = QStringLiteral("Helvetica");
+        int pixelSize = 48;
+        bool bold = false;
+        bool italic = false;
+        bool underline = false;
+        int align = 0;
+        QColor color = foregroundColor_;
+        bool areaText = false;
+        double tracking = 0.0;
+        double leading = 0.0;
+
+        if (it->text.has_value()) {
+            textContent = it->text->content;
+            fontName = it->text->fontName;
+            pixelSize = qRound(it->text->fontSize);
+            color = QColor::fromRgbF(it->text->red, it->text->green, it->text->blue);
+            if (it->text->alignment == TextAlignment::Center) align = 1;
+            else if (it->text->alignment == TextAlignment::Right) align = 2;
+            else align = 0;
+            areaText = it->text->boxSize.has_value();
+            tracking = it->text->tracking;
+            leading = it->text->leading;
+        } else {
+            textContent = metadata.value(QStringLiteral("text")).toString();
+            fontName = metadata.value(QStringLiteral("fontFamily")).toString(QStringLiteral("Helvetica"));
+            pixelSize = metadata.value(QStringLiteral("pixelSize")).toInt(48);
+            bold = metadata.value(QStringLiteral("bold")).toBool();
+            italic = metadata.value(QStringLiteral("italic")).toBool();
+            underline = metadata.value(QStringLiteral("underline")).toBool();
+            align = std::clamp(metadata.value(QStringLiteral("alignment")).toInt(), 0, 2);
+            const QColor c(metadata.value(QStringLiteral("fill")).toString());
+            if (c.isValid()) color = c;
+            areaText = metadata.value(QStringLiteral("areaText")).toBool();
+        }
+
+        textFont->setCurrentFont(QFont(fontName));
+        textSize->setValue(pixelSize);
+        textTracking->setValue(tracking);
+        textLeading->setValue(leading);
+        textBold->setChecked(bold); textItalic->setChecked(italic);
+        textUnderline->setChecked(underline); textAlignment->setCurrentIndex(align);
+        if (color.isValid()) {
+            foregroundColor_ = color;
+            canvas_->setPaletteForeground(color);
+            foregroundSwatch_->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(color.name(QColor::HexRgb)));
+        }
+        const QRectF box(it->transform.origin, it->transform.size);
         session_.selectLayer(id); canvas_->setTextEditingLayer(id);
-        beginInlineText(box, text, areaText, id, color.isValid() ? color : foregroundColor_);
+        beginInlineText(box, textContent, areaText, id, color.isValid() ? color : foregroundColor_, tracking, leading);
     });
     connect(textDone, &QPushButton::clicked, this, [this] { if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(true); });
     connect(textCancel, &QPushButton::clicked, this, [this] { if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(false); });
@@ -1552,30 +2032,34 @@ MainWindow::MainWindow(QWidget *parent)
     });
     canvas_->setPaletteForeground(foregroundColor_);
     createActions();
-    auto *quickFileMenu = new QMenu(menuRestoreButton);
-    quickFileMenu->setObjectName(QStringLiteral("quickFileMenu"));
-    quickFileMenu->setTitle(tr("Application menu"));
-    if (QAction *open = findChild<QAction *>(QStringLiteral("commandOpen"))) quickFileMenu->addAction(open);
-    quickFileMenu->addSeparator();
-    if (QAction *save = findChild<QAction *>(QStringLiteral("commandSave"))) quickFileMenu->addAction(save);
-    if (QAction *saveAs = findChild<QAction *>(QStringLiteral("commandSaveAs"))) quickFileMenu->addAction(saveAs);
-    auto *quickExportMenu = quickFileMenu->addMenu(tr("Export"));
+    quickFileMenu_ = new QMenu(menuRestoreButton_);
+    quickFileMenu_->setObjectName(QStringLiteral("quickFileMenu"));
+    quickFileMenu_->setTitle(tr("Application menu"));
+    if (QAction *open = findChild<QAction *>(QStringLiteral("commandOpen"))) quickFileMenu_->addAction(open);
+    quickFileMenu_->addSeparator();
+    if (QAction *save = findChild<QAction *>(QStringLiteral("commandSave"))) quickFileMenu_->addAction(save);
+    if (QAction *saveAs = findChild<QAction *>(QStringLiteral("commandSaveAs"))) quickFileMenu_->addAction(saveAs);
+    auto *quickExportMenu = quickFileMenu_->addMenu(tr("Export"));
     quickExportMenu->setObjectName(QStringLiteral("quickExportMenu"));
     if (QAction *png = findChild<QAction *>(QStringLiteral("commandExportPng"))) quickExportMenu->addAction(png);
     if (QAction *jpeg = findChild<QAction *>(QStringLiteral("commandExportJpeg"))) quickExportMenu->addAction(jpeg);
-    quickFileMenu->addSeparator();
+    quickFileMenu_->addSeparator();
     // Reuse the same menus and actions so shortcuts, enabled states, and dynamic
     // command labels remain identical with the menu bar shown or hidden.
     for (QAction *category : menuBar()->actions())
-        if (QMenu *menu = category->menu()) quickFileMenu->addMenu(menu);
-    quickFileMenu->addSeparator();
-    if (QAction *showMenuBar = findChild<QAction *>(QStringLiteral("showMenuBar"))) quickFileMenu->addAction(showMenuBar);
+        if (QMenu *menu = category->menu()) quickFileMenu_->addMenu(menu);
+    quickFileMenu_->addSeparator();
     if (QAction *showMenuBar = findChild<QAction *>(QStringLiteral("showMenuBar"))) {
-        connect(menuRestoreButton, &QToolButton::clicked, showMenuBar, [showMenuBar] { showMenuBar->toggle(); });
+        quickFileMenu_->addAction(showMenuBar);
+        connect(menuRestoreButton_, &QToolButton::clicked, showMenuBar, [showMenuBar] { showMenuBar->toggle(); });
     }
-    menuRestoreButton->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(menuRestoreButton, &QWidget::customContextMenuRequested, this, [menuRestoreButton, quickFileMenu] {
-        quickFileMenu->popup(menuRestoreButton->mapToGlobal(QPoint(0, menuRestoreButton->height() + 4)));
+    menuRestoreButton_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(menuRestoreButton_, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        Q_UNUSED(pos);
+        if (isMenuBarVisible()) return;
+        if (quickFileMenu_) {
+            quickFileMenu_->popup(menuRestoreButton_->mapToGlobal(QPoint(0, menuRestoreButton_->height() + 4)));
+        }
     });
     qApp->installEventFilter(this);
     connect(qApp, &QApplication::focusChanged, this, [this] { updateCommandStates(); });
@@ -1588,6 +2072,17 @@ MainWindow::MainWindow(QWidget *parent)
     connect(autosaveTimer_, &QTimer::timeout, this, &MainWindow::autosave);
     autosaveTimer_->start();
     QTimer::singleShot(0, this, &MainWindow::offerRecovery);
+}
+
+MainWindow::~MainWindow()
+{
+    if (qApp) {
+        qApp->removeEventFilter(this);
+        QObject::disconnect(qApp, nullptr, this, nullptr);
+    }
+    if (auto *cb = QGuiApplication::clipboard()) {
+        QObject::disconnect(cb, nullptr, this, nullptr);
+    }
 }
 
 void MainWindow::beginPersistentTransform(const QString &name)
@@ -1656,6 +2151,50 @@ void MainWindow::finishGradient(bool commit)
     syncDocumentViews();
 }
 
+void MainWindow::cycleSmearMode()
+{
+    if (!smearMode_) return;
+    const int count = smearMode_->count();
+    if (count > 0) {
+        smearMode_->setCurrentIndex((smearMode_->currentIndex() + 1) % count);
+        updateSmearStatusHint();
+    }
+}
+
+void MainWindow::cycleToolMode()
+{
+    if (!canvas_) return;
+    switch (canvas_->tool()) {
+    case CanvasWidget::Tool::Marquee:
+        canvas_->toggleMarqueeKind();
+        break;
+    case CanvasWidget::Tool::Wand:
+        canvas_->toggleWandMode();
+        break;
+    case CanvasWidget::Tool::Lasso:
+        canvas_->toggleLassoKind();
+        break;
+    case CanvasWidget::Tool::Shape:
+        canvas_->toggleShapeKind();
+        break;
+    case CanvasWidget::Tool::Blur:
+        cycleSmearMode();
+        break;
+    default:
+        break;
+    }
+}
+
+void MainWindow::updateSmearStatusHint()
+{
+    if (!statusHint_ || !canvas_ || canvas_->tool() != CanvasWidget::Tool::Blur) return;
+    const int mode = smearMode_ ? smearMode_->currentIndex() : 0;
+    const QString actionHint = (mode == 1) ? tr("Drag to soften")
+                             : (mode == 2) ? tr("Drag to smudge")
+                             : tr("Drag to push pixels");
+    statusHint_->setText(tr("%1 · [ ] size · Shift-[ ] hardness · 1–0 strength · Space to pan").arg(actionHint));
+}
+
 void MainWindow::openColorPicker(bool background)
 {
     const QColor startingColor = background ? backgroundColor_ : foregroundColor_;
@@ -1675,6 +2214,7 @@ void MainWindow::openColorPicker(bool background)
     picker->setOption(QColorDialog::DontUseNativeDialog, true);
     picker->setAttribute(Qt::WA_DeleteOnClose);
     picker->setWindowModality(Qt::NonModal);
+    attachColorDialogScrubbing(picker);
     colorPicker_ = picker;
     colorPickerBackground_ = background;
     colorPickerPreviousTool_ = int(canvas_->tool());
@@ -1723,11 +2263,11 @@ void MainWindow::createActions()
     auto *save = file->addAction(tr("&Save"));
     save->setObjectName(QStringLiteral("commandSave"));
     save->setShortcut(QKeySequence::Save);
-    connect(save, &QAction::triggered, this, &MainWindow::saveProject);
+    connect(save, &QAction::triggered, this, [this]() { saveProject(false); });
     auto *saveAs = file->addAction(tr("Save &As…"));
     saveAs->setObjectName(QStringLiteral("commandSaveAs"));
     saveAs->setShortcut(QKeySequence::SaveAs);
-    connect(saveAs, &QAction::triggered, this, &MainWindow::saveProjectAs);
+    connect(saveAs, &QAction::triggered, this, [this]() { saveProjectAs(false); });
     auto *exportAction = file->addAction(tr("Export &PNG…"));
     exportAction->setObjectName(QStringLiteral("commandExportPng"));
     exportAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
@@ -1761,6 +2301,9 @@ void MainWindow::createActions()
     connect(copy, &QAction::triggered, this, [this] { if (!dispatchTextEditCommand(TextEditCommand::Copy)) copyPixels(false); });
     connect(copyMerged, &QAction::triggered, this, [this] { copyPixels(true); });
     connect(paste, &QAction::triggered, this, [this] { if (!dispatchTextEditCommand(TextEditCommand::Paste)) pastePixels(); });
+    auto *keyboardShortcuts = edit->addAction(tr("Keyboard Shortcuts…"));
+    keyboardShortcuts->setObjectName(QStringLiteral("commandKeyboardShortcuts"));
+    connect(keyboardShortcuts, &QAction::triggered, this, &MainWindow::keyboardShortcutsDialog);
     edit->addSeparator();
     auto *duplicate = edit->addAction(tr("Duplicate Layer / Layer via Copy")); duplicate->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_J));
     auto *remove = edit->addAction(tr("Delete Layer")); remove->setShortcut(QKeySequence::Delete);
@@ -1846,32 +2389,70 @@ void MainWindow::createActions()
     connect(deleteMask, &QAction::triggered, this, [this] { if (session_.deleteLayerMask()) syncDocumentViews(); });
     auto *adjustments = new QMenu(tr("New Adjustment Layer"), this);
     adjustments->menuAction()->setObjectName(QStringLiteral("commandNewAdjustment"));
-    const QStringList adjustmentKinds{tr("Hue/Saturation"), tr("Levels"), tr("Curves"), tr("Exposure"), tr("Gradient Map"), tr("Grain")};
-    for (const QString &kind : adjustmentKinds) connect(adjustments->addAction(kind), &QAction::triggered, this, [this, kind] {
-        QJsonObject settings;
-        if (kind == QStringLiteral("Gradient Map")) {
-            const auto color = [](const QColor &value) { return QJsonObject{{QStringLiteral("red"), value.redF()},
-                {QStringLiteral("green"), value.greenF()}, {QStringLiteral("blue"), value.blueF()}}; };
-            settings.insert(QStringLiteral("gradientMapSettings"), QJsonObject{{QStringLiteral("shadows"), color(foregroundColor_)},
-                {QStringLiteral("highlights"), color(backgroundColor_)}, {QStringLiteral("reversed"), false}});
+    auto rebuildAdjustmentsMenu = [this, adjustments] {
+        adjustments->clear();
+        static const QStringList allKinds{
+            QStringLiteral("Hue/Saturation"), QStringLiteral("Levels"), QStringLiteral("Curves"),
+            QStringLiteral("Exposure"), QStringLiteral("Gradient Map"), QStringLiteral("Grain"),
+            QStringLiteral("Invert"), QStringLiteral("Black & White"), QStringLiteral("Color Balance"),
+            QStringLiteral("Gaussian Blur"), QStringLiteral("Motion Blur"), QStringLiteral("Add Noise")
+        };
+        for (const QString &kind : allKinds) {
+            if (!session_.canSaveAdjustment(kind)) continue;
+            auto *act = adjustments->addAction(kind);
+            connect(act, &QAction::triggered, this, [this, kind] {
+                QJsonObject settings;
+                if (kind == QStringLiteral("Gradient Map")) {
+                    const auto color = [](const QColor &value) {
+                        return QJsonObject{{QStringLiteral("red"), value.redF()},
+                            {QStringLiteral("green"), value.greenF()}, {QStringLiteral("blue"), value.blueF()}};
+                    };
+                    settings.insert(QStringLiteral("gradientMapSettings"), QJsonObject{
+                        {QStringLiteral("shadows"), color(foregroundColor_)},
+                        {QStringLiteral("highlights"), color(backgroundColor_)},
+                        {QStringLiteral("reversed"), false}
+                    });
+                }
+                if (!session_.addAdjustment(kind, settings)) return;
+                syncDocumentViews();
+                if (kind == QStringLiteral("Hue/Saturation")) hueSaturationDialog();
+                else if (kind == QStringLiteral("Levels")) levelsDialog();
+                else if (kind == QStringLiteral("Curves")) curvesDialog();
+                else if (kind == QStringLiteral("Exposure")) exposureDialog();
+                else if (kind == QStringLiteral("Gradient Map")) gradientMapDialog();
+                else if (kind == QStringLiteral("Grain")) grainDialog();
+                else if (kind == QStringLiteral("Black & White")) blackWhiteDialog();
+                else if (kind == QStringLiteral("Color Balance")) colorBalanceDialog();
+                else if (kind == QStringLiteral("Gaussian Blur")) gaussianBlurDialog();
+                else if (kind == QStringLiteral("Motion Blur")) motionBlurDialog();
+                else if (kind == QStringLiteral("Add Noise")) addNoiseDialog();
+            });
         }
-        if (!session_.addAdjustment(kind, settings)) return;
-        syncDocumentViews();
-        if (kind == QStringLiteral("Hue/Saturation")) hueSaturationDialog(); else if (kind == QStringLiteral("Levels")) levelsDialog();
-        else if (kind == QStringLiteral("Curves")) curvesDialog(); else if (kind == QStringLiteral("Exposure")) exposureDialog();
-        else if (kind == QStringLiteral("Gradient Map")) gradientMapDialog(); else grainDialog();
-    });
+    };
+    connect(adjustments, &QMenu::aboutToShow, this, rebuildAdjustmentsMenu);
+    rebuildAdjustmentsMenu();
     layerMenuActions->addMenu(adjustments);
     auto *editAdjustment = layerMenuActions->addAction(tr("Edit Adjustment…"));
     editAdjustment->setObjectName(QStringLiteral("commandEditAdjustment"));
     connect(editAdjustment, &QAction::triggered, this, [this] {
         const Layer *layer = session_.activeLayer(); if (!layer || layer->adjustment.isEmpty()) return;
         const QString kind = layer->adjustment.value(QStringLiteral("kind")).toString();
-        if (kind == QStringLiteral("Hue/Saturation")) hueSaturationDialog(); else if (kind == QStringLiteral("Levels")) levelsDialog();
-        else if (kind == QStringLiteral("Curves")) curvesDialog(); else if (kind == QStringLiteral("Exposure")) exposureDialog();
-        else if (kind == QStringLiteral("Gradient Map")) gradientMapDialog(); else if (kind == QStringLiteral("Grain")) grainDialog();
+        if (kind == QStringLiteral("Hue/Saturation")) hueSaturationDialog();
+        else if (kind == QStringLiteral("Levels")) levelsDialog();
+        else if (kind == QStringLiteral("Curves")) curvesDialog();
+        else if (kind == QStringLiteral("Exposure")) exposureDialog();
+        else if (kind == QStringLiteral("Gradient Map")) gradientMapDialog();
+        else if (kind == QStringLiteral("Grain")) grainDialog();
+        else if (kind == QStringLiteral("Black & White")) blackWhiteDialog();
+        else if (kind == QStringLiteral("Color Balance")) colorBalanceDialog();
+        else if (kind == QStringLiteral("Gaussian Blur")) gaussianBlurDialog();
+        else if (kind == QStringLiteral("Motion Blur")) motionBlurDialog();
+        else if (kind == QStringLiteral("Add Noise")) addNoiseDialog();
     });
     layerMenuActions->addSeparator();
+    auto *layerEffects = layerMenuActions->addAction(tr("Layer Effects…"));
+    layerEffects->setObjectName(QStringLiteral("commandLayerEffects"));
+    connect(layerEffects, &QAction::triggered, this, [this]() { layerEffectsDialog(); });
     layerMenuActions->addAction(transformSelection);
     layerMenuButton_->setMenu(adjustments);
 
@@ -1879,10 +2460,13 @@ void MainWindow::createActions()
     auto *selectAll = select->addAction(tr("Select &All")); selectAll->setShortcut(QKeySequence::SelectAll);
     auto *deselect = select->addAction(tr("&Deselect")); deselect->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
     auto *inverse = select->addAction(tr("&Inverse")); inverse->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_I));
-    selectAll->setObjectName(QStringLiteral("commandSelectAll")); deselect->setObjectName(QStringLiteral("commandDeselect")); inverse->setObjectName(QStringLiteral("commandInverseSelection"));
+    auto *selectSubject = select->addAction(tr("Select &Subject")); selectSubject->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_A));
+    selectAll->setObjectName(QStringLiteral("commandSelectAll")); deselect->setObjectName(QStringLiteral("commandDeselect"));
+    inverse->setObjectName(QStringLiteral("commandInverseSelection")); selectSubject->setObjectName(QStringLiteral("commandSelectSubject"));
     connect(selectAll, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::SelectAll)) return; session_.selectAll(); syncDocumentViews(false); });
     connect(deselect, &QAction::triggered, this, [this] { session_.deselect(); syncDocumentViews(false); });
     connect(inverse, &QAction::triggered, this, [this] { session_.invertSelection(); syncDocumentViews(false); });
+    connect(selectSubject, &QAction::triggered, this, [this] { selectSubjectAction(); });
     auto *layerPixels = select->addAction(tr("Layer's Pixels"));
     auto *maskPixels = select->addAction(tr("Mask's Black Areas"));
     connect(layerPixels, &QAction::triggered, this, [this] { if (session_.loadLayerAsSelection()) syncDocumentViews(false); });
@@ -1890,6 +2474,8 @@ void MainWindow::createActions()
     select->addSeparator();
     auto *expand = select->addAction(tr("Expand…"));
     auto *contract = select->addAction(tr("Contract…"));
+    auto *feather = select->addAction(tr("Feather…")); feather->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F6));
+    feather->setObjectName(QStringLiteral("commandFeatherSelection"));
     connect(expand, &QAction::triggered, this, [this] {
         bool ok = false; const int amount = QInputDialog::getInt(this, tr("Expand Selection"), tr("Pixels"), 1, 1, 500, 1, &ok);
         if (ok && session_.expandSelection(amount)) syncDocumentViews(false);
@@ -1897,6 +2483,14 @@ void MainWindow::createActions()
     connect(contract, &QAction::triggered, this, [this] {
         bool ok = false; const int amount = QInputDialog::getInt(this, tr("Contract Selection"), tr("Pixels"), 1, 1, 500, 1, &ok);
         if (ok && session_.contractSelection(amount)) syncDocumentViews(false);
+    });
+    connect(feather, &QAction::triggered, this, [this] {
+        bool ok = false;
+        const int amount = QInputDialog::getInt(this, tr("Feather Selection"), tr("Feather Radius (pixels):"), session_.selectionFeatherAmount(), 1, 250, 1, &ok);
+        if (ok && session_.featherSelection(amount)) {
+            session_.setSelectionFeatherAmount(amount);
+            syncDocumentViews(false);
+        }
     });
 
     auto *image = menuBar()->addMenu(tr("&Image"));
@@ -1918,9 +2512,13 @@ void MainWindow::createActions()
     auto *canvasSize = image->addAction(tr("Canvas Size…"));
     canvasSize->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_C));
     auto *cropAction = image->addAction(tr("Crop…"));
+    cropAction->setObjectName(QStringLiteral("imageCropAction"));
+    auto *trimAction = image->addAction(tr("Trim…"));
+    trimAction->setObjectName(QStringLiteral("imageTrimAction"));
     connect(imageSize, &QAction::triggered, this, &MainWindow::resizeImageDialog);
     connect(canvasSize, &QAction::triggered, this, &MainWindow::resizeCanvasDialog);
     connect(cropAction, &QAction::triggered, this, &MainWindow::cropDialog);
+    connect(trimAction, &QAction::triggered, this, &MainWindow::trimDialog);
     image->addSeparator();
     auto *flipCanvasH = image->addAction(tr("Flip Canvas Horizontal"));
     auto *flipCanvasV = image->addAction(tr("Flip Canvas Vertical"));
@@ -1931,28 +2529,36 @@ void MainWindow::createActions()
     image->addSeparator();
     auto *invert = image->addAction(tr("&Invert")); invert->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
     connect(invert, &QAction::triggered, this, [this] { if (session_.invertActiveLayerPixels()) syncDocumentViews(); });
+    auto *blackWhite = image->addAction(tr("Black & White…"));
+    auto *colorBalance = image->addAction(tr("Color Balance…"));
+    connect(blackWhite, &QAction::triggered, this, &MainWindow::blackWhiteDialog);
+    connect(colorBalance, &QAction::triggered, this, &MainWindow::colorBalanceDialog);
     auto *noise = image->addAction(tr("Add Noise…"));
-    connect(noise, &QAction::triggered, this, [this] {
-        Layer *active=session_.activeLayer();if(!active||active->image.isNull())return;const QUuid target=active->id;const Layer original=*active;const quint32 seed=QRandomGenerator::global()->generate();
-        QDialog dialog(this);dialog.setWindowTitle(tr("Add Noise"));auto *layout=new QVBoxLayout(&dialog);auto *form=new QFormLayout;auto *amount=new QDoubleSpinBox(&dialog);amount->setRange(.1,400);amount->setValue(10);amount->setSuffix(tr(" %"));auto *distribution=new QComboBox(&dialog);distribution->addItems({tr("Uniform"),tr("Gaussian")});auto *monochromatic=new QCheckBox(tr("Monochromatic"),&dialog);form->addRow(tr("Amount"),sliderField(amount,true));form->addRow(tr("Distribution"),distribution);layout->addLayout(form);layout->addWidget(monochromatic);auto *previewEnabled=new QCheckBox(tr("Preview"),&dialog);previewEnabled->setChecked(true);previewEnabled->setObjectName(QStringLiteral("filterPreview"));layout->addWidget(previewEnabled);
-        session_.beginEdit(QStringLiteral("Add Noise"));const auto preview=[this,target,original,seed,amount,distribution,monochromatic,previewEnabled]{for(Layer &layer:document_->layers)if(layer.id==target){layer=original;break;}if(previewEnabled->isChecked())session_.addNoiseToActiveLayer(float(amount->value()),distribution->currentIndex()==1,monochromatic->isChecked(),seed);canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(distribution,&QComboBox::currentIndexChanged,&dialog,preview);connect(monochromatic,&QCheckBox::toggled,&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);
-        auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel|QDialogButtonBox::Ok,&dialog);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);layout->addWidget(buttons);if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else for(Layer &layer:document_->layers)if(layer.id==target){layer=original;break;}session_.endEdit();syncDocumentViews();
-    });
+    connect(noise, &QAction::triggered, this, &MainWindow::addNoiseDialog);
     auto *lens = image->addAction(tr("Lens Correction…"));
     connect(lens, &QAction::triggered, this, [this] {
         Layer *active=session_.activeLayer();if(!active||active->image.isNull())return;const QUuid target=active->id;const Layer original=*active;
-        QDialog dialog(this);dialog.setWindowTitle(tr("Lens Correction"));auto *layout=new QVBoxLayout(&dialog);auto *amount=new QDoubleSpinBox(&dialog);amount->setRange(-100,100);amount->setValue(0);amount->setDecimals(0);layout->addWidget(new QLabel(tr("Remove Distortion"),&dialog));layout->addWidget(sliderField(amount));auto *hint=new QLabel(tr("Positive straightens barrel distortion; negative straightens pincushion distortion."),&dialog);hint->setWordWrap(true);layout->addWidget(hint);auto *previewEnabled=new QCheckBox(tr("Preview"),&dialog);previewEnabled->setChecked(true);previewEnabled->setObjectName(QStringLiteral("filterPreview"));layout->addWidget(previewEnabled);
-        session_.beginEdit(QStringLiteral("Lens Correction"));const auto preview=[this,target,original,amount,previewEnabled]{for(Layer &layer:document_->layers)if(layer.id==target){layer=original;break;}if(previewEnabled->isChecked())session_.distortActiveLayer(amount->value());canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel|QDialogButtonBox::Ok,&dialog);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);layout->addWidget(buttons);if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else for(Layer &layer:document_->layers)if(layer.id==target){layer=original;break;}session_.endEdit();syncDocumentViews();
+        QDialog dialog(this);dialog.setWindowTitle(tr("Lens Correction"));auto *layout=new QVBoxLayout(&dialog);auto *amount=new QDoubleSpinBox(&dialog);amount->setRange(-100,100);amount->setValue(0);amount->setDecimals(0);layout->addWidget(new ScrubLabel(tr("Remove Distortion"),amount,1.0,std::nullopt,&dialog));layout->addWidget(sliderField(amount));auto *hint=new QLabel(tr("Positive straightens barrel distortion; negative straightens pincushion distortion."),&dialog);hint->setWordWrap(true);layout->addWidget(hint);auto *previewEnabled=new QCheckBox(tr("Preview"),&dialog);previewEnabled->setChecked(true);previewEnabled->setObjectName(QStringLiteral("filterPreview"));layout->addWidget(previewEnabled);
+        session_.beginEdit(QStringLiteral("Lens Correction"));const auto preview=[this,target,original,amount,previewEnabled]{restoreLayer(document_.get(),session_,target,original);if(previewEnabled->isChecked())session_.distortActiveLayer(amount->value());canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel|QDialogButtonBox::Ok,&dialog);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);layout->addWidget(buttons);if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else restoreLayer(document_.get(),session_,target,original);session_.endEdit();syncDocumentViews();
     });
 
     auto *filterMenu = menuBar()->addMenu(tr("&Filter"));
+    auto *cameraRaw = filterMenu->addAction(tr("Camera Raw Filter…"));
+    cameraRaw->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
+    connect(cameraRaw, &QAction::triggered, this, &MainWindow::cameraRawDialog);
     auto *gaussianBlur = filterMenu->addAction(tr("Gaussian Blur…"));
     auto *motionBlur = filterMenu->addAction(tr("Motion Blur…"));
+    auto *vignetteAction = filterMenu->addAction(tr("Vignette…"));
+    auto *bloomGlowAction = filterMenu->addAction(tr("Bloom / Glow…"));
+    auto *tonalContrastAction = filterMenu->addAction(tr("Tonal Contrast…"));
     auto *removeBackground = filterMenu->addAction(tr("Remove Background…"));
     auto *contentFill = filterMenu->addAction(tr("Content-Aware Fill"));
     contentFill->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_Delete));
     connect(gaussianBlur, &QAction::triggered, this, &MainWindow::gaussianBlurDialog);
     connect(motionBlur, &QAction::triggered, this, &MainWindow::motionBlurDialog);
+    connect(vignetteAction, &QAction::triggered, this, &MainWindow::vignetteDialog);
+    connect(bloomGlowAction, &QAction::triggered, this, &MainWindow::bloomGlowDialog);
+    connect(tonalContrastAction, &QAction::triggered, this, &MainWindow::tonalContrastDialog);
     connect(removeBackground, &QAction::triggered, this, &MainWindow::removeBackgroundDialog);
     connect(contentFill, &QAction::triggered, this, [this] {
         if (!session_.contentAwareFill()) showMessage(this, tr("Content-Aware Fill"), tr("Not enough unselected opaque pixels surround this selection."));
@@ -1963,6 +2569,7 @@ void MainWindow::createActions()
     auto *brushTool = new QAction(this); brushTool->setShortcut(QKeySequence(Qt::Key_B));
     auto *moveTool = new QAction(this); moveTool->setShortcut(QKeySequence(Qt::Key_V));
     auto *wandTool = new QAction(this); wandTool->setShortcut(QKeySequence(Qt::Key_W));
+    auto *toggleWand = new QAction(this); toggleWand->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_W));
     auto *cropTool = new QAction(this); cropTool->setShortcut(QKeySequence(Qt::Key_C));
     auto *handTool = new QAction(this); handTool->setShortcut(QKeySequence(Qt::Key_H));
     auto *zoomTool = new QAction(this); zoomTool->setShortcut(QKeySequence(Qt::Key_Z));
@@ -1979,6 +2586,7 @@ void MainWindow::createActions()
     auto *cloneTool = new QAction(this); cloneTool->setShortcut(QKeySequence(Qt::Key_S));
     auto *healingTool = new QAction(this); healingTool->setShortcut(QKeySequence(Qt::Key_J));
     auto *blurToolAction = new QAction(this); blurToolAction->setShortcut(QKeySequence(Qt::Key_R));
+    auto *toggleBlur = new QAction(this); toggleBlur->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_R));
     auto *eyedropperTool = new QAction(this); eyedropperTool->setShortcut(QKeySequence(Qt::Key_I));
     auto *smallerBrush = new QAction(this); smallerBrush->setShortcut(QKeySequence(Qt::Key_BracketLeft));
     auto *largerBrush = new QAction(this); largerBrush->setShortcut(QKeySequence(Qt::Key_BracketRight));
@@ -1992,6 +2600,7 @@ void MainWindow::createActions()
     previousBlend->setShortcuts({QKeySequence(Qt::SHIFT | Qt::Key_Minus), QKeySequence(Qt::SHIFT | Qt::Key_Underscore)});
     connect(moveTool, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Move); });
     connect(wandTool, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Wand); });
+    connect(toggleWand, &QAction::triggered, this, [this] { if (textEditorHasFocus()) return; canvas_->toggleWandMode(); canvas_->setTool(CanvasWidget::Tool::Wand); });
     connect(cropTool, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Crop); });
     connect(handTool, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Hand); });
     connect(zoomTool, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Zoom); });
@@ -2008,7 +2617,21 @@ void MainWindow::createActions()
     connect(toggleShape, &QAction::triggered, this, [this] { if (textEditorHasFocus()) return; canvas_->toggleShapeKind(); canvas_->setTool(CanvasWidget::Tool::Shape); });
     connect(cloneTool, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Clone); });
     connect(healingTool, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Healing); });
-    connect(blurToolAction, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Blur); });
+    connect(blurToolAction, &QAction::triggered, this, [this] {
+        if (textEditorHasFocus()) return;
+        if (canvas_->tool() == CanvasWidget::Tool::Blur) {
+            cycleSmearMode();
+        } else {
+            canvas_->setTool(CanvasWidget::Tool::Blur);
+        }
+    });
+    connect(toggleBlur, &QAction::triggered, this, [this] {
+        if (textEditorHasFocus()) return;
+        if (canvas_->tool() != CanvasWidget::Tool::Blur) {
+            canvas_->setTool(CanvasWidget::Tool::Blur);
+        }
+        cycleSmearMode();
+    });
     connect(eyedropperTool, &QAction::triggered, this, [this] { if (!textEditorHasFocus()) canvas_->setTool(CanvasWidget::Tool::Eyedropper); });
     const auto usesBrushSettings = [this] {
         if (textEditorHasFocus()) return false;
@@ -2054,6 +2677,7 @@ void MainWindow::createActions()
     connect(showMenuBar, &QAction::toggled, this, [this](bool visible) {
         menuBar()->setVisible(visible);
         QSettings().setValue(QStringLiteral("ui/showMenuBar"), visible);
+        updateMenuRestoreButton();
     });
     view->addSeparator();
     auto *fit = view->addAction(tr("Fit Canvas"));
@@ -2082,16 +2706,113 @@ void MainWindow::createActions()
     connect(transformControls, &QAction::toggled, showTransformControls_, &QCheckBox::setChecked);
     connect(showTransformControls_, &QCheckBox::toggled, transformControls, &QAction::setChecked);
 
+    view->addSeparator();
+
+    auto *showSubMenu = view->addMenu(tr("Show"));
+    actionShowGrid_ = showSubMenu->addAction(tr("Grid"));
+    actionShowGrid_->setObjectName(QStringLiteral("commandShowGrid"));
+    actionShowGrid_->setCheckable(true);
+    actionShowGrid_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Apostrophe));
+    actionShowGrid_->setChecked(session_.showsGrid());
+    connect(actionShowGrid_, &QAction::toggled, this, [this](bool show) {
+        session_.setShowsGrid(show);
+        canvas_->update();
+    });
+
+    actionShowGuides_ = showSubMenu->addAction(tr("Guides"));
+    actionShowGuides_->setObjectName(QStringLiteral("commandShowGuides"));
+    actionShowGuides_->setCheckable(true);
+    actionShowGuides_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Semicolon));
+    actionShowGuides_->setChecked(session_.showsGuides());
+    connect(actionShowGuides_, &QAction::toggled, this, [this](bool show) {
+        session_.setShowsGuides(show);
+        canvas_->update();
+    });
+
+    actionShowRulers_ = view->addAction(tr("Rulers"));
+    actionShowRulers_->setObjectName(QStringLiteral("commandShowRulers"));
+    actionShowRulers_->setCheckable(true);
+    actionShowRulers_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
+    actionShowRulers_->setChecked(session_.showsRulers());
+    connect(actionShowRulers_, &QAction::toggled, this, [this](bool show) {
+        session_.setShowsRulers(show);
+        updateRulerVisibility();
+        canvas_->update();
+    });
+
+    view->addSeparator();
+
+    actionSnap_ = view->addAction(tr("Snap"));
+    actionSnap_->setObjectName(QStringLiteral("commandSnap"));
+    actionSnap_->setCheckable(true);
+    actionSnap_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Semicolon));
+    actionSnap_->setChecked(session_.snapEnabled());
+    connect(actionSnap_, &QAction::toggled, this, [this](bool enabled) {
+        session_.setSnapEnabled(enabled);
+    });
+
+    auto *snapToSubMenu = view->addMenu(tr("Snap To"));
+    actionSnapToGuides_ = snapToSubMenu->addAction(tr("Guides"));
+    actionSnapToGuides_->setObjectName(QStringLiteral("commandSnapToGuides"));
+    actionSnapToGuides_->setCheckable(true);
+    actionSnapToGuides_->setChecked(session_.snapToGuides());
+    connect(actionSnapToGuides_, &QAction::toggled, this, [this](bool enabled) {
+        session_.setSnapToGuides(enabled);
+    });
+
+    actionSnapToGrid_ = snapToSubMenu->addAction(tr("Grid"));
+    actionSnapToGrid_->setObjectName(QStringLiteral("commandSnapToGrid"));
+    actionSnapToGrid_->setCheckable(true);
+    actionSnapToGrid_->setChecked(session_.snapToGrid());
+    connect(actionSnapToGrid_, &QAction::toggled, this, [this](bool enabled) {
+        session_.setSnapToGrid(enabled);
+    });
+
+    actionSnapToLayers_ = snapToSubMenu->addAction(tr("Layers"));
+    actionSnapToLayers_->setObjectName(QStringLiteral("commandSnapToLayers"));
+    actionSnapToLayers_->setCheckable(true);
+    actionSnapToLayers_->setChecked(session_.snapToLayers());
+    connect(actionSnapToLayers_, &QAction::toggled, this, [this](bool enabled) {
+        session_.setSnapToLayers(enabled);
+    });
+
+    actionSnapToDocumentBounds_ = snapToSubMenu->addAction(tr("Document Bounds"));
+    actionSnapToDocumentBounds_->setObjectName(QStringLiteral("commandSnapToDocumentBounds"));
+    actionSnapToDocumentBounds_->setCheckable(true);
+    actionSnapToDocumentBounds_->setChecked(session_.snapToDocumentBounds());
+    connect(actionSnapToDocumentBounds_, &QAction::toggled, this, [this](bool enabled) {
+        session_.setSnapToDocumentBounds(enabled);
+    });
+
+    view->addSeparator();
+
+    actionLockGuides_ = view->addAction(tr("Lock Guides"));
+    actionLockGuides_->setObjectName(QStringLiteral("commandLockGuides"));
+    actionLockGuides_->setCheckable(true);
+    actionLockGuides_->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Semicolon));
+    actionLockGuides_->setChecked(session_.locksGuides());
+    connect(actionLockGuides_, &QAction::toggled, this, [this](bool locked) {
+        session_.setLocksGuides(locked);
+    });
+
+    actionClearGuides_ = view->addAction(tr("Clear Guides"));
+    actionClearGuides_->setObjectName(QStringLiteral("commandClearGuides"));
+    actionClearGuides_->setEnabled(session_.canClearGuides());
+    connect(actionClearGuides_, &QAction::triggered, this, [this] {
+        session_.clearGuides();
+        syncDocumentViews(false);
+    });
+
     auto *help = menuBar()->addMenu(tr("&Help"));
     connect(help->addAction(tr("Check for Updates…")), &QAction::triggered, this, &MainWindow::checkForUpdates);
     connect(help->addAction(tr("About CompositorLX")), &QAction::triggered, this, &MainWindow::showAbout);
 
     addAction(newAction); addAction(open); addAction(importAction); addAction(save); addAction(saveAs); addAction(exportAction); addAction(exportJpegAction); addAction(closeProject); addAction(undo); addAction(redo);
     addAction(cut); addAction(copy); addAction(copyMerged); addAction(paste);
-    addAction(duplicate); addAction(remove); addAction(newLayerAction); addAction(selectAll); addAction(deselect); addAction(inverse);
+    addAction(duplicate); addAction(remove); addAction(newLayerAction); addAction(selectAll); addAction(deselect); addAction(inverse); addAction(selectSubject);
     addAction(levels); addAction(hueSaturation); addAction(curves); addAction(imageSize); addAction(canvasSize); addAction(invert);
     addAction(brushTool); addAction(eraserTool); addAction(marqueeTool); addAction(toggleMarquee); addAction(lassoTool); addAction(toggleLasso);
-    addAction(moveTool); addAction(wandTool); addAction(cropTool); addAction(handTool); addAction(zoomTool); addAction(idleTool);
+    addAction(moveTool); addAction(wandTool); addAction(toggleWand); addAction(cropTool); addAction(handTool); addAction(zoomTool); addAction(idleTool);
     addAction(gradientTool); addAction(shapeTool); addAction(toggleShape); addAction(textTool);
     addAction(cloneTool);
     addAction(healingTool);
@@ -2101,7 +2822,14 @@ void MainWindow::createActions()
     addAction(nextBlend); addAction(previousBlend);
     addAction(swapColors); addAction(resetColors);
     addAction(showMenuBar);
+    addAction(actionShowGrid_);
+    addAction(actionShowGuides_);
+    addAction(actionShowRulers_);
+    addAction(actionSnap_);
+    addAction(actionLockGuides_);
     menuBar()->setVisible(showMenuBar->isChecked());
+    updateMenuRestoreButton();
+    auto &sm = ShortcutManager::instance();
     for (int digit = 0; digit <= 9; ++digit) {
         auto *opacityKey = new QAction(this); opacityKey->setShortcut(QKeySequence(Qt::Key_0 + digit));
         opacityKey->setShortcutContext(Qt::WindowShortcut); addAction(opacityKey);
@@ -2119,7 +2847,102 @@ void MainWindow::createActions()
             else if (tool == CanvasWidget::Tool::Gradient) gradientOpacityField_->setValue(value);
             else if (tool == CanvasWidget::Tool::Move) { session_.setSelectedLayersOpacity(value / 100.0); syncDocumentViews(); }
         });
+        sm.registerAction(QStringLiteral("Canvas & Layers:Opacity digit %1 (type two for exact %)").arg(digit), opacityKey);
     }
+
+    sm.registerAction(QStringLiteral("Menus:New Canvas"), newAction);
+    sm.registerAction(QStringLiteral("Menus:Open Project"), open);
+    sm.registerAction(QStringLiteral("Menus:Save"), save);
+    sm.registerAction(QStringLiteral("Menus:Save As"), saveAs);
+    sm.registerAction(QStringLiteral("Menus:Export PNG"), exportAction);
+    sm.registerAction(QStringLiteral("Menus:Export JPEG"), exportJpegAction);
+    sm.registerAction(QStringLiteral("Menus:Close Project"), closeProject);
+    sm.registerAction(QStringLiteral("Menus:Undo"), undo);
+    sm.registerAction(QStringLiteral("Menus:Redo"), redo);
+    sm.registerAction(QStringLiteral("Menus:Cut"), cut);
+    sm.registerAction(QStringLiteral("Menus:Copy"), copy);
+    sm.registerAction(QStringLiteral("Menus:Copy Merged"), copyMerged);
+    sm.registerAction(QStringLiteral("Menus:Paste"), paste);
+    sm.registerAction(QStringLiteral("Menus:Duplicate / Layer via Copy"), duplicate);
+    sm.registerAction(QStringLiteral("Menus:Delete Layer"), remove);
+    sm.registerAction(QStringLiteral("Menus:Fill with Foreground"), fillForeground);
+    sm.registerAction(QStringLiteral("Menus:Fill with Background"), fillBackground);
+    sm.registerAction(QStringLiteral("Menus:Content-Aware Fill"), contentFill);
+    sm.registerAction(QStringLiteral("Menus:Transform Layer / Selection"), transformSelection);
+
+    sm.registerAction(QStringLiteral("Menus:New Blank Layer"), newLayerAction);
+    sm.registerAction(QStringLiteral("Menus:Group Layers"), groupLayers);
+    sm.registerAction(QStringLiteral("Menus:Merge Layers"), merge);
+    sm.registerAction(QStringLiteral("Menus:Move Layer Up"), moveUp);
+    sm.registerAction(QStringLiteral("Menus:Move Layer Down"), moveDown);
+    sm.registerAction(QStringLiteral("Menus:Toggle Clipping Mask"), clipping);
+
+    sm.registerAction(QStringLiteral("Menus:Select All"), selectAll);
+    sm.registerAction(QStringLiteral("Menus:Deselect"), deselect);
+    sm.registerAction(QStringLiteral("Menus:Inverse Selection"), inverse);
+    sm.registerAction(QStringLiteral("Menus:Select Subject"), selectSubject);
+    sm.registerAction(QStringLiteral("Menus:Feather Selection"), feather);
+
+    sm.registerAction(QStringLiteral("Menus:Levels"), levels);
+    sm.registerAction(QStringLiteral("Menus:Hue/Saturation"), hueSaturation);
+    sm.registerAction(QStringLiteral("Menus:Curves"), curves);
+    sm.registerAction(QStringLiteral("Menus:Image Size"), imageSize);
+    sm.registerAction(QStringLiteral("Menus:Canvas Size"), canvasSize);
+    sm.registerAction(QStringLiteral("Menus:Invert Pixels / Mask"), invert);
+    sm.registerAction(QStringLiteral("Menus:Camera Raw Filter"), cameraRaw);
+
+    sm.registerAction(QStringLiteral("Menus:Show Menu Bar"), showMenuBar);
+    sm.registerAction(QStringLiteral("Menus:Fit Canvas"), fit);
+    sm.registerAction(QStringLiteral("Menus:Actual Pixels"), actual);
+    sm.registerAction(QStringLiteral("Menus:Zoom In"), zoomIn);
+    sm.registerAction(QStringLiteral("Menus:Zoom Out"), zoomOut);
+    sm.registerAction(QStringLiteral("Menus:Show Transform Controls"), transformControls);
+    sm.registerAction(QStringLiteral("Menus:Show Grid"), actionShowGrid_);
+    sm.registerAction(QStringLiteral("Menus:Show Guides"), actionShowGuides_);
+    sm.registerAction(QStringLiteral("Menus:Show Rulers"), actionShowRulers_);
+    sm.registerAction(QStringLiteral("Menus:Snap"), actionSnap_);
+    sm.registerAction(QStringLiteral("Menus:Lock Guides"), actionLockGuides_);
+
+    sm.registerAction(QStringLiteral("Canvas & Layers:Select tool"), idleTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Move / Transform tool"), moveTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Hand tool"), handTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Zoom tool"), zoomTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Brush tool"), brushTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Eraser"), eraserTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Spot Healing"), healingTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Clone Stamp"), cloneTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Type tool"), textTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Gradient tool"), gradientTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Shape tool"), shapeTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Eyedropper tool"), eyedropperTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Marquee / cycle shape"), marqueeTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Cycle marquee kind"), toggleMarquee);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Magic"), wandTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Cycle wand mode"), toggleWand);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Lasso / cycle mode"), lassoTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Cycle lasso kind"), toggleLasso);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Blur / Smudge / Liquify"), blurToolAction);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Cycle smear mode"), toggleBlur);
+    auto *cycleToolModeAction = new QAction(this);
+    cycleToolModeAction->setShortcut(QKeySequence(Qt::Key_Tab));
+    connect(cycleToolModeAction, &QAction::triggered, this, [this] {
+        if (textEditorHasFocus()) return;
+        cycleToolMode();
+    });
+    sm.registerAction(QStringLiteral("Canvas & Layers:Cycle tool mode"), cycleToolModeAction);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Crop tool"), cropTool);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Swap foreground/background"), swapColors);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Reset colors"), resetColors);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Decrease brush size"), smallerBrush);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Increase brush size"), largerBrush);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Decrease brush hardness"), softerBrush);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Increase brush hardness"), harderBrush);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Previous blend mode"), previousBlend);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Next blend mode"), nextBlend);
+    sm.registerAction(QStringLiteral("Canvas & Layers:Cycle shape kind"), toggleShape);
+
+    sm.apply();
+
     addAction(contentFill); addAction(transformSelection); addAction(fillForeground); addAction(fillBackground);
     addAction(groupLayers); addAction(moveUp); addAction(moveDown);
     addAction(fit); addAction(actual); addAction(zoomIn); addAction(zoomOut);
@@ -2180,8 +3003,13 @@ void MainWindow::levelsDialog()
     const auto loadCurrent = [&] { const LevelRange &r=settings.ranges[size_t(channel->currentIndex())]; const QSignalBlocker a(black),b(gamma),c(white),d(outputBlack),e(outputWhite); black->setValue(r.black);gamma->setValue(r.gamma);white->setValue(r.white);outputBlack->setValue(r.outputBlack);outputWhite->setValue(r.outputWhite); };
     const LevelsHistogram histogram=session_.levelsHistogram(); auto *histogramView = new LevelsHistogramWidget(&dialog); histogramView->setObjectName(QStringLiteral("levelsHistogram")); histogramView->histogram = &histogram; histogramView->channel = [channel] { return channel->currentIndex(); }; layout->addWidget(histogramView);
     auto *inputHandles = new LevelsHandleWidget(false, &dialog); inputHandles->setObjectName(QStringLiteral("levelsInputHandles")); inputHandles->settings = &settings; inputHandles->channel = [channel] { return channel->currentIndex(); }; layout->addWidget(inputHandles);
-    form->addRow(tr("Channel"), channel); form->addRow(tr("Input black"), black); form->addRow(tr("Gamma"), gamma); form->addRow(tr("Input white"), white);
-    form->addRow(tr("Output black"), outputBlack); form->addRow(tr("Output white"), outputWhite); layout->addLayout(form);
+    form->addRow(tr("Channel"), channel);
+    addScrubRow(form, tr("Input black"), black, false, false);
+    addScrubRow(form, tr("Gamma"), gamma, false, false);
+    addScrubRow(form, tr("Input white"), white, false, false);
+    addScrubRow(form, tr("Output black"), outputBlack, false, false);
+    addScrubRow(form, tr("Output white"), outputWhite, false, false);
+    layout->addLayout(form);
     auto *outputHandles = new LevelsHandleWidget(true, &dialog); outputHandles->setObjectName(QStringLiteral("levelsOutputHandles")); outputHandles->settings = &settings; outputHandles->channel = [channel] { return channel->currentIndex(); }; layout->addWidget(outputHandles);
     auto *samples = new QHBoxLayout; samples->addWidget(new QLabel(tr("Sample"), &dialog));
     auto *sampleBlack = new QPushButton(tr("Black"), &dialog); auto *sampleGray = new QPushButton(tr("Gray"), &dialog); auto *sampleWhite = new QPushButton(tr("White"), &dialog);
@@ -2195,9 +3023,9 @@ void MainWindow::levelsDialog()
         storeCurrent();
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, originalLayer.adjustment);
-            else for (Layer &layer : document_->layers) if (layer.id == target) { layer = originalLayer; break; }
+            else restoreLayer(document_.get(), session_, target, originalLayer);
         } else if (live) session_.previewAdjustment(target, levelsAdjustment(settings));
-        else { for (Layer &layer : document_->layers) if (layer.id == target) { layer = originalLayer; break; } session_.applyLevels(settings); }
+        else { restoreLayer(document_.get(), session_, target, originalLayer); session_.applyLevels(settings); }
         canvas_->invalidateDocument();
     };
     const CanvasWidget::Tool previousTool = canvas_->tool(); int sampleMode = -1;
@@ -2227,7 +3055,7 @@ void MainWindow::levelsDialog()
     loadCurrent(); const int result=runFloatingDialog(dialog); colorSampleOverride_ = {}; canvas_->setTool(previousTool); storeCurrent();
     if (result == QDialog::Accepted) { previewEnabled->setChecked(true); preview(); }
     else if (live) session_.previewAdjustment(target, originalAdjustment);
-    else for (Layer &layer : document_->layers) if (layer.id == target) { layer = originalLayer; break; }
+    else restoreLayer(document_.get(), session_, target, originalLayer);
     session_.endEdit(); syncDocumentViews();
 }
 
@@ -2247,13 +3075,13 @@ void MainWindow::exposureDialog()
         const QJsonObject saved = originalAdjustment.value(QStringLiteral("exposureSettings")).toObject(); stops->setValue(saved.value(QStringLiteral("exposure")).toDouble()); offset->setValue(saved.value(QStringLiteral("offset")).toDouble()); gamma->setValue(saved.value(QStringLiteral("gamma")).toDouble(1));
     }
     session_.beginEdit(live ? QStringLiteral("Edit Exposure") : QStringLiteral("Exposure"));
-    const auto preview = [this, live, target, value, originalLayer, stops, offset, gamma, previewEnabled] { if (!previewEnabled->isChecked()) { if (live) session_.previewAdjustment(target, originalLayer.adjustment); else for (Layer &layer : document_->layers) if (layer.id == target) { layer=originalLayer;break; } } else if (live) session_.previewAdjustment(target, value()); else { for (Layer &layer : document_->layers) if (layer.id == target) { layer=originalLayer;break; } session_.applyExposure(stops->value(),offset->value(),gamma->value()); } canvas_->invalidateDocument(); };
+    const auto preview = [this, live, target, value, originalLayer, stops, offset, gamma, previewEnabled] { if (!previewEnabled->isChecked()) { if (live) session_.previewAdjustment(target, originalLayer.adjustment); else restoreLayer(document_.get(), session_, target, originalLayer); } else if (live) session_.previewAdjustment(target, value()); else { restoreLayer(document_.get(), session_, target, originalLayer); session_.applyExposure(stops->value(),offset->value(),gamma->value()); } canvas_->invalidateDocument(); };
     connect(stops, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview); connect(offset, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview); connect(gamma, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
-    form->addRow(tr("Exposure (stops)"), sliderField(stops)); form->addRow(tr("Offset"), sliderField(offset)); form->addRow(tr("Gamma"), sliderField(gamma, true)); layout->addLayout(form); layout->addWidget(previewEnabled); connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+    addScrubRow(form, tr("Exposure (stops)"), stops); addScrubRow(form, tr("Offset"), offset); addScrubRow(form, tr("Gamma"), gamma, true); layout->addLayout(form); layout->addWidget(previewEnabled); connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
     const int result = runFloatingDialog(dialog);
-    if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}
+    if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else restoreLayer(document_.get(), session_, target, originalLayer);
     session_.endEdit();syncDocumentViews();
 }
 
@@ -2275,7 +3103,6 @@ void MainWindow::hueSaturationDialog()
     auto make = [&dialog](int minimum, int maximum) { auto *field = new QSpinBox(&dialog); field->setRange(minimum, maximum); return field; };
     auto *hue = make(-180, 180); auto *saturation = make(-100, 100); auto *lightness = make(-100, 100);
     hue->setObjectName(QStringLiteral("hueValue")); saturation->setObjectName(QStringLiteral("saturationValue")); lightness->setObjectName(QStringLiteral("lightnessValue"));
-    auto *hueControl = sliderField(hue); auto *saturationControl = sliderField(saturation); auto *lightnessControl = sliderField(lightness);
     auto *colorize = new QCheckBox(tr("Colorize"), &dialog); auto *invert = new QCheckBox(tr("Apply outside this range instead"), &dialog);
     auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog); previewEnabled->setChecked(true);
     auto *reset = new QPushButton(tr("Reset"), &dialog); reset->setObjectName(QStringLiteral("hueReset"));
@@ -2314,15 +3141,15 @@ void MainWindow::hueSaturationDialog()
         const QSignalBlocker bh(hue), bs(saturation), bl(lightness); hue->setValue(qRound(value.hue)); saturation->setValue(qRound(value.saturation)); lightness->setValue(qRound(value.lightness));
         settings.range = ColorRange(current); refreshBand();
     });
-    form->addRow(tr("Range"), range); form->addRow(tr("Hue"), hueControl); form->addRow(tr("Saturation"), saturationControl); form->addRow(tr("Lightness"), lightnessControl);
+    form->addRow(tr("Range"), range); addScrubRow(form, tr("Hue"), hue); addScrubRow(form, tr("Saturation"), saturation); addScrubRow(form, tr("Lightness"), lightness);
     const auto liveValue = [&] { store(); return hueAdjustment(settings); };
     session_.beginEdit(live ? QStringLiteral("Edit Hue/Saturation") : QStringLiteral("Hue/Saturation"));
     const auto preview = [this, live, target, liveValue, originalLayer, &settings, previewEnabled] {
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, originalLayer.adjustment);
-            else for (Layer &layer : document_->layers) if (layer.id == target) { layer = originalLayer; break; }
+            else restoreLayer(document_.get(), session_, target, originalLayer);
         } else if(live) session_.previewAdjustment(target,liveValue());
-        else { for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;} liveValue(); session_.applyHueSaturation(settings); }
+        else { restoreLayer(document_.get(), session_, target, originalLayer); liveValue(); session_.applyHueSaturation(settings); }
         canvas_->invalidateDocument();
     };
     connect(hue, qOverload<int>(&QSpinBox::valueChanged), &dialog, preview); connect(saturation, qOverload<int>(&QSpinBox::valueChanged), &dialog, preview); connect(lightness, qOverload<int>(&QSpinBox::valueChanged), &dialog, preview); connect(colorize, &QCheckBox::toggled, &dialog, preview); connect(invert, &QCheckBox::toggled, &dialog, preview);
@@ -2389,7 +3216,7 @@ void MainWindow::hueSaturationDialog()
     { const RangeAdjustment &selected = settings.adjustments[size_t(settings.range)]; const QSignalBlocker bh(hue), bs(saturation), bl(lightness); hue->setValue(qRound(selected.hue)); saturation->setValue(qRound(selected.saturation)); lightness->setValue(qRound(selected.lightness)); }
     syncSliders(); refreshBand();
     const int result = runFloatingDialog(dialog); stopCanvasModes(); colorSampleOverride_ = {};
-    if(result==QDialog::Accepted) { previewEnabled->setChecked(true); preview(); } else if(live)session_.previewAdjustment(target,originalAdjustment);else for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}
+    if(result==QDialog::Accepted) { previewEnabled->setChecked(true); preview(); } else if(live)session_.previewAdjustment(target,originalAdjustment);else restoreLayer(document_.get(), session_, target, originalLayer);
     session_.endEdit();syncDocumentViews();
 }
 
@@ -2403,7 +3230,9 @@ void MainWindow::curvesDialog()
     channel->setObjectName(QStringLiteral("curvesChannel")); auto *graph = new CurveEditorWidget(&dialog); graph->setObjectName(QStringLiteral("curvesGraph")); auto *form = new QFormLayout;
     auto *input = new QSpinBox(&dialog); input->setRange(0, 255); auto *output = new QSpinBox(&dialog); output->setRange(0, 255);
     input->setObjectName(QStringLiteral("curveInput")); output->setObjectName(QStringLiteral("curveOutput"));
-    form->addRow(tr("Input"), input); form->addRow(tr("Output"), output);
+    auto *inLabel = new ScrubLabel(tr("Input"), input, 1.0, 1.0, &dialog); inLabel->setObjectName(QStringLiteral("curveInputLabel"));
+    auto *outLabel = new ScrubLabel(tr("Output"), output, 1.0, 1.0, &dialog); outLabel->setObjectName(QStringLiteral("curveOutputLabel"));
+    form->addRow(inLabel, input); form->addRow(outLabel, output);
     auto *hint = new QLabel(tr("Click to add a point. Drag to adjust."), &dialog); auto *pointButtons = new QHBoxLayout;
     auto *status = new QLabel(&dialog); status->setObjectName(QStringLiteral("curvePointStatus")); auto *remove = new QPushButton(tr("Remove point"), &dialog); auto *reset = new QPushButton(tr("Reset curve"), &dialog);
     remove->setObjectName(QStringLiteral("removeCurvePoint")); reset->setObjectName(QStringLiteral("resetCurve")); pointButtons->addWidget(status); pointButtons->addStretch(); pointButtons->addWidget(remove);
@@ -2412,7 +3241,7 @@ void MainWindow::curvesDialog()
     CurvesSettings settings; const QJsonObject originalAdjustment=active->adjustment; const Layer originalLayer=*active;
     if(live){const QJsonArray saved=originalAdjustment.value(QStringLiteral("curves")).toObject().value(QStringLiteral("channels")).toArray();for(int c=0;c<std::min(4,int(saved.size()));++c){QVector<CurvePoint> curve;for(const QJsonValue &entry:saved[c].toArray()){const QJsonObject point=entry.toObject();curve.push_back({point.value(QStringLiteral("x")).toDouble(),point.value(QStringLiteral("y")).toDouble()});}if(!curve.isEmpty())settings.channels[size_t(c)]=curve;}}
     graph->settings = &settings;
-    const auto preview=[this,live,target,&settings,originalLayer,previewEnabled]{if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}}else if(live)session_.previewAdjustment(target,curvesAdjustment(settings));else{for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}session_.applyCurves(settings);}canvas_->invalidateDocument();};
+    const auto preview=[this,live,target,&settings,originalLayer,previewEnabled]{if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,curvesAdjustment(settings));else{restoreLayer(document_.get(), session_, target, originalLayer);session_.applyCurves(settings);}canvas_->invalidateDocument();};
     session_.beginEdit(live?QStringLiteral("Edit Curves"):QStringLiteral("Curves"));
     const auto refreshSelection = [&](int row) {
         const auto &curve = settings.channels[size_t(channel->currentIndex())]; const bool valid = row >= 0 && row < curve.size();
@@ -2437,7 +3266,7 @@ void MainWindow::curvesDialog()
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
     refreshSelection(-1);
     const int result=runFloatingDialog(dialog);
-    if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}
+    if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else restoreLayer(document_.get(), session_, target, originalLayer);
     session_.endEdit();syncDocumentViews();
 }
 
@@ -2458,7 +3287,7 @@ void MainWindow::gradientMapDialog()
     const auto value = [&] { const auto color = [](const QColor &c) { return QJsonObject{{QStringLiteral("red"), c.redF()}, {QStringLiteral("green"), c.greenF()}, {QStringLiteral("blue"), c.blueF()}}; }; return QJsonObject{{QStringLiteral("kind"), QStringLiteral("Gradient Map")}, {QStringLiteral("gradientMapSettings"), QJsonObject{{QStringLiteral("shadows"), color(shadows)}, {QStringLiteral("highlights"), color(highlights)}, {QStringLiteral("reversed"), reverse->isChecked()}}}}; };
     if (live) reverse->setChecked(originalAdjustment.value(QStringLiteral("gradientMapSettings")).toObject().value(QStringLiteral("reversed")).toBool());
     session_.beginEdit(live?QStringLiteral("Edit Gradient Map"):QStringLiteral("Gradient Map"));
-    const auto preview = [this, live, target, value, originalLayer, &shadows, &highlights, reverse, previewEnabled] { if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}}else if(live)session_.previewAdjustment(target,value());else{for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}session_.applyGradientMap(shadows,highlights,reverse->isChecked());}canvas_->invalidateDocument(); };
+    const auto preview = [this, live, target, value, originalLayer, &shadows, &highlights, reverse, previewEnabled] { if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,value());else{restoreLayer(document_.get(), session_, target, originalLayer);session_.applyGradientMap(shadows,highlights,reverse->isChecked());}canvas_->invalidateDocument(); };
     const auto refreshGradient = [&] {
         QImage strip(std::max(1, gradientView->width()), 20, QImage::Format_RGB32); QPainter painter(&strip); QLinearGradient gradient(0, 0, strip.width(), 0); const QColor first = reverse->isChecked() ? highlights : shadows; const QColor last = reverse->isChecked() ? shadows : highlights; gradient.setColorAt(0, first); gradient.setColorAt(1, last); painter.fillRect(strip.rect(), gradient); painter.end(); gradientView->setPixmap(QPixmap::fromImage(strip));
         shadowButton->setStyleSheet(QStringLiteral("text-align:left;padding-left:32px;background:%1;").arg(shadows.name())); highlightButton->setStyleSheet(QStringLiteral("text-align:left;padding-left:32px;background:%1;").arg(highlights.name()));
@@ -2475,7 +3304,7 @@ void MainWindow::gradientMapDialog()
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
     const int result = runFloatingDialog(dialog);
-    if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}
+    if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else restoreLayer(document_.get(), session_, target, originalLayer);
     session_.endEdit();syncDocumentViews();
 }
 
@@ -2485,41 +3314,809 @@ void MainWindow::grainDialog()
     if (!active || (!live && active->image.isNull())) return;
     const QUuid target = active->id;
     QDialog dialog(this); dialog.setWindowTitle(tr("Grain")); auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
-    auto make = [&dialog](double minimum, double maximum, double value) { auto *field = new QDoubleSpinBox(&dialog); field->setRange(minimum, maximum); field->setValue(value); field->setDecimals(1); return field; };
-    auto *amount = make(0, 100, 25); auto *size = make(.5, 20, 1.5); auto *roughness = make(0, 100, 50);
+    auto make = [&dialog](double minimum, double maximum, double value, int decimals = 0) { auto *field = new QDoubleSpinBox(&dialog); field->setRange(minimum, maximum); field->setValue(value); field->setDecimals(decimals); return field; };
+    auto *amount = make(0, 100, 25, 0); auto *size = make(.5, 20, 1.5, 1); auto *roughness = make(0, 100, 50, 0);
+    amount->setObjectName(QStringLiteral("grainAmount")); size->setObjectName(QStringLiteral("grainSize")); roughness->setObjectName(QStringLiteral("grainRoughness"));
     auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog); previewEnabled->setChecked(true); previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     const QJsonObject originalAdjustment = active->adjustment; const Layer originalLayer=*active; quint32 seed = QRandomGenerator::global()->generate();
     if (live) { const QJsonObject saved = originalAdjustment.value(QStringLiteral("grainSettings")).toObject(); amount->setValue(saved.value(QStringLiteral("amount")).toDouble(25)); size->setValue(saved.value(QStringLiteral("size")).toDouble(1.5)); roughness->setValue(saved.value(QStringLiteral("roughness")).toDouble(50)); seed = quint32(saved.value(QStringLiteral("seed")).toDouble(seed)); }
     const auto value = [&] { return QJsonObject{{QStringLiteral("kind"), QStringLiteral("Grain")}, {QStringLiteral("grainSettings"), QJsonObject{{QStringLiteral("amount"), amount->value()}, {QStringLiteral("size"), size->value()}, {QStringLiteral("roughness"), roughness->value()}, {QStringLiteral("seed"), double(seed)}}}}; };
-    session_.beginEdit(live?QStringLiteral("Edit Grain"):QStringLiteral("Grain"));const auto preview=[this,live,target,value,originalLayer,amount,size,roughness,seed,previewEnabled]{if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}}else if(live)session_.previewAdjustment(target,value());else{for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}session_.applyGrain(amount->value(),size->value(),roughness->value(),seed);}canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(size,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(roughness,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);
-    form->addRow(tr("Amount"), sliderField(amount)); form->addRow(tr("Size"), sliderField(size, true)); form->addRow(tr("Roughness"), sliderField(roughness)); layout->addLayout(form); layout->addWidget(previewEnabled); connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);
+    session_.beginEdit(live?QStringLiteral("Edit Grain"):QStringLiteral("Grain"));const auto preview=[this,live,target,value,originalLayer,amount,size,roughness,seed,previewEnabled]{if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,value());else{restoreLayer(document_.get(), session_, target, originalLayer);session_.applyGrain(amount->value(),size->value(),roughness->value(),seed);}canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(size,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(roughness,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);
+    addScrubRow(form, tr("Amount"), amount); addScrubRow(form, tr("Size"), size, true); addScrubRow(form, tr("Roughness"), roughness); layout->addLayout(form); layout->addWidget(previewEnabled); connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
     const int result = runFloatingDialog(dialog);
-    if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else for(Layer &layer:document_->layers)if(layer.id==target){layer=originalLayer;break;}
+    if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else restoreLayer(document_.get(), session_, target, originalLayer);
     session_.endEdit();syncDocumentViews();
+}
+
+void MainWindow::blackWhiteDialog()
+{
+    Layer *active = session_.activeLayer();
+    const bool live = active && active->adjustment.value(QStringLiteral("kind")).toString() == QStringLiteral("Black & White");
+    if (!active || (!live && active->image.isNull())) return;
+    const QUuid target = active->id;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Black & White"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+
+    auto make = [&dialog](double min, double max, double val) {
+        auto *field = new QDoubleSpinBox(&dialog);
+        field->setRange(min, max);
+        field->setValue(val);
+        field->setDecimals(0);
+        field->setSuffix(QStringLiteral(" %"));
+        return field;
+    };
+
+    auto *reds = make(-200, 300, 40);
+    auto *yellows = make(-200, 300, 60);
+    auto *greens = make(-200, 300, 40);
+    auto *cyans = make(-200, 300, 60);
+    auto *blues = make(-200, 300, 20);
+    auto *magentas = make(-200, 300, 80);
+
+    auto *tint = new QCheckBox(tr("Tint"), &dialog);
+    tint->setToolTip(tr("Color the result while keeping its tones, for a sepia or a cyanotype"));
+
+    auto *tintHue = new QDoubleSpinBox(&dialog);
+    tintHue->setRange(0, 360);
+    tintHue->setValue(40);
+    tintHue->setDecimals(0);
+    tintHue->setSuffix(QStringLiteral("°"));
+
+    auto *tintSaturation = new QDoubleSpinBox(&dialog);
+    tintSaturation->setRange(0, 100);
+    tintSaturation->setValue(20);
+    tintSaturation->setDecimals(0);
+    tintSaturation->setSuffix(QStringLiteral(" %"));
+
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+
+    const QJsonObject originalAdjustment = active->adjustment;
+    const Layer originalLayer = *active;
+
+    if (live) {
+        const QJsonObject saved = originalAdjustment.value(QStringLiteral("blackWhiteSettings")).toObject();
+        reds->setValue(saved.value(QStringLiteral("reds")).toDouble(40));
+        yellows->setValue(saved.value(QStringLiteral("yellows")).toDouble(60));
+        greens->setValue(saved.value(QStringLiteral("greens")).toDouble(40));
+        cyans->setValue(saved.value(QStringLiteral("cyans")).toDouble(60));
+        blues->setValue(saved.value(QStringLiteral("blues")).toDouble(20));
+        magentas->setValue(saved.value(QStringLiteral("magentas")).toDouble(80));
+        tint->setChecked(saved.value(QStringLiteral("tint")).toBool(false));
+        tintHue->setValue(saved.value(QStringLiteral("tintHue")).toDouble(40));
+        tintSaturation->setValue(saved.value(QStringLiteral("tintSaturation")).toDouble(20));
+    }
+
+    const auto value = [&] {
+        return QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("Black & White")},
+            {QStringLiteral("blackWhiteSettings"), QJsonObject{
+                {QStringLiteral("reds"), reds->value()},
+                {QStringLiteral("yellows"), yellows->value()},
+                {QStringLiteral("greens"), greens->value()},
+                {QStringLiteral("cyans"), cyans->value()},
+                {QStringLiteral("blues"), blues->value()},
+                {QStringLiteral("magentas"), magentas->value()},
+                {QStringLiteral("tint"), tint->isChecked()},
+                {QStringLiteral("tintHue"), tintHue->value()},
+                {QStringLiteral("tintSaturation"), tintSaturation->value()}
+            }}
+        };
+    };
+
+    session_.beginEdit(live ? QStringLiteral("Edit Black & White") : QStringLiteral("Black & White"));
+
+    const auto preview = [this, live, target, value, originalLayer, reds, yellows, greens, cyans, blues, magentas, tint, tintHue, tintSaturation, previewEnabled] {
+        if (!previewEnabled->isChecked()) {
+            if (live) session_.previewAdjustment(target, originalLayer.adjustment);
+            else {
+                restoreLayer(document_.get(), session_, target, originalLayer);
+            }
+        } else if (live) {
+            session_.previewAdjustment(target, value());
+        } else {
+            restoreLayer(document_.get(), session_, target, originalLayer);
+            const float weights[6] = {
+                float(reds->value() / 100.0), float(yellows->value() / 100.0), float(greens->value() / 100.0),
+                float(cyans->value() / 100.0), float(blues->value() / 100.0), float(magentas->value() / 100.0)
+            };
+            session_.applyBlackWhite(weights, tint->isChecked(), tintHue->value(), tintSaturation->value() / 100.0);
+        }
+        canvas_->invalidateDocument();
+    };
+
+    connect(reds, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(yellows, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(greens, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(cyans, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(blues, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(magentas, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(tint, &QCheckBox::toggled, &dialog, preview);
+    connect(tintHue, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(tintSaturation, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+
+    addScrubRow(form, tr("Reds"), reds);
+    addScrubRow(form, tr("Yellows"), yellows);
+    addScrubRow(form, tr("Greens"), greens);
+    addScrubRow(form, tr("Cyans"), cyans);
+    addScrubRow(form, tr("Blues"), blues);
+    addScrubRow(form, tr("Magentas"), magentas);
+    form->addRow(tint);
+    auto *tintHueRow = sliderField(tintHue);
+    auto *tintSatRow = sliderField(tintSaturation);
+    auto *tintHueLabel = new ScrubLabel(tr("Hue"), tintHue, 1.0, std::nullopt, &dialog);
+    auto *tintSatLabel = new ScrubLabel(tr("Saturation"), tintSaturation, 1.0, std::nullopt, &dialog);
+    form->addRow(tintHueLabel, tintHueRow);
+    form->addRow(tintSatLabel, tintSatRow);
+    auto updateTintVisibility = [tint, tintHueRow, tintSatRow, tintHueLabel, tintSatLabel] {
+        const bool on = tint->isChecked();
+        tintHueRow->setEnabled(on);
+        tintSatRow->setEnabled(on);
+        tintHueLabel->setEnabled(on);
+        tintSatLabel->setEnabled(on);
+    };
+    updateTintVisibility();
+    connect(tint, &QCheckBox::toggled, &dialog, updateTintVisibility);
+
+    layout->addLayout(form);
+    layout->addWidget(previewEnabled);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    const int result = runFloatingDialog(dialog);
+    if (result == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else if (live) {
+        session_.previewAdjustment(target, originalAdjustment);
+    } else {
+        restoreLayer(document_.get(), session_, target, originalLayer);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+void MainWindow::colorBalanceDialog()
+{
+    Layer *active = session_.activeLayer();
+    const bool live = active && active->adjustment.value(QStringLiteral("kind")).toString() == QStringLiteral("Color Balance");
+    if (!active || (!live && active->image.isNull())) return;
+    const QUuid target = active->id;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Color Balance"));
+    auto *layout = new QVBoxLayout(&dialog);
+
+    auto make = [&dialog](double val) {
+        auto *field = new QDoubleSpinBox(&dialog);
+        field->setRange(-100, 100);
+        field->setValue(val);
+        field->setDecimals(0);
+        return field;
+    };
+
+    auto *sCR = make(0); auto *sMG = make(0); auto *sYB = make(0);
+    auto *mCR = make(0); auto *mMG = make(0); auto *mYB = make(0);
+    auto *hCR = make(0); auto *hMG = make(0); auto *hYB = make(0);
+
+    auto *preserveLuminosity = new QCheckBox(tr("Preserve Luminosity"), &dialog);
+    preserveLuminosity->setChecked(true);
+
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+
+    const QJsonObject originalAdjustment = active->adjustment;
+    const Layer originalLayer = *active;
+
+    if (live) {
+        const QJsonObject saved = originalAdjustment.value(QStringLiteral("colorBalanceSettings")).toObject();
+        sCR->setValue(saved.value(QStringLiteral("shadowCyanRed")).toDouble(0));
+        sMG->setValue(saved.value(QStringLiteral("shadowMagentaGreen")).toDouble(0));
+        sYB->setValue(saved.value(QStringLiteral("shadowYellowBlue")).toDouble(0));
+        mCR->setValue(saved.value(QStringLiteral("midCyanRed")).toDouble(0));
+        mMG->setValue(saved.value(QStringLiteral("midMagentaGreen")).toDouble(0));
+        mYB->setValue(saved.value(QStringLiteral("midYellowBlue")).toDouble(0));
+        hCR->setValue(saved.value(QStringLiteral("highlightCyanRed")).toDouble(0));
+        hMG->setValue(saved.value(QStringLiteral("highlightMagentaGreen")).toDouble(0));
+        hYB->setValue(saved.value(QStringLiteral("highlightYellowBlue")).toDouble(0));
+        preserveLuminosity->setChecked(saved.value(QStringLiteral("preserveLuminosity")).toBool(true));
+    }
+
+    auto *tabs = new QTabWidget(&dialog);
+    auto createTab = [&](QDoubleSpinBox *cr, QDoubleSpinBox *mg, QDoubleSpinBox *yb) {
+        auto *tab = new QWidget(&dialog);
+        auto *tabForm = new QFormLayout(tab);
+        addScrubRow(tabForm, tr("Cyan / Red"), cr);
+        addScrubRow(tabForm, tr("Magenta / Green"), mg);
+        addScrubRow(tabForm, tr("Yellow / Blue"), yb);
+        return tab;
+    };
+    tabs->addTab(createTab(sCR, sMG, sYB), tr("Shadows"));
+    tabs->addTab(createTab(mCR, mMG, mYB), tr("Midtones"));
+    tabs->addTab(createTab(hCR, hMG, hYB), tr("Highlights"));
+    tabs->setCurrentIndex(1); // Default to Midtones
+
+    const auto value = [&] {
+        return QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("Color Balance")},
+            {QStringLiteral("colorBalanceSettings"), QJsonObject{
+                {QStringLiteral("shadowCyanRed"), sCR->value()},
+                {QStringLiteral("shadowMagentaGreen"), sMG->value()},
+                {QStringLiteral("shadowYellowBlue"), sYB->value()},
+                {QStringLiteral("midCyanRed"), mCR->value()},
+                {QStringLiteral("midMagentaGreen"), mMG->value()},
+                {QStringLiteral("midYellowBlue"), mYB->value()},
+                {QStringLiteral("highlightCyanRed"), hCR->value()},
+                {QStringLiteral("highlightMagentaGreen"), hMG->value()},
+                {QStringLiteral("highlightYellowBlue"), hYB->value()},
+                {QStringLiteral("preserveLuminosity"), preserveLuminosity->isChecked()}
+            }}
+        };
+    };
+
+    session_.beginEdit(live ? QStringLiteral("Edit Color Balance") : QStringLiteral("Color Balance"));
+
+    const auto preview = [this, live, target, value, originalLayer, sCR, sMG, sYB, mCR, mMG, mYB, hCR, hMG, hYB, preserveLuminosity, previewEnabled] {
+        if (!previewEnabled->isChecked()) {
+            if (live) session_.previewAdjustment(target, originalLayer.adjustment);
+            else restoreLayer(document_.get(), session_, target, originalLayer);
+        } else if (live) {
+            session_.previewAdjustment(target, value());
+        } else {
+            restoreLayer(document_.get(), session_, target, originalLayer);
+            const float shadows[3] = { float(sCR->value() / 100.0), float(sMG->value() / 100.0), float(sYB->value() / 100.0) };
+            const float midtones[3] = { float(mCR->value() / 100.0), float(mMG->value() / 100.0), float(mYB->value() / 100.0) };
+            const float highlights[3] = { float(hCR->value() / 100.0), float(hMG->value() / 100.0), float(hYB->value() / 100.0) };
+            session_.applyColorBalance(shadows, midtones, highlights, preserveLuminosity->isChecked());
+        }
+        canvas_->invalidateDocument();
+    };
+
+    for (auto *f : {sCR, sMG, sYB, mCR, mMG, mYB, hCR, hMG, hYB}) {
+        connect(f, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    }
+    connect(preserveLuminosity, &QCheckBox::toggled, &dialog, preview);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+
+    layout->addWidget(tabs);
+    layout->addWidget(preserveLuminosity);
+    layout->addWidget(previewEnabled);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    const int result = runFloatingDialog(dialog);
+    if (result == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else if (live) {
+        session_.previewAdjustment(target, originalAdjustment);
+    } else {
+        restoreLayer(document_.get(), session_, target, originalLayer);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+void MainWindow::cameraRawDialog()
+{
+    Layer *active = session_.activeLayer();
+    if (!active || active->image.isNull()) return;
+    const QUuid target = active->id;
+
+    const CanvasWidget::Tool previousTool = canvas_->tool();
+    CameraRawDialog dialog(this, session_, target, [this] {
+        canvas_->invalidateDocument();
+        syncDocumentViews(false);
+    });
+
+    if (auto *wbBtn = dialog.whiteBalanceEyedropper()) {
+        connect(wbBtn, &QPushButton::toggled, &dialog, [this, &dialog, wbBtn, previousTool](bool checked) {
+            canvas_->setTool(checked ? CanvasWidget::Tool::Eyedropper : previousTool);
+            if (!checked) {
+                colorSampleOverride_ = {};
+            } else {
+                colorSampleOverride_ = [this, &dialog, wbBtn, previousTool](const QPoint &point) {
+                    const auto sampled = session_.levelsSampleAt(point);
+                    if (sampled) {
+                        dialog.sampleWhiteBalance(*sampled);
+                    }
+                    wbBtn->setChecked(false);
+                    colorSampleOverride_ = {};
+                    canvas_->setTool(previousTool);
+                };
+            }
+        });
+    }
+
+    runFloatingDialog(dialog);
+    colorSampleOverride_ = {};
+    canvas_->setTool(previousTool);
+    syncDocumentViews();
 }
 
 void MainWindow::gaussianBlurDialog()
 {
-    Layer *active=session_.activeLayer();if(!active||active->image.isNull())return;const QUuid target=active->id;const Layer original=*active;
-    QDialog dialog(this);dialog.setWindowTitle(tr("Gaussian Blur"));auto *layout=new QVBoxLayout(&dialog);auto *form=new QFormLayout;auto *radius=new QDoubleSpinBox(&dialog);radius->setRange(.1,250);radius->setValue(3);radius->setSuffix(tr(" px"));form->addRow(tr("Radius"),sliderField(radius,true));layout->addLayout(form);auto *previewEnabled=new QCheckBox(tr("Preview"),&dialog);previewEnabled->setChecked(true);previewEnabled->setObjectName(QStringLiteral("filterPreview"));layout->addWidget(previewEnabled);
-    session_.beginEdit(QStringLiteral("Gaussian Blur"));const auto preview=[this,target,original,radius,previewEnabled]{for(Layer &layer:document_->layers)if(layer.id==target){layer=original;break;}if(previewEnabled->isChecked())session_.applyGaussianBlur(radius->value());canvas_->invalidateDocument();};connect(radius,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);
-    auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel|QDialogButtonBox::Ok,&dialog);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);layout->addWidget(buttons);
-    if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else for(Layer &layer:document_->layers)if(layer.id==target){layer=original;break;}session_.endEdit();syncDocumentViews();
+    Layer *active = session_.activeLayer();
+    const bool live = active && active->adjustment.value(QStringLiteral("kind")).toString() == QStringLiteral("Gaussian Blur");
+    if (!active || (!live && active->image.isNull())) return;
+    const QUuid target = active->id;
+    const Layer original = *active;
+    const QJsonObject originalAdjustment = active->adjustment;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Gaussian Blur"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *radius = new QDoubleSpinBox(&dialog);
+    radius->setObjectName(QStringLiteral("gaussianBlurRadius"));
+    radius->setDecimals(1);
+    radius->setRange(.1, 250);
+    radius->setValue(live ? originalAdjustment.value(QStringLiteral("blurRadius")).toDouble(10.0) : 3.0);
+    radius->setSuffix(tr(" px"));
+    addScrubRow(form, tr("Radius"), radius, true);
+    layout->addLayout(form);
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+    layout->addWidget(previewEnabled);
+
+    session_.beginEdit(live ? QStringLiteral("Edit Gaussian Blur") : QStringLiteral("Gaussian Blur"));
+    const auto value = [&] {
+        return QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("Gaussian Blur")},
+            {QStringLiteral("blurRadius"), radius->value()}
+        };
+    };
+    const auto preview = [this, live, target, original, value, radius, previewEnabled] {
+        if (!previewEnabled->isChecked()) {
+            if (live) session_.previewAdjustment(target, original.adjustment);
+            else restoreLayer(document_.get(), session_, target, original);
+        } else if (live) {
+            session_.previewAdjustment(target, value());
+        } else {
+            restoreLayer(document_.get(), session_, target, original);
+            session_.applyGaussianBlur(radius->value());
+        }
+        canvas_->invalidateDocument();
+    };
+    connect(radius, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else {
+        if (live) session_.previewAdjustment(target, originalAdjustment);
+        else restoreLayer(document_.get(), session_, target, original);
+    }
+    session_.endEdit();
+    syncDocumentViews();
 }
 
 void MainWindow::motionBlurDialog()
 {
-    Layer *active=session_.activeLayer();if(!active||active->image.isNull())return;const QUuid target=active->id;const Layer original=*active;
-    QDialog dialog(this); dialog.setWindowTitle(tr("Motion Blur")); auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
-    auto *angle = new QDoubleSpinBox(&dialog); angle->setRange(-90, 90); angle->setSuffix(tr("°"));
-    auto *distance = new QDoubleSpinBox(&dialog); distance->setRange(1, 2000); distance->setValue(10); distance->setSuffix(tr(" px"));
-    form->addRow(tr("Angle"), sliderField(angle)); form->addRow(tr("Distance"), sliderField(distance,true)); layout->addLayout(form);auto *previewEnabled=new QCheckBox(tr("Preview"),&dialog);previewEnabled->setChecked(true);previewEnabled->setObjectName(QStringLiteral("filterPreview"));layout->addWidget(previewEnabled);
-    session_.beginEdit(QStringLiteral("Motion Blur"));const auto preview=[this,target,original,angle,distance,previewEnabled]{for(Layer &layer:document_->layers)if(layer.id==target){layer=original;break;}if(previewEnabled->isChecked())session_.applyMotionBlur(angle->value(),distance->value());canvas_->invalidateDocument();};connect(angle,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(distance,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);
+    Layer *active = session_.activeLayer();
+    const bool live = active && active->adjustment.value(QStringLiteral("kind")).toString() == QStringLiteral("Motion Blur");
+    if (!active || (!live && active->image.isNull())) return;
+    const QUuid target = active->id;
+    const Layer original = *active;
+    const QJsonObject originalAdjustment = active->adjustment;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Motion Blur"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *angle = new QDoubleSpinBox(&dialog);
+    angle->setRange(-90, 90);
+    angle->setValue(live ? originalAdjustment.value(QStringLiteral("motionAngle")).toDouble(0.0) : 0.0);
+    angle->setSuffix(tr("°"));
+    auto *distance = new QDoubleSpinBox(&dialog);
+    distance->setRange(1, 2000);
+    distance->setValue(live ? originalAdjustment.value(QStringLiteral("motionDistance")).toDouble(10.0) : 10.0);
+    distance->setSuffix(tr(" px"));
+    addScrubRow(form, tr("Angle"), angle);
+    addScrubRow(form, tr("Distance"), distance, true);
+    layout->addLayout(form);
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+    layout->addWidget(previewEnabled);
+
+    session_.beginEdit(live ? QStringLiteral("Edit Motion Blur") : QStringLiteral("Motion Blur"));
+    const auto value = [&] {
+        return QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("Motion Blur")},
+            {QStringLiteral("motionAngle"), angle->value()},
+            {QStringLiteral("motionDistance"), distance->value()}
+        };
+    };
+    const auto preview = [this, live, target, original, value, angle, distance, previewEnabled] {
+        if (!previewEnabled->isChecked()) {
+            if (live) session_.previewAdjustment(target, original.adjustment);
+            else restoreLayer(document_.get(), session_, target, original);
+        } else if (live) {
+            session_.previewAdjustment(target, value());
+        } else {
+            restoreLayer(document_.get(), session_, target, original);
+            session_.applyMotionBlur(angle->value(), distance->value());
+        }
+        canvas_->invalidateDocument();
+    };
+    connect(angle, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(distance, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
-    if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else for(Layer &layer:document_->layers)if(layer.id==target){layer=original;break;}session_.endEdit();syncDocumentViews();
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else {
+        if (live) session_.previewAdjustment(target, originalAdjustment);
+        else restoreLayer(document_.get(), session_, target, original);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+void MainWindow::vignetteDialog()
+{
+    Layer *active = session_.activeLayer();
+    if (!active || active->group || (active->image.isNull() && !active->adjustment.isEmpty())) return;
+    const QUuid target = active->id;
+    const Layer original = *active;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Vignette"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+
+    auto *amount = new QDoubleSpinBox(&dialog);
+    amount->setRange(0, 100);
+    amount->setValue(35);
+    amount->setSuffix(tr("%"));
+    addScrubRow(form, tr("Amount"), amount);
+
+    QColor edgeColor = Qt::black;
+    auto *colorBtn = new QPushButton(&dialog);
+    const auto updateSwatch = [&] {
+        colorBtn->setStyleSheet(QStringLiteral("text-align:left;padding-left:12px;background:%1;color:%2;font-weight:bold;")
+                                .arg(edgeColor.name(), edgeColor.lightness() > 128 ? QStringLiteral("#000") : QStringLiteral("#fff")));
+        colorBtn->setText(edgeColor.name().toUpper());
+    };
+    updateSwatch();
+    form->addRow(tr("Color"), colorBtn);
+
+    auto *midpoint = new QDoubleSpinBox(&dialog);
+    midpoint->setRange(0, 100);
+    midpoint->setValue(50);
+    addScrubRow(form, tr("Midpoint"), midpoint);
+
+    auto *roundness = new QDoubleSpinBox(&dialog);
+    roundness->setRange(-100, 100);
+    roundness->setValue(100);
+    addScrubRow(form, tr("Roundness"), roundness);
+
+    auto *feather = new QDoubleSpinBox(&dialog);
+    feather->setRange(0, 100);
+    feather->setValue(60);
+    addScrubRow(form, tr("Feather"), feather);
+
+    auto *highlights = new QDoubleSpinBox(&dialog);
+    highlights->setRange(0, 100);
+    highlights->setValue(25);
+    addScrubRow(form, tr("Highlights"), highlights);
+
+    layout->addLayout(form);
+
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+    layout->addWidget(previewEnabled);
+
+    session_.beginEdit(QStringLiteral("Vignette"));
+    const auto preview = [this, target, original, amount, &edgeColor, midpoint, roundness, feather, highlights, previewEnabled] {
+        restoreLayer(document_.get(), session_, target, original);
+        if (previewEnabled->isChecked()) {
+            session_.applyVignette(amount->value(), edgeColor, midpoint->value(), roundness->value(), feather->value(), highlights->value());
+        }
+        canvas_->invalidateDocument();
+    };
+
+    connect(colorBtn, &QPushButton::clicked, &dialog, [&] {
+        const QColor originalColor = edgeColor;
+        QColorDialog picker(edgeColor, &dialog);
+        picker.setWindowTitle(tr("Vignette Edge Color"));
+        picker.setOption(QColorDialog::DontUseNativeDialog);
+        picker.setWindowModality(Qt::NonModal);
+        connect(&picker, &QColorDialog::currentColorChanged, &dialog, [&](const QColor &next) {
+            if (!next.isValid()) return;
+            edgeColor = next.toRgb();
+            updateSwatch();
+            preview();
+        });
+        if (runFloatingDialog(picker) != QDialog::Accepted) {
+            edgeColor = originalColor;
+            updateSwatch();
+            preview();
+        }
+    });
+
+    connect(amount, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(midpoint, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(roundness, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(feather, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(highlights, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    preview();
+
+    if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else {
+        restoreLayer(document_.get(), session_, target, original);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+void MainWindow::bloomGlowDialog()
+{
+    Layer *active = session_.activeLayer();
+    if (!active || active->group || active->image.isNull()) return;
+    const QUuid target = active->id;
+    const Layer original = *active;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Bloom / Glow"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+
+    auto *amount = new QDoubleSpinBox(&dialog);
+    amount->setRange(0, 100);
+    amount->setValue(40);
+    amount->setSuffix(tr("%"));
+    addScrubRow(form, tr("Amount"), amount);
+
+    auto *radius = new QDoubleSpinBox(&dialog);
+    radius->setRange(1, 150);
+    radius->setValue(24);
+    radius->setSuffix(tr(" px"));
+    addScrubRow(form, tr("Radius"), radius, true);
+
+    layout->addLayout(form);
+
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+    layout->addWidget(previewEnabled);
+
+    session_.beginEdit(QStringLiteral("Bloom / Glow"));
+    const auto preview = [this, target, original, amount, radius, previewEnabled] {
+        restoreLayer(document_.get(), session_, target, original);
+        if (previewEnabled->isChecked()) {
+            session_.applyBloomGlow(amount->value(), radius->value());
+        }
+        canvas_->invalidateDocument();
+    };
+
+    connect(amount, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(radius, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    preview();
+
+    if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else {
+        restoreLayer(document_.get(), session_, target, original);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+void MainWindow::tonalContrastDialog()
+{
+    Layer *active = session_.activeLayer();
+    if (!active || active->group || active->image.isNull()) return;
+    const QUuid target = active->id;
+    const Layer original = *active;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Tonal Contrast"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+
+    auto *amount = new QDoubleSpinBox(&dialog);
+    amount->setRange(0, 100);
+    amount->setValue(50);
+    amount->setSuffix(tr("%"));
+    addScrubRow(form, tr("Amount"), amount);
+
+    auto *radius = new QDoubleSpinBox(&dialog);
+    radius->setRange(1, 100);
+    radius->setValue(16);
+    radius->setSuffix(tr(" px"));
+    addScrubRow(form, tr("Radius"), radius, true);
+
+    auto *shadows = new QDoubleSpinBox(&dialog);
+    shadows->setRange(-100, 100);
+    shadows->setValue(40);
+    addScrubRow(form, tr("Shadows"), shadows);
+
+    auto *midtones = new QDoubleSpinBox(&dialog);
+    midtones->setRange(-100, 100);
+    midtones->setValue(60);
+    addScrubRow(form, tr("Midtones"), midtones);
+
+    auto *highlights = new QDoubleSpinBox(&dialog);
+    highlights->setRange(-100, 100);
+    highlights->setValue(30);
+    addScrubRow(form, tr("Highlights"), highlights);
+
+    layout->addLayout(form);
+
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+    layout->addWidget(previewEnabled);
+
+    session_.beginEdit(QStringLiteral("Tonal Contrast"));
+    const auto preview = [this, target, original, amount, radius, shadows, midtones, highlights, previewEnabled] {
+        restoreLayer(document_.get(), session_, target, original);
+        if (previewEnabled->isChecked()) {
+            session_.applyTonalContrast(amount->value(), radius->value(), shadows->value(), midtones->value(), highlights->value());
+        }
+        canvas_->invalidateDocument();
+    };
+
+    connect(amount, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(radius, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(shadows, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(midtones, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(highlights, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    preview();
+
+    if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else {
+        restoreLayer(document_.get(), session_, target, original);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+void MainWindow::addNoiseDialog()
+{
+    Layer *active = session_.activeLayer();
+    const bool live = active && active->adjustment.value(QStringLiteral("kind")).toString() == QStringLiteral("Add Noise");
+    if (!active || (!live && active->image.isNull())) return;
+    const QUuid target = active->id;
+    const Layer original = *active;
+    const QJsonObject originalAdjustment = active->adjustment;
+    quint32 seed = live ? quint32(originalAdjustment.value(QStringLiteral("noiseSeed")).toDouble(QRandomGenerator::global()->generate()))
+                        : QRandomGenerator::global()->generate();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Add Noise"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *amount = new QDoubleSpinBox(&dialog);
+    amount->setObjectName(QStringLiteral("noiseAmount"));
+    amount->setDecimals(1);
+    amount->setRange(.1, 400);
+    amount->setValue(live ? originalAdjustment.value(QStringLiteral("noiseAmount")).toDouble(10.0) : 10.0);
+    amount->setSuffix(tr(" %"));
+    auto *distribution = new QComboBox(&dialog);
+    distribution->addItems({tr("Uniform"), tr("Gaussian")});
+    if (live && originalAdjustment.value(QStringLiteral("noiseGaussian")).toBool(false)) {
+        distribution->setCurrentIndex(1);
+    }
+    auto *monochromatic = new QCheckBox(tr("Monochromatic"), &dialog);
+    if (live) monochromatic->setChecked(originalAdjustment.value(QStringLiteral("noiseMonochromatic")).toBool(false));
+
+    addScrubRow(form, tr("Amount"), amount, true);
+    form->addRow(tr("Distribution"), distribution);
+    layout->addLayout(form);
+    layout->addWidget(monochromatic);
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+    layout->addWidget(previewEnabled);
+
+    session_.beginEdit(live ? QStringLiteral("Edit Add Noise") : QStringLiteral("Add Noise"));
+    const auto value = [&] {
+        return QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("Add Noise")},
+            {QStringLiteral("noiseAmount"), amount->value()},
+            {QStringLiteral("noiseGaussian"), distribution->currentIndex() == 1},
+            {QStringLiteral("noiseMonochromatic"), monochromatic->isChecked()},
+            {QStringLiteral("noiseSeed"), double(seed)}
+        };
+    };
+    const auto preview = [this, live, target, original, value, seed, amount, distribution, monochromatic, previewEnabled] {
+        if (!previewEnabled->isChecked()) {
+            if (live) session_.previewAdjustment(target, original.adjustment);
+            else restoreLayer(document_.get(), session_, target, original);
+        } else if (live) {
+            session_.previewAdjustment(target, value());
+        } else {
+            restoreLayer(document_.get(), session_, target, original);
+            session_.addNoiseToActiveLayer(float(amount->value()), distribution->currentIndex() == 1, monochromatic->isChecked(), seed);
+        }
+        canvas_->invalidateDocument();
+    };
+    connect(amount, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
+    connect(distribution, &QComboBox::currentIndexChanged, &dialog, preview);
+    connect(monochromatic, &QCheckBox::toggled, &dialog, preview);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else {
+        if (live) session_.previewAdjustment(target, originalAdjustment);
+        else restoreLayer(document_.get(), session_, target, original);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+void MainWindow::layerEffectsDialog(const std::optional<QUuid> &layerId, std::optional<LayerEffectKind> initialKind)
+{
+    if (!document_ || !session_.canEditEffects()) return;
+    const QUuid target = layerId.value_or(document_->activeLayerId.value_or(QUuid()));
+    if (target.isNull()) return;
+    EffectsDialog dialog(this, session_, target, [this]() {
+        canvas_->invalidateDocument();
+        canvas_->update();
+    }, initialKind);
+    runFloatingDialog(dialog);
+    syncDocumentViews();
 }
 
 void MainWindow::removeBackgroundDialog()
@@ -2555,7 +4152,7 @@ void MainWindow::removeBackgroundDialog()
     const auto settings = [=] { return SubjectRemovalSettings{quality->currentIndex() == 1, refine->value(), contrast->value(), shift->value()}; };
     session_.beginEdit(QStringLiteral("Remove Background"));
     const auto restore = [this, target, original, originalMaskSelection] {
-        for (Layer &layer : document_->layers) if (layer.id == target) { layer = original; break; }
+        restoreLayer(document_.get(), session_, target, original);
         session_.selectMaskTarget(originalMaskSelection);
     };
     const auto preview = [this, restore, settings, previewEnabled, raw = detected.first] {
@@ -2577,6 +4174,121 @@ void MainWindow::removeBackgroundDialog()
     session_.endEdit(); syncDocumentViews();
 }
 
+void MainWindow::cancelActiveSelectionTask()
+{
+    if (currentSelectionCancelToken_) {
+        currentSelectionCancelToken_->store(true);
+        currentSelectionCancelToken_.reset();
+    }
+    ++currentSelectionRequestId_;
+}
+
+void MainWindow::selectSubjectAction()
+{
+    if (!document_) return;
+
+    cancelActiveSelectionTask();
+
+    QString error;
+    const auto snapshot = session_.createSelectionSnapshot(true, &error);
+    if (!snapshot.valid) {
+        if (!error.isEmpty()) showMessage(this, tr("Select Subject"), error);
+        return;
+    }
+
+    const quint64 requestId = ++currentSelectionRequestId_;
+    auto cancelToken = std::make_shared<std::atomic<bool>>(false);
+    currentSelectionCancelToken_ = cancelToken;
+
+    QProgressDialog progress(tr("Selecting subject…"), tr("Cancel"), 0, 0, this);
+    progress.setWindowTitle(tr("Select Subject"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.show();
+
+    QFutureWatcher<EditorSession::SelectionComputationResult> watcher;
+    QEventLoop loop;
+    connect(&watcher, &QFutureWatcher<EditorSession::SelectionComputationResult>::finished, &loop, &QEventLoop::quit);
+    connect(&progress, &QProgressDialog::canceled, this, [cancelToken] {
+        cancelToken->store(true);
+    });
+
+    watcher.setFuture(QtConcurrent::run([snapshot, requestId, cancelToken]() {
+        return EditorSession::computeSubjectSelection(snapshot, requestId, cancelToken.get());
+    }));
+
+    if (!watcher.isFinished()) loop.exec();
+    progress.close();
+
+    if (cancelToken->load()) return;
+    if (requestId != currentSelectionRequestId_) return;
+    if (!session_.hasDocument() || !document_) return;
+
+    const auto result = watcher.result();
+    if (document_->id != result.documentId || session_.documentGeneration() != result.documentGeneration) {
+        return;
+    }
+
+    QString applyError;
+    const bool ok = session_.applySelectionResult(result, SelectionMode::Replace, QStringLiteral("Select Subject"), &applyError);
+    if (!ok && !applyError.isEmpty()) {
+        showMessage(this, tr("Select Subject"), applyError);
+    }
+    syncDocumentViews(false);
+}
+
+void MainWindow::selectObjectRequested(const QPoint &point, int mode, int edgeOffset, bool smoothEdges, bool sampleAllLayers)
+{
+    if (!document_) return;
+
+    cancelActiveSelectionTask();
+
+    QString error;
+    const auto snapshot = session_.createSelectionSnapshot(sampleAllLayers, &error);
+    if (!snapshot.valid) {
+        if (!error.isEmpty()) showMessage(this, tr("Object Selection"), error);
+        return;
+    }
+
+    const quint64 requestId = ++currentSelectionRequestId_;
+    auto cancelToken = std::make_shared<std::atomic<bool>>(false);
+    currentSelectionCancelToken_ = cancelToken;
+
+    QProgressDialog progress(tr("Selecting object…"), tr("Cancel"), 0, 0, this);
+    progress.setWindowTitle(tr("Object Selection"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.show();
+
+    QFutureWatcher<EditorSession::SelectionComputationResult> watcher;
+    QEventLoop loop;
+    connect(&watcher, &QFutureWatcher<EditorSession::SelectionComputationResult>::finished, &loop, &QEventLoop::quit);
+    connect(&progress, &QProgressDialog::canceled, this, [cancelToken] {
+        cancelToken->store(true);
+    });
+
+    watcher.setFuture(QtConcurrent::run([snapshot, point, edgeOffset, smoothEdges, requestId, cancelToken]() {
+        return EditorSession::computeObjectSelection(snapshot, point, edgeOffset, smoothEdges, requestId, cancelToken.get());
+    }));
+
+    if (!watcher.isFinished()) loop.exec();
+    progress.close();
+
+    if (cancelToken->load()) return;
+    if (requestId != currentSelectionRequestId_) return;
+    if (!session_.hasDocument() || !document_) return;
+
+    const auto result = watcher.result();
+    if (document_->id != result.documentId || session_.documentGeneration() != result.documentGeneration) {
+        return;
+    }
+
+    QString applyError;
+    const bool ok = session_.applySelectionResult(result, SelectionMode(mode), QStringLiteral("Object Selection"), &applyError);
+    if (!ok && !applyError.isEmpty()) {
+        showMessage(this, tr("Object Selection"), applyError);
+    }
+    syncDocumentViews(false);
+}
+
 void MainWindow::resizeImageDialog()
 {
     if (!document_) return;
@@ -2592,7 +4304,10 @@ void MainWindow::resizeImageDialog()
     auto *sampling = new QComboBox(&dialog); sampling->setObjectName(QStringLiteral("imageSizeSampling")); sampling->addItems({tr("High quality"), tr("Smooth"), tr("Nearest neighbor")});
     auto *constrain = new QCheckBox(tr("Lock aspect ratio"), &dialog); constrain->setObjectName(QStringLiteral("imageSizeLocked")); constrain->setChecked(true);
     auto *resample = new QCheckBox(tr("Resample"), &dialog); resample->setObjectName(QStringLiteral("imageSizeResample")); resample->setChecked(true);
-    form->addRow(tr("Units"), units); form->addRow(tr("Width"), width); form->addRow(tr("Height"), height); form->addRow(tr("Resolution"), resolution); form->addRow(tr("Sampling"), sampling);
+    auto *widthLabel = new ScrubLabel(tr("Width"), width, 1.0, std::nullopt, &dialog); widthLabel->setObjectName(QStringLiteral("imageSizeWidthLabel"));
+    auto *heightLabel = new ScrubLabel(tr("Height"), height, 1.0, std::nullopt, &dialog); heightLabel->setObjectName(QStringLiteral("imageSizeHeightLabel"));
+    auto *resLabel = new ScrubLabel(tr("Resolution"), resolution, 1.0, std::nullopt, &dialog); resLabel->setObjectName(QStringLiteral("imageSizeResolutionLabel"));
+    form->addRow(tr("Units"), units); form->addRow(widthLabel, width); form->addRow(heightLabel, height); form->addRow(resLabel, resolution); form->addRow(tr("Sampling"), sampling);
     layout->addLayout(form); layout->addWidget(constrain); layout->addWidget(resample);
     auto *result = new QLabel(&dialog); result->setObjectName(QStringLiteral("imageSizeResult")); layout->addWidget(result);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
@@ -2684,8 +4399,9 @@ void MainWindow::resizeCanvasDialog()
     fill->addItems({tr("Transparent"), tr("Foreground"), tr("Background"), tr("Black"), tr("White"), tr("Custom")});
     auto *color = new QPushButton(tr("Choose custom color…"), &dialog); QColor extension = Qt::white; color->setEnabled(false);
     connect(fill, &QComboBox::currentIndexChanged, color, [color](int index) { color->setEnabled(index == 5); });
-    connect(color, &QPushButton::clicked, &dialog, [this, &extension] { const QColor chosen = QColorDialog::getColor(extension, this, tr("Canvas Extension Color")); if (chosen.isValid()) extension = chosen; });
-    form->addRow(tr("Units"), units); form->addRow(tr("Width"), width); form->addRow(tr("Height"), height); form->addRow(tr("Anchor"), anchor);
+    auto *widthLabel = new ScrubLabel(tr("Width"), width, 1.0, std::nullopt, &dialog); widthLabel->setObjectName(QStringLiteral("canvasSizeWidthLabel"));
+    auto *heightLabel = new ScrubLabel(tr("Height"), height, 1.0, std::nullopt, &dialog); heightLabel->setObjectName(QStringLiteral("canvasSizeHeightLabel"));
+    form->addRow(tr("Units"), units); form->addRow(widthLabel, width); form->addRow(heightLabel, height); form->addRow(tr("Anchor"), anchor);
     form->addRow(tr("Canvas extension"), fill); layout->addLayout(form); layout->addWidget(color);
     layout->insertWidget(1, relative); layout->insertWidget(2, locked);
     auto *result = new QLabel(&dialog); result->setObjectName(QStringLiteral("canvasSizeResult")); layout->addWidget(result);
@@ -2749,18 +4465,50 @@ void MainWindow::cropDialog()
     if (!document_) return;
     QDialog dialog(this); dialog.setWindowTitle(tr("Crop"));
     auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
-    auto makeField = [&dialog](int value, int maximum) { auto *field = new QSpinBox(&dialog); field->setRange(-1000000, maximum); field->setValue(value); field->setSuffix(QObject::tr(" px")); return field; };
-    auto *x = makeField(0, 1000000); auto *y = makeField(0, 1000000);
-    auto *width = makeField(document_->canvasSize.width(), 30000); width->setMinimum(1);
-    auto *height = makeField(document_->canvasSize.height(), 30000); height->setMinimum(1);
-    form->addRow(tr("X"), x); form->addRow(tr("Y"), y); form->addRow(tr("Width"), width); form->addRow(tr("Height"), height); layout->addLayout(form);
+    auto makeField = [&dialog](int value, int maximum, const QString &name, const QString &label, ScrubLabel **outLabel) {
+        auto *field = new QSpinBox(&dialog);
+        field->setObjectName(name);
+        field->setRange(-1000000, maximum);
+        field->setValue(value);
+        field->setSuffix(QObject::tr(" px"));
+        if (outLabel) {
+            *outLabel = new ScrubLabel(label, field, 1.0, 1.0, &dialog);
+            (*outLabel)->setObjectName(name + QStringLiteral("Label"));
+        }
+        return field;
+    };
+    ScrubLabel *xLabel = nullptr;
+    ScrubLabel *yLabel = nullptr;
+    ScrubLabel *wLabel = nullptr;
+    ScrubLabel *hLabel = nullptr;
+    auto *x = makeField(0, 1000000, QStringLiteral("cropX"), tr("X"), &xLabel);
+    auto *y = makeField(0, 1000000, QStringLiteral("cropY"), tr("Y"), &yLabel);
+    auto *width = makeField(document_->canvasSize.width(), 30000, QStringLiteral("cropWidth"), tr("Width"), &wLabel); width->setMinimum(1);
+    auto *height = makeField(document_->canvasSize.height(), 30000, QStringLiteral("cropHeight"), tr("Height"), &hLabel); height->setMinimum(1);
+    form->addRow(xLabel, x); form->addRow(yLabel, y); form->addRow(wLabel, width); form->addRow(hLabel, height); layout->addLayout(form);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
     if (dialog.exec() == QDialog::Accepted && session_.crop(QRect(x->value(), y->value(), width->value(), height->value()))) syncDocumentViews();
 }
 
+void MainWindow::trimDialog()
+{
+    if (!document_) return;
+    TrimDialog dialog(this);
+    if (dialog.exec() == QDialog::Accepted && session_.trim(dialog.options())) {
+        syncDocumentViews();
+    }
+}
+
+void MainWindow::keyboardShortcutsDialog()
+{
+    KeyboardShortcutsDialog dialog(this);
+    dialog.exec();
+}
+
 void MainWindow::newProject()
 {
+    cancelActiveSelectionTask();
     suggestClipboardOnEmpty_ = true;
     installInNewTab(EditorSession(), tr("Untitled %1").arg(workspaceTabs_.size() + 1));
 }
@@ -2768,7 +4516,7 @@ void MainWindow::newProject()
 void MainWindow::importImages()
 {
     const QStringList paths = QFileDialog::getOpenFileNames(this, tr("Import Images"), {},
-        tr("Images (*.png *.jpg *.jpeg *.heic *.heif *.tif *.tiff)"));
+        tr("Images, SVG, Photoshop and Camera RAW Files (*.png *.jpg *.jpeg *.heic *.heif *.tif *.tiff *.svg *.svgz *.psd *.psb *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;Vector Graphics (*.svg *.svgz);;Photoshop Files (*.psd *.psb);;Camera RAW Files (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;All Files (*)"));
     importImageFiles(paths);
 }
 
@@ -2777,6 +4525,63 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
     bool imported = false;
     QStringList failures;
     for (const QString &path : paths) {
+        if (RawImporter::matches(path)) {
+            RawDevelopDialog dialog(this, path);
+            if (dialog.exec() == QDialog::Accepted) {
+                QImage img = dialog.developedImage();
+                if (img.isNull() || !session_.insertImage(img, QFileInfo(path).completeBaseName(), center)) {
+                    failures << tr("%1: Failed to insert developed RAW image").arg(QFileInfo(path).fileName());
+                    continue;
+                }
+                imported = true;
+            }
+            continue;
+        }
+
+        const QString suffix = QFileInfo(path).suffix().toLower();
+        if (PSDReader::matches(path) || suffix == QStringLiteral("psd") || suffix == QStringLiteral("psb")) {
+            qint64 usedPixels = 0;
+            if (document_) {
+                for (const Layer &l : document_->layers) {
+                    if (!l.image.isNull()) usedPixels += (qint64(l.image.width()) * l.image.height());
+                    if (!l.mask.isNull()) usedPixels += (qint64(l.mask.width()) * l.mask.height());
+                }
+            }
+            const qint64 remaining = std::max(0LL, 100000000LL - usedPixels);
+            PSDImportResult result;
+            QString psdError;
+            if (!PSDReader::read(path, result, &psdError, remaining)) {
+                failures << tr("%1: %2").arg(QFileInfo(path).fileName(), psdError);
+                continue;
+            }
+            if (!result.conversions.isEmpty()) {
+                bool confirmed = true;
+                if (session_.confirmConversionsCallback()) {
+                    confirmed = session_.confirmConversionsCallback()(result.conversions);
+                } else {
+                    PSDConversionDialog dialog(QFileInfo(path).fileName(), result.conversions, this);
+                    confirmed = (dialog.exec() == QDialog::Accepted);
+                }
+                if (!confirmed) continue;
+            }
+            if (!session_.insertPhotoshop(result, QFileInfo(path).completeBaseName(), center, &psdError)) {
+                failures << tr("%1: %2").arg(QFileInfo(path).fileName(), psdError);
+                continue;
+            }
+            imported = true;
+            continue;
+        }
+
+        if (SvgImporter::matches(path)) {
+            QString svgError;
+            if (!session_.insertSvg(path, center, &svgError)) {
+                failures << tr("%1: %2").arg(QFileInfo(path).fileName(), svgError.isEmpty() ? tr("Failed to insert SVG") : svgError);
+                continue;
+            }
+            imported = true;
+            continue;
+        }
+
         QString readError; QImage image = ImageImporter::read(path, &readError);
         if (image.isNull() || !session_.insertImage(image, QFileInfo(path).completeBaseName(), center)) {
             failures << tr("%1: %2").arg(QFileInfo(path).fileName(), readError);
@@ -2794,51 +4599,594 @@ void MainWindow::finishInlineText()
     if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(true);
 }
 
-bool MainWindow::saveProject()
+void MainWindow::noteRecentProject(const QString &path)
 {
-    finishInlineText();
-    if (!document_) return true;
-    if (transformOriginalDocument_) finishPersistentTransform(true);
-    canvas_->resolvePendingGradient(); canvas_->resolvePendingDistortion();
-    if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
-    if (document_->projectPath.isEmpty()) return saveProjectAs();
-    try {
-        ProjectWriter::save(*document_, document_->projectPath);
-        session_.markSaved();
-        removeRecovery();
-        statusHint_->setText(tr("Saved %1").arg(QFileInfo(document_->projectPath).fileName()));
-        refreshTitle();
-        return true;
-    } catch (const ProjectWriteError &error) {
-        showMessage(this, tr("Could Not Save Project"), error.message());
-        return false;
+    if (path.isEmpty()) return;
+    QSettings settings;
+    QStringList recents = settings.value(QStringLiteral("recentProjects")).toStringList();
+    recents.removeAll(path);
+    recents.prepend(path);
+    while (recents.size() > 20) recents.removeLast();
+    settings.setValue(QStringLiteral("recentProjects"), recents);
+}
+
+QStringList MainWindow::recentProjects() const
+{
+    QSettings settings;
+    return settings.value(QStringLiteral("recentProjects")).toStringList();
+}
+
+void MainWindow::finishWriting(const QString &destination)
+{
+    if (destination.isEmpty()) {
+        const auto keys = inFlightSaves_.keys();
+        for (const QString &key : keys) {
+            if (inFlightSaves_.contains(key)) {
+                auto entry = inFlightSaves_.value(key);
+                entry.future.waitForFinished();
+                if (!entry.completed) {
+                    if (entry.completion) entry.completion(entry.future.result());
+                }
+            }
+        }
+    } else {
+        if (inFlightSaves_.contains(destination)) {
+            auto entry = inFlightSaves_.value(destination);
+            entry.future.waitForFinished();
+            if (!entry.completed) {
+                if (entry.completion) entry.completion(entry.future.result());
+            }
+        }
     }
 }
 
-bool MainWindow::saveProjectAs()
+bool MainWindow::hasInFlightSave(int tabIndex) const
 {
-    if (!document_) return true;
-    QString path = QFileDialog::getSaveFileName(this, tr("Save Compositor Project"),
-        document_->projectPath.isEmpty() ? QStringLiteral("Untitled.comp") : document_->projectPath,
-        tr("Compositor projects (*.comp)"));
-    if (path.isEmpty()) return false;
-    if (!path.endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive)) path += QStringLiteral(".comp");
-    const QString previous = document_->projectPath;
-    document_->projectPath = path;
-    if (saveProject()) return true;
-    document_->projectPath = previous;
+    if (tabIndex < 0) return !inFlightSaves_.isEmpty();
+    for (auto it = inFlightSaves_.cbegin(); it != inFlightSaves_.cend(); ++it) {
+        if (it.value().tabIndex == tabIndex) return true;
+    }
+    if (tabIndex < workspaceTabs_.size() && workspaceTabs_[tabIndex].hasDocument()) {
+        const QString path = workspaceTabs_[tabIndex].document()->projectPath;
+        if (!path.isEmpty() && inFlightSaves_.contains(path)) return true;
+    }
     return false;
+}
+
+QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bool asNew, const QString &explicitDestination)
+{
+    if (tabIndex < 0) tabIndex = currentTab_;
+    if (tabIndex < 0 || tabIndex >= workspaceTabs_.size()) return {};
+    if (tabIndex == currentTab_) {
+        workspaceTabs_[tabIndex] = session_;
+    }
+    EditorSession &tabSession = workspaceTabs_[tabIndex];
+    if (!tabSession.hasDocument()) return {};
+
+    const QString originalPath = tabSession.document()->projectPath;
+    QString destination = explicitDestination;
+    if (destination.isEmpty()) {
+        if (!asNew && !originalPath.isEmpty()) {
+            destination = originalPath;
+        } else {
+            QString suggested = originalPath.isEmpty() ? QStringLiteral("Untitled.comp") : originalPath;
+            destination = QFileDialog::getSaveFileName(this, tr("Save Compositor Project"), suggested, tr("Compositor projects (*.comp)"));
+            if (destination.isEmpty()) return {};
+            if (!destination.endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive)) destination += QStringLiteral(".comp");
+        }
+    }
+
+    const bool isSaveAs = (asNew || (!originalPath.isEmpty() && destination != originalPath));
+
+    // Serialize saves to the same destination
+    finishWriting(destination);
+
+    if (tabIndex == currentTab_) {
+        finishInlineText();
+        if (transformOriginalDocument_) finishPersistentTransform(true);
+        canvas_->resolvePendingGradient();
+        canvas_->resolvePendingDistortion();
+        if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
+        workspaceTabs_[tabIndex] = session_;
+    }
+
+    // Derive the expected disk state from the actual destination path, never from the tab's previous project path.
+    // Represent "destination must be absent" separately from "destination must match this digest."
+    ProjectWriter::ExpectedDestinationState expectedState;
+    if (!isSaveAs && !originalPath.isEmpty() && destination == originalPath) {
+        // Ordinary save to existing project path
+        if (tabDigests_.size() > tabIndex && tabDigests_[tabIndex].has_value() && tabDigests_[tabIndex]->isValid()) {
+            expectedState = ProjectWriter::ExpectedDestinationState::mustMatch(*tabDigests_[tabIndex]);
+        } else if (QFileInfo::exists(destination)) {
+            const auto d = ProjectDigest::compute(destination);
+            if (d && d->isValid()) {
+                expectedState = ProjectWriter::ExpectedDestinationState::mustMatch(*d);
+            } else {
+                const QString msg = tr("Cannot save to “%1”: destination exists but cannot be fingerprinted (unreadable or malformed).").arg(QFileInfo(destination).fileName());
+                showMessage(this, tr("Could Not Save Project"), msg);
+                statusHint_->setText(tr("Save failed"));
+                QPromise<ProjectWriter::SaveResult> promise;
+                promise.start();
+                promise.addResult(ProjectWriter::SaveResult{ProjectWriter::SaveResult::Status::IoError, msg, std::nullopt});
+                promise.finish();
+                return promise.future();
+            }
+        } else {
+            expectedState = ProjectWriter::ExpectedDestinationState::mustBeAbsent();
+        }
+    } else {
+        // Save As to a new or chosen path (or first save of untitled)
+        const bool destExists = QFileInfo::exists(destination);
+        if (!destExists) {
+            // For Save As to a new path, verify it remains absent immediately before installation.
+            expectedState = ProjectWriter::ExpectedDestinationState::mustBeAbsent();
+        } else {
+            // For Save As to an existing path, capture that destination's fingerprint after the user chooses it.
+            const auto destDigest = ProjectDigest::compute(destination);
+            if (destDigest.has_value() && destDigest->isValid()) {
+                expectedState = ProjectWriter::ExpectedDestinationState::mustMatch(*destDigest);
+            } else {
+                const QString msg = tr("Cannot save to “%1”: destination exists but cannot be fingerprinted (unreadable or malformed).").arg(QFileInfo(destination).fileName());
+                showMessage(this, tr("Could Not Save Project"), msg);
+                statusHint_->setText(tr("Save failed"));
+                QPromise<ProjectWriter::SaveResult> promise;
+                promise.start();
+                promise.addResult(ProjectWriter::SaveResult{ProjectWriter::SaveResult::Status::IoError, msg, std::nullopt});
+                promise.finish();
+                return promise.future();
+            }
+        }
+    }
+
+    // Capture immutable snapshot, tab identity, revision, and destination state on GUI thread
+    Document snapshot = *tabSession.document();
+    snapshot.projectPath = destination;
+    const int capturedTabIndex = tabIndex;
+    const QUuid capturedDocId = snapshot.id;
+    const QString capturedOriginalPath = originalPath;
+    const QString capturedDestination = destination;
+    const QUuid capturedRevision = tabSession.currentRevision();
+
+    if (tabWatchers_.size() > tabIndex && tabWatchers_[tabIndex]) {
+        tabWatchers_[tabIndex]->setSaving(true);
+    }
+
+    auto future = QtConcurrent::run([snapshot, capturedDestination, expectedState]() -> ProjectWriter::SaveResult {
+        return ProjectWriter::saveAtomicChecked(snapshot, capturedDestination, expectedState);
+    });
+
+    auto *watcher = new QFutureWatcher<ProjectWriter::SaveResult>(this);
+
+    InFlightSave inFlight;
+    inFlight.tabIndex = capturedTabIndex;
+    inFlight.future = future;
+    inFlight.watcher = watcher;
+    inFlight.completed = false;
+    inFlight.completion = [this, watcher, capturedTabIndex, capturedDocId, capturedOriginalPath, capturedDestination, capturedRevision, isSaveAs](const ProjectWriter::SaveResult &result) {
+        if (!inFlightSaves_.contains(capturedDestination)) return;
+        if (inFlightSaves_[capturedDestination].watcher != watcher) return;
+        auto entry = inFlightSaves_.take(capturedDestination);
+        if (entry.watcher) {
+            entry.watcher->disconnect();
+            entry.watcher->deleteLater();
+        }
+        onSaveCompleted(capturedTabIndex, capturedDocId, capturedOriginalPath, capturedDestination, capturedRevision, isSaveAs, result);
+    };
+
+    inFlightSaves_.insert(capturedDestination, inFlight);
+
+    connect(watcher, &QFutureWatcher<ProjectWriter::SaveResult>::finished, this, [this, watcher, capturedDestination]() {
+        if (inFlightSaves_.contains(capturedDestination)) {
+            auto &entry = inFlightSaves_[capturedDestination];
+            if (entry.watcher == watcher && !entry.completed) {
+                entry.completed = true;
+                const ProjectWriter::SaveResult result = watcher->result();
+                if (entry.completion) entry.completion(result);
+            }
+        }
+    });
+    watcher->setFuture(future);
+
+    return future;
+}
+
+void MainWindow::onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocId, const QString &capturedOriginalPath, const QString &capturedDestination, const QUuid &capturedRevision, bool isSaveAs, const ProjectWriter::SaveResult &result)
+{
+    Q_UNUSED(isSaveAs);
+    const bool tabMatches = (capturedTabIndex >= 0 && capturedTabIndex < workspaceTabs_.size()
+        && workspaceTabs_[capturedTabIndex].hasDocument()
+        && workspaceTabs_[capturedTabIndex].document()->id == capturedDocId
+        && (workspaceTabs_[capturedTabIndex].document()->projectPath == capturedOriginalPath
+            || workspaceTabs_[capturedTabIndex].document()->projectPath == capturedDestination));
+
+    if (result.status == ProjectWriter::SaveResult::Status::Success) {
+        if (capturedTabIndex >= 0 && capturedTabIndex < tabPendingExternalChange_.size()) {
+            tabPendingExternalChange_[capturedTabIndex] = false;
+            tabPendingExternalDigest_[capturedTabIndex] = std::nullopt;
+            if (tabPendingExternalDoc_.size() > capturedTabIndex) tabPendingExternalDoc_[capturedTabIndex] = nullptr;
+        }
+
+        if (tabMatches) {
+            workspaceTabs_[capturedTabIndex].document()->projectPath = capturedDestination;
+            setupWatcherForTab(capturedTabIndex, capturedDestination);
+            if (tabDigests_.size() > capturedTabIndex) tabDigests_[capturedTabIndex] = result.installedDigest;
+            if (tabWatchers_.size() > capturedTabIndex && tabWatchers_[capturedTabIndex]) {
+                if (result.installedDigest) tabWatchers_[capturedTabIndex]->setKnownDigest(*result.installedDigest);
+                tabWatchers_[capturedTabIndex]->setSaving(false);
+            }
+
+            noteRecentProject(capturedDestination);
+
+            if (capturedTabIndex == currentTab_) {
+                if (document_) document_->projectPath = capturedDestination;
+                if (session_.hasDocument()) session_.document()->projectPath = capturedDestination;
+                session_.markSaved(capturedRevision);
+                workspaceTabs_[capturedTabIndex] = session_;
+                removeRecovery();
+                refreshTitle();
+                statusHint_->setText(tr("Saved %1").arg(QFileInfo(capturedDestination).fileName()));
+            } else {
+                workspaceTabs_[capturedTabIndex].markSaved(capturedRevision);
+                tabs_->setTabText(capturedTabIndex, QFileInfo(capturedDestination).fileName());
+            }
+        }
+    } else if (result.status == ProjectWriter::SaveResult::Status::Conflict) {
+        if (tabWatchers_.size() > capturedTabIndex && tabWatchers_[capturedTabIndex]) {
+            tabWatchers_[capturedTabIndex]->setSaving(false);
+        }
+        showMessage(this, tr("Save Conflict"),
+            tr("Conflict detected: “%1” was created or modified externally while saving. Save was cancelled to avoid overwriting changes.").arg(QFileInfo(capturedDestination).fileName()));
+        statusHint_->setText(tr("Save conflict detected"));
+
+        // Report any genuine external change that arrived during save and survived the save attempt
+        if (tabPendingExternalChange_.value(capturedTabIndex, false) && tabPendingExternalDigest_.value(capturedTabIndex).has_value()) {
+            const QString path = (workspaceTabs_.size() > capturedTabIndex && workspaceTabs_[capturedTabIndex].hasDocument())
+                                 ? workspaceTabs_[capturedTabIndex].document()->projectPath : capturedDestination;
+            const ProjectDigest survivingDigest = *tabPendingExternalDigest_[capturedTabIndex];
+            const bool isDirty = (capturedTabIndex == currentTab_) ? session_.isModified() : workspaceTabs_[capturedTabIndex].isModified();
+            if (isDirty) {
+                if (capturedTabIndex == currentTab_) {
+                    promptExternalChange(capturedTabIndex, path, survivingDigest);
+                }
+            } else {
+                std::shared_ptr<Document> candidateDoc = (tabPendingExternalDoc_.size() > capturedTabIndex)
+                                                        ? tabPendingExternalDoc_[capturedTabIndex] : nullptr;
+                tabPendingExternalChange_[capturedTabIndex] = false;
+                tabPendingExternalDigest_[capturedTabIndex] = std::nullopt;
+                if (tabPendingExternalDoc_.size() > capturedTabIndex) tabPendingExternalDoc_[capturedTabIndex] = nullptr;
+                if (!candidateDoc) {
+                    try {
+                        candidateDoc = std::make_shared<Document>(ProjectReader::load(path));
+                        candidateDoc->projectPath = path;
+                    } catch (...) {}
+                }
+                if (candidateDoc) {
+                    if (capturedTabIndex == currentTab_) {
+                        session_.setDocument(std::make_shared<Document>(*candidateDoc), false);
+                        session_.markSaved();
+                        workspaceTabs_[capturedTabIndex] = session_;
+                        if (tabWatchers_.size() > capturedTabIndex && tabWatchers_[capturedTabIndex]) {
+                            tabWatchers_[capturedTabIndex]->setKnownDigest(survivingDigest);
+                        }
+                        tabDigests_[capturedTabIndex] = survivingDigest;
+                        syncDocumentViews();
+                        refreshTitle();
+                    } else {
+                        workspaceTabs_[capturedTabIndex].setDocument(std::make_shared<Document>(*candidateDoc), false);
+                        workspaceTabs_[capturedTabIndex].markSaved();
+                        if (tabWatchers_.size() > capturedTabIndex && tabWatchers_[capturedTabIndex]) {
+                            tabWatchers_[capturedTabIndex]->setKnownDigest(survivingDigest);
+                        }
+                        tabDigests_[capturedTabIndex] = survivingDigest;
+                    }
+                }
+            }
+        }
+    } else {
+        if (tabWatchers_.size() > capturedTabIndex && tabWatchers_[capturedTabIndex]) {
+            tabWatchers_[capturedTabIndex]->setSaving(false);
+        }
+        showMessage(this, tr("Could Not Save Project"), result.errorMessage);
+        statusHint_->setText(tr("Save failed"));
+
+        if (tabPendingExternalChange_.value(capturedTabIndex, false) && tabPendingExternalDigest_.value(capturedTabIndex).has_value()) {
+            const QString path = (workspaceTabs_.size() > capturedTabIndex && workspaceTabs_[capturedTabIndex].hasDocument())
+                                 ? workspaceTabs_[capturedTabIndex].document()->projectPath : capturedDestination;
+            const ProjectDigest survivingDigest = *tabPendingExternalDigest_[capturedTabIndex];
+            if (capturedTabIndex == currentTab_) {
+                promptExternalChange(capturedTabIndex, path, survivingDigest);
+            }
+        }
+    }
+}
+
+bool MainWindow::saveProject(bool wait, const QString &explicitDestination)
+{
+    if (!session_.hasDocument()) return true;
+    if (session_.document()->projectPath.isEmpty()) return saveProjectAs(explicitDestination, wait);
+    const QString dest = explicitDestination.isEmpty() ? session_.document()->projectPath : explicitDestination;
+    auto future = saveProjectAsync(currentTab_, false, dest);
+    if (wait) {
+        finishWriting(dest);
+        return future.result().status == ProjectWriter::SaveResult::Status::Success;
+    }
+    return true;
+}
+
+bool MainWindow::saveProjectAs(const QString &explicitDestination, bool wait)
+{
+    if (!session_.hasDocument()) return true;
+    QString path = explicitDestination;
+    if (path.isEmpty()) {
+        path = QFileDialog::getSaveFileName(this, tr("Save Compositor Project"),
+            session_.document()->projectPath.isEmpty() ? QStringLiteral("Untitled.comp") : session_.document()->projectPath,
+            tr("Compositor projects (*.comp)"));
+        if (path.isEmpty()) return false;
+    }
+    if (!path.endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive)) path += QStringLiteral(".comp");
+    auto future = saveProjectAsync(currentTab_, true, path);
+    if (wait) {
+        finishWriting(path);
+        return future.result().status == ProjectWriter::SaveResult::Status::Success;
+    }
+    return true;
+}
+
+bool MainWindow::saveProjectAs(bool wait)
+{
+    return saveProjectAs(QString(), wait);
 }
 
 bool MainWindow::confirmReplacement()
 {
+    finishWriting();
     if (!document_ || !session_.isModified()) return true;
     QString name = QFileInfo(document_->projectPath).fileName(); if (name.isEmpty()) name = tr("Untitled");
     const auto choice = showMessage(this, tr("Unsaved Changes"), tr("Save changes to %1?").arg(name),
         tr("Your changes will be lost if you don’t save them."),
         QMessageBox::Save | QMessageBox::Cancel | QMessageBox::Discard, QMessageBox::Save);
-    if (choice == QMessageBox::Save) return saveProject();
+    if (choice == QMessageBox::Save) return saveProject(true);
     return choice == QMessageBox::Discard;
+}
+
+void MainWindow::setupWatcherForTab(int tabIndex, const QString &path)
+{
+    if (tabIndex < 0 || tabIndex >= workspaceTabs_.size()) return;
+
+    while (tabWatchers_.size() <= tabIndex) tabWatchers_.push_back(nullptr);
+    while (tabDigests_.size() <= tabIndex) tabDigests_.push_back(std::nullopt);
+    while (tabPendingExternalChange_.size() <= tabIndex) tabPendingExternalChange_.push_back(false);
+    while (tabPendingExternalDigest_.size() <= tabIndex) tabPendingExternalDigest_.push_back(std::nullopt);
+    while (tabPendingExternalDoc_.size() <= tabIndex) tabPendingExternalDoc_.push_back(nullptr);
+
+    if (tabWatchers_[tabIndex]) {
+        tabWatchers_[tabIndex]->stop();
+        tabWatchers_[tabIndex]->deleteLater();
+        tabWatchers_[tabIndex] = nullptr;
+    }
+
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        tabDigests_[tabIndex] = std::nullopt;
+        return;
+    }
+
+    auto *watcher = new ProjectWatcher(path, this);
+    const auto initialDigest = ProjectDigest::compute(path);
+    tabDigests_[tabIndex] = initialDigest;
+    if (initialDigest) {
+        watcher->setKnownDigest(*initialDigest);
+    }
+
+    const QUuid capturedDocId = (workspaceTabs_.size() > tabIndex && workspaceTabs_[tabIndex].hasDocument())
+                                ? workspaceTabs_[tabIndex].document()->id : QUuid();
+
+    connect(watcher, &ProjectWatcher::packageValidatedExternally, this,
+        [this, tabIndex, capturedDocId](uint64_t reqId, const QString &changedPath, const std::optional<ProjectDigest> &expectedDigest, const ProjectDigest &newDigest, const std::shared_ptr<Document> &loadedDoc) {
+            handleExternalChangeValidated(tabIndex, capturedDocId, reqId, changedPath, expectedDigest, newDigest, loadedDoc);
+    });
+    connect(watcher, &ProjectWatcher::packageRemovedExternally, this, [this, tabIndex, path](const QString &removedPath) {
+        handleExternalRemoval(tabIndex, removedPath);
+    });
+
+    tabWatchers_[tabIndex] = watcher;
+}
+
+ProjectWatcher *MainWindow::tabWatcher(int tabIndex) const
+{
+    if (tabIndex >= 0 && tabIndex < tabWatchers_.size()) return tabWatchers_.at(tabIndex);
+    return nullptr;
+}
+
+void MainWindow::handleExternalRemoval(int tabIndex, const QString &path)
+{
+    if (tabIndex < 0 || tabIndex >= workspaceTabs_.size()) return;
+    if (tabIndex == currentTab_) {
+        statusHint_->setText(tr("“%1” was removed from disk").arg(QFileInfo(path).fileName()));
+        refreshTitle();
+    }
+}
+
+void MainWindow::handleExternalChange(int tabIndex, const QString &path, const ProjectDigest &newDigest)
+{
+    if (tabIndex < 0 || tabIndex >= workspaceTabs_.size()) return;
+    if (!workspaceTabs_[tabIndex].hasDocument()) return;
+    const QUuid docId = workspaceTabs_[tabIndex].document()->id;
+    const uint64_t reqId = (tabWatchers_.size() > tabIndex && tabWatchers_[tabIndex]) ? tabWatchers_[tabIndex]->currentRequestId() : 0;
+    const auto expDigest = (tabDigests_.size() > tabIndex) ? tabDigests_[tabIndex] : std::nullopt;
+    handleExternalChangeValidated(tabIndex, docId, reqId, path, expDigest, newDigest, nullptr);
+}
+
+void MainWindow::handleExternalChangeValidated(int tabIndex, const QUuid &capturedDocId, uint64_t requestId, const QString &path, const std::optional<ProjectDigest> &expectedDigest, const ProjectDigest &newDigest, const std::shared_ptr<Document> &loadedDoc)
+{
+    // Apply results only if the tab, path, request identity, and current known digest still match.
+    if (tabIndex < 0 || tabIndex >= workspaceTabs_.size()) return;
+    if (!workspaceTabs_[tabIndex].hasDocument()) return;
+    if (workspaceTabs_[tabIndex].document()->id != capturedDocId) return;
+    if (workspaceTabs_[tabIndex].document()->projectPath != path) return;
+    if (tabWatchers_.size() <= tabIndex || !tabWatchers_[tabIndex] || tabWatchers_[tabIndex]->currentRequestId() != requestId) return;
+    if (tabDigests_.size() <= tabIndex || tabDigests_[tabIndex] != expectedDigest) return;
+
+    std::shared_ptr<Document> candidateDoc = loadedDoc;
+    if (!candidateDoc) {
+        try {
+            candidateDoc = std::make_shared<Document>(ProjectReader::load(path));
+            candidateDoc->projectPath = path;
+        } catch (...) {
+            return;
+        }
+    }
+
+    const bool hasSaveInFlight = hasInFlightSave(tabIndex);
+    if (hasSaveInFlight) {
+        // While a save is active on this tab, inspection cannot reload the document,
+        // open a conflict prompt, or change the save’s captured revision or disk baseline.
+        // Record it as pending for this tab so it is not lost.
+        while (tabPendingExternalChange_.size() <= tabIndex) tabPendingExternalChange_.push_back(false);
+        while (tabPendingExternalDigest_.size() <= tabIndex) tabPendingExternalDigest_.push_back(std::nullopt);
+        while (tabPendingExternalDoc_.size() <= tabIndex) tabPendingExternalDoc_.push_back(nullptr);
+
+        tabPendingExternalChange_[tabIndex] = true;
+        tabPendingExternalDigest_[tabIndex] = newDigest;
+        tabPendingExternalDoc_[tabIndex] = candidateDoc;
+        return;
+    }
+
+    const bool isDirty = (tabIndex == currentTab_) ? session_.isModified() : workspaceTabs_[tabIndex].isModified();
+    if (isDirty && tabIndex == currentTab_) {
+        workspaceTabs_[tabIndex] = session_;
+    }
+    if (!isDirty) {
+        // Clean tab: reload in place preserving viewport, selection, and active layer
+        if (tabIndex == currentTab_) {
+            const double zoom = canvas_->zoom();
+            const QPointF pan = canvas_->panOffset();
+            const std::optional<QUuid> activeId = document_ ? document_->activeLayerId : std::nullopt;
+            const std::optional<QImage> sel = document_ ? document_->selection : std::nullopt;
+
+            auto docPtr = std::make_shared<Document>(*candidateDoc);
+            if (sel.has_value()) {
+                docPtr->selection = *sel;
+            }
+            session_.setDocument(docPtr, false);
+            workspaceTabs_[tabIndex] = session_;
+
+            if (activeId) {
+                for (const auto &l : docPtr->layers) {
+                    if (l.id == *activeId) {
+                        session_.selectLayer(*activeId);
+                        break;
+                    }
+                }
+            }
+            session_.markSaved();
+            if (tabWatchers_.size() > tabIndex && tabWatchers_[tabIndex]) {
+                tabWatchers_[tabIndex]->setKnownDigest(newDigest);
+            }
+            tabDigests_[tabIndex] = newDigest;
+            tabPendingExternalChange_[tabIndex] = false;
+            tabPendingExternalDigest_[tabIndex] = std::nullopt;
+            if (tabPendingExternalDoc_.size() > tabIndex) tabPendingExternalDoc_[tabIndex] = nullptr;
+
+            syncDocumentViews();
+            canvas_->setZoom(zoom);
+            canvas_->setPanOffset(pan);
+            refreshTitle();
+            statusHint_->setText(tr("Reloaded %1 (external change)").arg(QFileInfo(path).fileName()));
+        } else {
+            auto docPtr = std::make_shared<Document>(*candidateDoc);
+            workspaceTabs_[tabIndex].setDocument(docPtr, false);
+            workspaceTabs_[tabIndex].markSaved();
+            if (tabWatchers_.size() > tabIndex && tabWatchers_[tabIndex]) {
+                tabWatchers_[tabIndex]->setKnownDigest(newDigest);
+            }
+            tabDigests_[tabIndex] = newDigest;
+            tabPendingExternalChange_[tabIndex] = false;
+            tabPendingExternalDigest_[tabIndex] = std::nullopt;
+            if (tabPendingExternalDoc_.size() > tabIndex) tabPendingExternalDoc_[tabIndex] = nullptr;
+            tabs_->setTabText(tabIndex, QFileInfo(path).fileName());
+        }
+    } else {
+        // Dirty tab: defer prompt if inactive tab or in-progress edits
+        tabPendingExternalChange_[tabIndex] = true;
+        tabPendingExternalDigest_[tabIndex] = newDigest;
+        if (tabPendingExternalDoc_.size() > tabIndex) tabPendingExternalDoc_[tabIndex] = candidateDoc;
+
+        const bool isFrontmost = (tabIndex == currentTab_);
+        const bool isBusy = transformOriginalDocument_.has_value() || session_.isPainting() || canvas_->editorInteractionBlocked();
+        if (!isFrontmost || isBusy) {
+            return;
+        }
+        promptExternalChange(tabIndex, path, newDigest);
+    }
+}
+
+void MainWindow::promptExternalChange(int tabIndex, const QString &path, const ProjectDigest &newDigest)
+{
+    if (tabIndex < 0 || tabIndex >= workspaceTabs_.size()) return;
+    if (tabIndex != currentTab_) return;
+
+    const QString fileName = QFileInfo(path).fileName();
+    const auto choice = showMessage(this,
+        tr("“%1” was changed on disk.").arg(fileName),
+        tr("Another app changed this project. You can revert to the version on disk, losing your unsaved changes, or keep what you have."),
+        QString(),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+
+    tabPendingExternalChange_[tabIndex] = false;
+    tabPendingExternalDigest_[tabIndex] = std::nullopt;
+
+    if (choice == QMessageBox::Yes) {
+        // Revert: reload candidate from disk or use pre-loaded candidateDoc
+        std::shared_ptr<Document> candidateDoc = (tabPendingExternalDoc_.size() > tabIndex) ? tabPendingExternalDoc_[tabIndex] : nullptr;
+        if (!candidateDoc) {
+            try {
+                candidateDoc = std::make_shared<Document>(ProjectReader::load(path));
+                candidateDoc->projectPath = path;
+            } catch (...) {
+                return;
+            }
+        }
+        if (tabPendingExternalDoc_.size() > tabIndex) tabPendingExternalDoc_[tabIndex] = nullptr;
+
+        const double zoom = canvas_->zoom();
+        const QPointF pan = canvas_->panOffset();
+        const std::optional<QUuid> activeId = document_ ? document_->activeLayerId : std::nullopt;
+        const std::optional<QImage> sel = document_ ? document_->selection : std::nullopt;
+
+        auto docPtr = std::make_shared<Document>(*candidateDoc);
+        if (sel.has_value()) {
+            docPtr->selection = *sel;
+        }
+        session_.setDocument(docPtr, false);
+        workspaceTabs_[tabIndex] = session_;
+
+        if (activeId) {
+            for (const auto &l : docPtr->layers) {
+                if (l.id == *activeId) {
+                    session_.selectLayer(*activeId);
+                    break;
+                }
+            }
+        }
+        session_.markSaved();
+        if (tabWatchers_.size() > tabIndex && tabWatchers_[tabIndex]) {
+            tabWatchers_[tabIndex]->setKnownDigest(newDigest);
+        }
+        tabDigests_[tabIndex] = newDigest;
+        syncDocumentViews();
+        canvas_->setZoom(zoom);
+        canvas_->setPanOffset(pan);
+        refreshTitle();
+        statusHint_->setText(tr("Reverted to %1 from disk").arg(fileName));
+    } else {
+        // Keep Mine: retain local document and dirty state, update knownDigest to candidate so we don't prompt again for same change
+        if (tabWatchers_.size() > tabIndex && tabWatchers_[tabIndex]) {
+            tabWatchers_[tabIndex]->setKnownDigest(newDigest);
+        }
+        tabDigests_[tabIndex] = newDigest;
+        if (tabPendingExternalDoc_.size() > tabIndex) tabPendingExternalDoc_[tabIndex] = nullptr;
+    }
 }
 
 QString MainWindow::recoveryPath() const
@@ -2867,29 +5215,18 @@ void MainWindow::removeRecovery()
 void MainWindow::autosave()
 {
     stashCurrentTab();
-    int saved = 0;
-    QString failure;
     for (int i = 0; i < workspaceTabs_.size(); ++i) {
         EditorSession &candidate = workspaceTabs_[i];
         const auto &doc = candidate.document();
         if (!doc || !candidate.isModified() || candidate.isPainting()) continue;
-        try {
-            if (!doc->projectPath.isEmpty()) {
-                ProjectWriter::save(*doc, doc->projectPath);
-                candidate.markSaved();
-            } else {
-                QDir().mkpath(recoveryDirectory());
-                ProjectWriter::save(*doc, tabRecoveryPaths_.at(i));
-            }
-            ++saved;
-        } catch (const ProjectWriteError &error) {
-            failure = error.message();
+        const QString dest = doc->projectPath.isEmpty() ? tabRecoveryPaths_.value(i) : doc->projectPath;
+        if (dest.isEmpty()) continue;
+        if (inFlightSaves_.contains(dest)) continue;
+        if (doc->projectPath.isEmpty()) {
+            QDir().mkpath(recoveryDirectory());
         }
+        saveProjectAsync(i, false, dest);
     }
-    if (currentTab_ >= 0 && currentTab_ < workspaceTabs_.size()) session_ = workspaceTabs_.at(currentTab_);
-    refreshTitle();
-    if (!failure.isEmpty()) statusHint_->setText(tr("Autosave failed: %1").arg(failure));
-    else if (saved > 0) statusHint_->setText(tr("Autosaved %n document(s)", nullptr, saved));
 }
 
 void MainWindow::offerRecovery()
@@ -3004,7 +5341,91 @@ void MainWindow::exportPng(bool jpegDefault)
 
 bool MainWindow::openProject(const QString &path)
 {
+    cancelActiveSelectionTask();
+    if (RawImporter::matches(path)) {
+        RawDevelopDialog dialog(this, path);
+        if (dialog.exec() != QDialog::Accepted) return false;
+        QImage image = dialog.developedImage();
+        if (image.isNull()) {
+            showMessage(this, tr("Could Not Open RAW File"), tr("Failed to develop RAW image."));
+            return false;
+        }
+        EditorSession opened;
+        if (!opened.insertImage(image, QFileInfo(path).completeBaseName(), std::nullopt)) {
+            showMessage(this, tr("Could Not Open RAW File"), tr("Failed to create document from RAW image."));
+            return false;
+        }
+        if (workspaceTabs_.size() == 1 && !document_) {
+            session_ = std::move(opened); workspaceTabs_[0] = session_; syncDocumentViews();
+        } else {
+            installInNewTab(std::move(opened), QFileInfo(path).completeBaseName());
+        }
+        statusBar()->showMessage(tr("Opened %1 · %2 × %3 · %4 layers")
+                                     .arg(QFileInfo(path).fileName())
+                                     .arg(document_->canvasSize.width())
+                                     .arg(document_->canvasSize.height())
+                                     .arg(document_->layers.size()), 6000);
+        return true;
+    }
+
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    if (PSDReader::matches(path) || suffix == QStringLiteral("psd") || suffix == QStringLiteral("psb")) {
+        PSDImportResult result;
+        QString psdError;
+        if (!PSDReader::read(path, result, &psdError)) {
+            showMessage(this, tr("Could Not Open Photoshop File"), psdError);
+            return false;
+        }
+        if (!result.conversions.isEmpty()) {
+            bool confirmed = true;
+            if (session_.confirmConversionsCallback()) {
+                confirmed = session_.confirmConversionsCallback()(result.conversions);
+            } else {
+                PSDConversionDialog dialog(QFileInfo(path).fileName(), result.conversions, this);
+                confirmed = (dialog.exec() == QDialog::Accepted);
+            }
+            if (!confirmed) return false;
+        }
+        EditorSession opened;
+        if (!opened.insertPhotoshop(result, QFileInfo(path).completeBaseName(), std::nullopt, &psdError)) {
+            showMessage(this, tr("Could Not Open Photoshop File"), psdError);
+            return false;
+        }
+        if (workspaceTabs_.size() == 1 && !document_) {
+            session_ = std::move(opened); workspaceTabs_[0] = session_; syncDocumentViews();
+        } else {
+            installInNewTab(std::move(opened), QFileInfo(path).completeBaseName());
+        }
+        statusBar()->showMessage(tr("Opened %1 · %2 × %3 · %4 layers")
+                                     .arg(QFileInfo(path).fileName())
+                                     .arg(document_->canvasSize.width())
+                                     .arg(document_->canvasSize.height())
+                                     .arg(document_->layers.size()), 6000);
+        return true;
+    }
+
+    if (SvgImporter::matches(path)) {
+        EditorSession opened;
+        QString svgError;
+        if (!opened.insertSvg(path, std::nullopt, &svgError)) {
+            showMessage(this, tr("Could Not Open SVG File"), svgError.isEmpty() ? tr("Failed to read SVG file.") : svgError);
+            return false;
+        }
+        if (workspaceTabs_.size() == 1 && !document_) {
+            session_ = std::move(opened); workspaceTabs_[0] = session_; syncDocumentViews();
+        } else {
+            installInNewTab(std::move(opened), QFileInfo(path).completeBaseName());
+        }
+        statusBar()->showMessage(tr("Opened %1 · %2 × %3 · %4 layers")
+                                     .arg(QFileInfo(path).fileName())
+                                     .arg(document_->canvasSize.width())
+                                     .arg(document_->canvasSize.height())
+                                     .arg(document_->layers.size()), 6000);
+        return true;
+    }
+
     try {
+        ProjectWriter::recoverInterruptedPackage(path);
         auto loaded = std::make_shared<Document>(ProjectReader::load(path));
         EditorSession opened; opened.setDocument(std::move(loaded));
         if (workspaceTabs_.size() == 1 && !document_) {
@@ -3012,6 +5433,8 @@ bool MainWindow::openProject(const QString &path)
         } else {
             installInNewTab(std::move(opened), QFileInfo(path).completeBaseName());
         }
+        setupWatcherForTab(currentTab_, path);
+        noteRecentProject(path);
         statusBar()->showMessage(tr("Opened %1 · %2 × %3 · %4 layers")
                                      .arg(QFileInfo(path).fileName())
                                      .arg(document_->canvasSize.width())
@@ -3050,12 +5473,16 @@ void MainWindow::stashCurrentTab()
 
 void MainWindow::activateTab(int index)
 {
+    cancelActiveSelectionTask();
     if (index < 0 || index >= workspaceTabs_.size() || index == currentTab_) return;
     finishInlineText();
     if (transformOriginalDocument_) finishPersistentTransform(true);
     canvas_->resolvePendingGradient(); canvas_->resolvePendingDistortion(); canvas_->resolvePendingCrop(false);
     if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
     stashCurrentTab(); currentTab_ = index; session_ = workspaceTabs_.at(index); syncDocumentViews();
+    if (tabPendingExternalChange_.value(index, false) && tabPendingExternalDigest_.value(index).has_value() && session_.document()) {
+        promptExternalChange(index, session_.document()->projectPath, *tabPendingExternalDigest_[index]);
+    }
 }
 
 void MainWindow::installTabCloseButton(int index)
@@ -3081,6 +5508,11 @@ void MainWindow::installInNewTab(EditorSession session, const QString &title)
     if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
     stashCurrentTab(); workspaceTabs_.push_back(std::move(session));
     tabRecoveryPaths_.push_back(newRecoveryPath());
+    tabWatchers_.push_back(nullptr);
+    tabDigests_.push_back(std::nullopt);
+    tabPendingExternalChange_.push_back(false);
+    tabPendingExternalDigest_.push_back(std::nullopt);
+    tabPendingExternalDoc_.push_back(nullptr);
     currentTab_ = workspaceTabs_.size() - 1;
     tabs_->blockSignals(true); tabs_->addTab(title); installTabCloseButton(currentTab_); tabs_->setCurrentIndex(currentTab_); tabs_->blockSignals(false);
     session_ = workspaceTabs_.at(currentTab_); syncDocumentViews();
@@ -3160,17 +5592,48 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
 
 void MainWindow::closeTab(int index)
 {
+    cancelActiveSelectionTask();
     if (index < 0 || index >= workspaceTabs_.size()) return;
     finishInlineText();
     activateTab(index);
+    for (const auto &key : inFlightSaves_.keys()) {
+        if (inFlightSaves_.contains(key) && inFlightSaves_[key].tabIndex == index) {
+            finishWriting(key);
+        }
+    }
+    if (workspaceTabs_[index].hasDocument()) {
+        const QString path = workspaceTabs_[index].document()->projectPath;
+        if (!path.isEmpty()) finishWriting(path);
+    }
     if (!confirmReplacement()) return;
     if (workspaceTabs_.size() == 1) {
         removeRecovery(); session_ = EditorSession(); workspaceTabs_[0] = session_; tabRecoveryPaths_[0] = newRecoveryPath();
+        if (tabWatchers_.size() > 0 && tabWatchers_[0]) {
+            tabWatchers_[0]->stop();
+            tabWatchers_[0]->deleteLater();
+            tabWatchers_[0] = nullptr;
+        }
+        tabDigests_[0] = std::nullopt;
+        tabPendingExternalChange_[0] = false;
+        tabPendingExternalDigest_[0] = std::nullopt;
+        tabPendingExternalDoc_[0] = nullptr;
         tabs_->setTabText(0, tr("Untitled")); syncDocumentViews(); return;
     }
     removeRecovery();
     stashCurrentTab(); workspaceTabs_.removeAt(index);
     tabRecoveryPaths_.removeAt(index);
+    if (tabWatchers_.size() > index) {
+        if (tabWatchers_[index]) {
+            tabWatchers_[index]->stop();
+            tabWatchers_[index]->deleteLater();
+        }
+        tabWatchers_.removeAt(index);
+    }
+    if (tabDigests_.size() > index) tabDigests_.removeAt(index);
+    if (tabPendingExternalChange_.size() > index) tabPendingExternalChange_.removeAt(index);
+    if (tabPendingExternalDigest_.size() > index) tabPendingExternalDigest_.removeAt(index);
+    if (tabPendingExternalDoc_.size() > index) tabPendingExternalDoc_.removeAt(index);
+
     tabs_->blockSignals(true); tabs_->removeTab(index); tabs_->blockSignals(false);
     currentTab_ = -1; const int next = std::min(index, int(workspaceTabs_.size()) - 1);
     tabs_->setCurrentIndex(next); activateTab(next);
@@ -3189,7 +5652,7 @@ void MainWindow::selectLayer(const QModelIndex &index)
 void MainWindow::updateInspector()
 {
     if (!document_ || !document_->activeLayerId) {
-        const std::array<QWidget *, 9> fields = {xField_, yField_, widthField_, heightField_, scaleField_, rotationField_, sampling_, blendMode_, opacitySlider_};
+        const std::array<QWidget *, 14> fields = {xLabel_, xField_, yLabel_, yField_, widthLabel_, widthField_, heightLabel_, heightField_, scaleField_, rotationLabel_, rotationField_, sampling_, blendMode_, opacitySlider_};
         for (QWidget *field : fields) {
             if (field) field->setEnabled(false);
         }
@@ -3200,8 +5663,8 @@ void MainWindow::updateInspector()
         return layer.id == *document_->activeLayerId;
     });
     if (it == document_->layers.cend()) return;
-    const std::array<QWidget *, 9> fields = {xField_, yField_, widthField_, heightField_, scaleField_, rotationField_, sampling_, blendMode_, opacitySlider_};
-    for (QWidget *field : fields) field->setEnabled(true);
+    const std::array<QWidget *, 14> fields = {xLabel_, xField_, yLabel_, yField_, widthLabel_, widthField_, heightLabel_, heightField_, scaleField_, rotationLabel_, rotationField_, sampling_, blendMode_, opacitySlider_};
+    for (QWidget *field : fields) if (field) field->setEnabled(true);
     const QSignalBlocker bx(xField_), by(yField_), bw(widthField_), bh(heightField_), bs(scaleField_), br(rotationField_), bo(opacitySlider_), bb(blendMode_), bsample(sampling_);
     const QRectF groupBounds = session_.selectedLayerIds().size() > 1 ? session_.selectedLayersBounds() : QRectF();
     if (!groupBounds.isEmpty()) {
@@ -3244,19 +5707,22 @@ void MainWindow::updateCommandStates()
     }
     enabled("commandUndo", text || session_.canUndo()); enabled("commandRedo", text || session_.canRedo());
     enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument);
+    enabled("imageTrimAction", hasDocument); enabled("imageCropAction", hasDocument);
     enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy); enabled("commandCopyMerged", hasDocument && hasSelection);
     enabled("commandPaste", text || !clipboardImage_.isNull() || !QGuiApplication::clipboard()->image().isNull());
-    enabled("commandDuplicate", hasActive && (hasSelection ? canCopy : !active->group)); enabled("commandDelete", text || hasActive);
+    enabled("commandDuplicate", hasActive && (hasSelection ? canCopy : !active->group)); enabled("commandDelete", text || hasActive || selectedEffect_.has_value());
     enabled("commandTransform", hasSelection ? canCopy : canTransformLayer);
     enabled("commandNewLayer", hasDocument); enabled("commandNewFolder", hasDocument); enabled("commandGroupLayers", hasDocument);
     enabled("commandMoveOut", active && active->parentId.has_value()); enabled("commandRenameLayer", hasActive); enabled("commandVisibility", hasActive);
     enabled("commandMerge", session_.canMergeLayers()); enabled("commandMoveUp", session_.canMoveActiveLayer(1)); enabled("commandMoveDown", session_.canMoveActiveLayer(-1));
-    enabled("commandNewAdjustment", hasDocument); enabled("commandEditAdjustment", active && !active->adjustment.isEmpty());
+    enabled("commandNewAdjustment", hasDocument); enabled("commandEditAdjustment", active && !active->adjustment.isEmpty() && active->adjustment.value(QStringLiteral("kind")).toString() != QStringLiteral("Invert"));
+    enabled("commandLayerEffects", session_.canEditEffects());
     enabled("commandSelectAll", text || hasDocument); enabled("commandDeselect", hasSelection); enabled("commandInverseSelection", hasSelection);
 
     if (QAction *item = action("commandTransform")) item->setText(hasSelection ? tr("Transform Selection") : tr("Transform Layer"));
     if (QAction *item = action("commandDuplicate")) item->setText(hasSelection ? tr("Layer via Copy") : tr("Duplicate Layer"));
-    if (QAction *item = action("commandDelete")) item->setText(session_.isMaskSelected() && active && !active->mask.isNull() ? tr("Delete Layer Mask")
+    if (QAction *item = action("commandDelete")) item->setText(selectedEffect_ ? tr("Delete Effect")
+        : session_.isMaskSelected() && active && !active->mask.isNull() ? tr("Delete Layer Mask")
         : session_.selectedLayerIds().size() > 1 ? tr("Delete Layers") : tr("Delete Layer"));
     if (QAction *item = action("commandVisibility")) item->setText(active && !active->visible ? tr("Show Layer") : tr("Hide Layer"));
     if (QAction *item = action("commandClipping")) {
@@ -3270,6 +5736,78 @@ void MainWindow::updateCommandStates()
         item->setEnabled(canClip);
     }
     if (QAction *item = action("commandMerge")) item->setText(session_.mergeTitle());
+
+    if (auto *btn = findChild<QToolButton *>(QStringLiteral("addEffectButton"))) {
+        btn->setEnabled(session_.canEditEffects());
+    }
+    if (auto *btn = findChild<QToolButton *>(QStringLiteral("deleteLayerButton"))) {
+        btn->setEnabled(hasActive || selectedEffect_.has_value());
+        btn->setToolTip(selectedEffect_ ? tr("Delete selected effect")
+                        : session_.isMaskSelected() && active && !active->mask.isNull() ? tr("Delete layer mask")
+                        : session_.selectedLayerIds().size() > 1 ? tr("Delete selected layers") : tr("Delete selected layer"));
+    }
+
+    const auto setActionChecked = [](QAction *action, bool checked) {
+        if (!action) return;
+        const QSignalBlocker blocker(action);
+        action->setChecked(checked);
+    };
+    setActionChecked(actionShowGrid_, session_.showsGrid());
+    setActionChecked(actionShowGuides_, session_.showsGuides());
+    setActionChecked(actionShowRulers_, session_.showsRulers());
+    setActionChecked(actionSnap_, session_.snapEnabled());
+    setActionChecked(actionSnapToGuides_, session_.snapToGuides());
+    setActionChecked(actionSnapToGrid_, session_.snapToGrid());
+    setActionChecked(actionSnapToLayers_, session_.snapToLayers());
+    setActionChecked(actionSnapToDocumentBounds_, session_.snapToDocumentBounds());
+    setActionChecked(actionLockGuides_, session_.locksGuides());
+    if (actionClearGuides_) actionClearGuides_->setEnabled(session_.canClearGuides());
+}
+
+void MainWindow::updateRulerVisibility()
+{
+    const bool show = session_.showsRulers() && session_.hasDocument();
+    if (rulerCorner_) rulerCorner_->setVisible(show);
+    if (horizontalRuler_) {
+        horizontalRuler_->setVisible(show);
+        if (show) horizontalRuler_->update();
+    }
+    if (verticalRuler_) {
+        verticalRuler_->setVisible(show);
+        if (show) verticalRuler_->update();
+    }
+}
+
+InlineTextEditor *MainWindow::inlineTextEditor() const
+{
+    return canvas_ ? canvas_->findChild<InlineTextEditor *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly) : nullptr;
+}
+
+bool MainWindow::isMenuBarVisible() const
+{
+    if (!menuBar() || menuBar()->isHidden()) {
+        return false;
+    }
+    if (const auto *act = findChild<QAction *>(QStringLiteral("showMenuBar"))) {
+        return act->isChecked();
+    }
+    return true;
+}
+
+void MainWindow::updateMenuRestoreButton()
+{
+    if (!menuRestoreButton_) return;
+    const bool visible = isMenuBarVisible();
+    if (visible) {
+        menuRestoreButton_->setToolTip(tr("Hide menu bar (Ctrl+Shift+M)"));
+        menuRestoreButton_->setAccessibleName(tr("Hide menu bar"));
+        if (quickFileMenu_ && quickFileMenu_->isVisible()) {
+            quickFileMenu_->close();
+        }
+    } else {
+        menuRestoreButton_->setToolTip(tr("Show menu bar (Ctrl+Shift+M) · Right-click for menu bar"));
+        menuRestoreButton_->setAccessibleName(tr("Show menu bar"));
+    }
 }
 
 void MainWindow::syncDocumentViews(bool compositeChanged)
@@ -3298,6 +5836,18 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
     canvas_->setMaskTarget(session_.isMaskSelected());
     canvas_->setFloatingTransform(session_.hasFloatingSelection());
     layerModel_->setDocument(document_, compositeChanged);
+    if (selectedEffect_) {
+        bool stillExists = false;
+        if (document_) {
+            for (const Layer &l : document_->layers) {
+                if (l.id == selectedEffect_->layerId && l.effects.has_value() && l.effects->contains(selectedEffect_->kind)) {
+                    stillExists = true;
+                    break;
+                }
+            }
+        }
+        if (!stillExists) selectedEffect_ = std::nullopt;
+    }
     {
         const QSignalBlocker blocker(layerView_->selectionModel());
         layerView_->selectionModel()->clearSelection();
@@ -3306,10 +5856,17 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
             for (int row = 0; row < layerModel_->rowCount(); ++row) {
                 const QModelIndex index = layerModel_->index(row, 0);
                 const auto id = layerModel_->layerId(index); if (!id) continue;
-                if (session_.selectedLayerIds().contains(*id)) {
-                    layerView_->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+                if (selectedEffect_ && layerModel_->isEffect(index)) {
+                    if (*id == selectedEffect_->layerId && layerModel_->effectKind(index) == selectedEffect_->kind) {
+                        layerView_->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+                        primaryIndex = index;
+                    }
+                } else if (!selectedEffect_ && !layerModel_->isEffect(index)) {
+                    if (session_.selectedLayerIds().contains(*id)) {
+                        layerView_->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+                    }
+                    if (document_->activeLayerId && *id == *document_->activeLayerId) primaryIndex = index;
                 }
-                if (document_->activeLayerId && *id == *document_->activeLayerId) primaryIndex = index;
             }
         }
         layerView_->selectionModel()->setCurrentIndex(primaryIndex, QItemSelectionModel::NoUpdate);
@@ -3317,15 +5874,21 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
     layerCount_->setText(document_ ? QString::number(document_->layers.size()) : QStringLiteral("0"));
     if (document_) {
         statusDimensions_->setText(QStringLiteral("%1 × %2 px").arg(document_->canvasSize.width()).arg(document_->canvasSize.height()));
-        statusHint_->setText(tr("Drag to move · Handles to resize · Circle to rotate · 1–0 layer opacity · Space to pan"));
+        if (canvas_ && canvas_->tool() == CanvasWidget::Tool::Blur) {
+            updateSmearStatusHint();
+        } else {
+            statusHint_->setText(tr("Drag to move · Handles to resize · Circle to rotate · 1–0 layer opacity · Space to pan"));
+        }
     }
     updateInspector();
+    updateRulerVisibility();
     refreshTitle();
 }
 
 void MainWindow::showAbout()
 {
-    showMessage(this, tr("About CompositorLX"), tr("CompositorLX 0.2.0"),
+    showMessage(this, tr("About CompositorLX"),
+                tr("CompositorLX %1").arg(QCoreApplication::applicationVersion()),
                 tr("Linux port of Compositor · Qt 6 Widgets + C++20"));
 }
 
@@ -3354,6 +5917,13 @@ void MainWindow::checkForUpdates()
 
 void MainWindow::deleteLayersWithMaskChoice()
 {
+    if (selectedEffect_) {
+        const auto sel = *selectedEffect_;
+        selectedEffect_ = std::nullopt;
+        session_.removeLayerEffect(sel.layerId, sel.kind);
+        syncDocumentViews();
+        return;
+    }
     if (session_.selectedDeletionLiveMaskDependents().isEmpty()) { session_.deleteSelectedLayers(); syncDocumentViews(); return; }
     QMessageBox box(QMessageBox::Question, tr("This layer supplies a live mask"),
                     tr("Bake keeps the current masked appearance. Remove Links reveals the dependent layers' pixels."),
@@ -3390,10 +5960,12 @@ void MainWindow::dropEvent(QDropEvent *event)
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    cancelActiveSelectionTask();
     finishInlineText();
     if (transformOriginalDocument_) finishPersistentTransform(true);
     canvas_->resolvePendingGradient(); canvas_->resolvePendingDistortion(); canvas_->resolvePendingCrop(false);
     if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
+    finishWriting();
     stashCurrentTab();
     const int initiallyActive = currentTab_;
     QVector<int> order; order.push_back(initiallyActive);
@@ -3425,7 +5997,14 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             QTimer::singleShot(0, dialog, clearButtonIcons);
         }
     }
-    if (layerView_ && watched == layerView_->viewport()) {
+    if (layerView_ && (watched == layerView_ || watched == layerView_->viewport())) {
+        if (event->type() == QEvent::KeyPress) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            if (key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) {
+                deleteLayersWithMaskChoice();
+                return true;
+            }
+        }
         const auto toggleSwipeRow = [this](const QPoint &point) {
             const QModelIndex index = layerView_->indexAt(point); const auto id = layerModel_->layerId(index);
             if (!id || visibilitySwipeVisited_.contains(*id)) return;
@@ -3434,26 +6013,113 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             if (it->visible != visibilitySwipeValue_) session_.toggleLayerVisibility(*id);
             visibilitySwipeVisited_.insert(*id); syncDocumentViews();
         };
+        if (event->type() == QEvent::MouseButtonDblClick) {
+            const auto *mouse = static_cast<QMouseEvent *>(event);
+            const QModelIndex index = layerView_->indexAt(mouse->position().toPoint());
+            if (layerModel_->isEffect(index)) {
+                const auto id = layerModel_->layerId(index);
+                const auto kind = layerModel_->effectKind(index);
+                if (id && kind) {
+                    layerEffectsDialog(*id, *kind);
+                    return true;
+                }
+            }
+        }
         if (event->type() == QEvent::MouseButtonPress) {
             const auto *mouse = static_cast<QMouseEvent *>(event);
             const QModelIndex index = layerView_->indexAt(mouse->position().toPoint()); const auto id = layerModel_->layerId(index);
-            if (mouse->button() == Qt::LeftButton && mouse->position().x() < 29 && id) {
-                const auto it=std::find_if(document_->layers.cbegin(),document_->layers.cend(),[&](const Layer&l){return l.id==*id;});
-                if(it!=document_->layers.cend()){visibilitySwipeActive_=true;visibilitySwipeValue_=!it->visible;visibilitySwipeVisited_.clear();session_.beginEdit(tr("Layer Visibility"));toggleSwipeRow(mouse->position().toPoint());return true;}
+            if (mouse->button() == Qt::LeftButton && id) {
+                if (layerModel_->isEffect(index)) {
+                    const auto kind = layerModel_->effectKind(index);
+                    const int depth = index.data(Qt::UserRole + 1).toInt();
+                    const int indent = std::min(depth, 8) * 18;
+                    const int eyeX = 38 + indent;
+                    if (kind && mouse->position().x() >= eyeX - 6 && mouse->position().x() <= eyeX + 22) {
+                        session_.toggleLayerEffect(*id, *kind);
+                        syncDocumentViews();
+                        return true;
+                    }
+                    selectedEffect_ = EffectSelection{*id, *kind};
+                    session_.selectLayer(*id);
+                    syncDocumentViews(false);
+                    return false;
+                } else {
+                    const int depth = index.data(Qt::UserRole + 1).toInt();
+                    const int indent = std::min(depth, 8) * 18;
+                    const int thumbX = 34 + indent;
+                    const QImage maskImg = index.data(Qt::UserRole + 3).value<QImage>();
+                    if (!maskImg.isNull() && mouse->position().x() >= thumbX + 41 && mouse->position().x() <= thumbX + 78) {
+                        pendingMaskDrag_ = true;
+                        maskDragStartPos_ = mouse->position().toPoint();
+                        maskDragLayerId_ = *id;
+                    }
+                    if (layerModel_->data(index, LayerListModel::HasEffectsRole).toBool()) {
+                        const QRect rowRect = layerView_->visualRect(index);
+                        if (mouse->position().x() >= rowRect.right() - 36 && mouse->position().x() <= rowRect.right()) {
+                            layerModel_->toggleEffectsExpanded(*id);
+                            syncDocumentViews();
+                            return true;
+                        }
+                    }
+                    if (mouse->position().x() < 29) {
+                        const auto it=std::find_if(document_->layers.cbegin(),document_->layers.cend(),[&](const Layer&l){return l.id==*id;});
+                        if(it!=document_->layers.cend()){visibilitySwipeActive_=true;visibilitySwipeValue_=!it->visible;visibilitySwipeVisited_.clear();session_.beginEdit(tr("Layer Visibility"));toggleSwipeRow(mouse->position().toPoint());return true;}
+                    }
+                }
             }
-        } else if (event->type() == QEvent::MouseButtonRelease && visibilitySwipeActive_) {
-            visibilitySwipeActive_=false; session_.endEdit(); visibilitySwipeVisited_.clear(); refreshTitle(); return true;
+        } else if (event->type() == QEvent::MouseButtonRelease) {
+            pendingMaskDrag_ = false;
+            if (visibilitySwipeActive_) {
+                visibilitySwipeActive_=false; session_.endEdit(); visibilitySwipeVisited_.clear(); refreshTitle(); return true;
+            }
         } else if (event->type() == QEvent::Leave) layerView_->viewport()->setCursor(Qt::ArrowCursor);
         else if (event->type() == QEvent::MouseMove) {
             const auto *mouse = static_cast<QMouseEvent *>(event);
+            if (pendingMaskDrag_ && (mouse->buttons() & Qt::LeftButton)) {
+                if ((mouse->position().toPoint() - maskDragStartPos_).manhattanLength() >= QApplication::startDragDistance()) {
+                    pendingMaskDrag_ = false;
+                    const QModelIndex dragIndex = layerView_->indexAt(maskDragStartPos_);
+                    const QImage maskThumb = dragIndex.data(Qt::UserRole + 3).value<QImage>();
+                    auto *drag = new QDrag(layerView_);
+                    auto *mime = new QMimeData;
+                    const QByteArray data = maskDragLayerId_.toString(QUuid::WithoutBraces).toUtf8();
+                    mime->setData(QStringLiteral("application/x-compositor-layer-mask"), data);
+                    mime->setData(QStringLiteral("com.compositor.layer-mask"), data);
+                    drag->setMimeData(mime);
+                    if (!maskThumb.isNull()) {
+                        drag->setPixmap(QPixmap::fromImage(maskThumb));
+                        drag->setHotSpot(QPoint(maskThumb.width() / 2, maskThumb.height() / 2));
+                    }
+                    drag->exec(Qt::CopyAction);
+                    return true;
+                }
+            }
             if (visibilitySwipeActive_ && (mouse->buttons() & Qt::LeftButton)) { toggleSwipeRow(mouse->position().toPoint()); return true; }
             const QModelIndex index = layerView_->indexAt(mouse->position().toPoint());
             Qt::CursorShape shape = Qt::ArrowCursor;
             if (index.isValid()) {
-                const int thumbnail = 34 + std::min(index.data(Qt::UserRole + 1).toInt(), 8) * 18;
-                const bool overThumbnail = mouse->position().x() >= thumbnail && mouse->position().x() <= thumbnail + 80;
-                if (mouse->modifiers().testFlag(Qt::AltModifier) && !overThumbnail) shape = Qt::DragCopyCursor;
-                else if (overThumbnail && (mouse->modifiers() & (Qt::AltModifier | Qt::ControlModifier))) shape = Qt::PointingHandCursor;
+                if (layerModel_->isEffect(index)) {
+                    const int depth = index.data(Qt::UserRole + 1).toInt();
+                    const int indent = std::min(depth, 8) * 18;
+                    const int eyeX = 38 + indent;
+                    if (mouse->position().x() >= eyeX - 6 && mouse->position().x() <= eyeX + 22) {
+                        shape = Qt::PointingHandCursor;
+                    } else if (mouse->modifiers().testFlag(Qt::AltModifier)) {
+                        shape = Qt::DragCopyCursor;
+                    }
+                } else {
+                    const int depth = index.data(Qt::UserRole + 1).toInt();
+                    const int indent = std::min(depth, 8) * 18;
+                    const int thumbnail = 34 + indent;
+                    const bool overMask = !index.data(Qt::UserRole + 3).value<QImage>().isNull()
+                        && mouse->position().x() >= thumbnail + 41 && mouse->position().x() <= thumbnail + 78;
+                    const bool overThumb = mouse->position().x() >= thumbnail && mouse->position().x() < thumbnail + 36;
+                    if (mouse->modifiers().testFlag(Qt::AltModifier)) {
+                        shape = Qt::DragCopyCursor;
+                    } else if ((overThumb || overMask) && mouse->modifiers().testFlag(Qt::ControlModifier)) {
+                        shape = Qt::PointingHandCursor;
+                    }
+                }
             }
             layerView_->viewport()->setCursor(shape);
         }

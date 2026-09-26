@@ -1,0 +1,46 @@
+{
+  "activeLayerID": "BBBBBBBB-1111-2222-3333-000000000001",
+  "colorSpace": "sRGB",
+  "documentID": "0000000B-0000-0000-0000-00000000000B",
+  "format": "com.compositor.project",
+  "height": 64,
+  "layers": [
+    {
+      "id": "BBBBBBBB-1111-2222-3333-000000000001",
+      "imageFile": "BBBBBBBB-1111-2222-3333-000000000001.png",
+      "isVisible": true,
+      "name": "LegacyText",
+      "shape": {
+        "alignment": 1,
+        "areaText": true,
+        "baseHeight": 40,
+        "baseWidth": 150,
+        "bold": true,
+        "fill": "#ffff0000",
+        "fontFamily": "DejaVu Sans",
+        "italic": false,
+        "kind": "Text",
+        "pixelSize": 32,
+        "text": "Legacy LX Text",
+        "underline": false
+      },
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 7,
+  "width": 64
+}

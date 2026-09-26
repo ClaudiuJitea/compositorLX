@@ -1,0 +1,54 @@
+{
+  "activeLayerID": "11111111-AAAA-0000-0000-000000000001",
+  "colorSpace": "sRGB",
+  "documentID": "00000001-0000-0000-0000-000000000001",
+  "format": "com.compositor.project",
+  "height": 64,
+  "layers": [
+    {
+      "id": "11111111-AAAA-0000-0000-000000000001",
+      "isGroup": true,
+      "isVisible": true,
+      "name": "A",
+      "parentID": "11111111-BBBB-0000-0000-000000000002",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    },
+    {
+      "id": "11111111-BBBB-0000-0000-000000000002",
+      "isGroup": true,
+      "isVisible": true,
+      "name": "B",
+      "parentID": "11111111-AAAA-0000-0000-000000000001",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 7,
+  "width": 64
+}

@@ -1,4 +1,5 @@
 #include "io/ImageImporter.h"
+#include "io/SvgImporter.h"
 
 #include <QColorSpace>
 #include <QFileInfo>
@@ -13,6 +14,10 @@ namespace compositor {
 
 QImage ImageImporter::read(const QString &path, QString *error)
 {
+    if (SvgImporter::matches(path)) {
+        return SvgImporter::read(path, std::nullopt, 100000000LL, error);
+    }
+
     QImageReader reader(path); reader.setAutoTransform(true);
     QImage image = reader.read();
 #ifdef COMPOSITOR_HAVE_LIBHEIF

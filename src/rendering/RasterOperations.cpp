@@ -1,4 +1,5 @@
 #include "rendering/RasterOperations.h"
+#include "core/CameraRaw.h"
 
 extern "C" {
 #include "LensPixels.h"
@@ -380,7 +381,168 @@ QImage RasterOperations::adjustment(const QImage &image, const QJsonObject &sett
         return grain(image, value.value(QStringLiteral("amount")).toDouble(25), value.value(QStringLiteral("size")).toDouble(1.5),
                      value.value(QStringLiteral("roughness")).toDouble(50), quint32(value.value(QStringLiteral("seed")).toDouble()), origin, unitsPerPixel);
     }
-    return image;
+    if (kind == QStringLiteral("Invert")) {
+        return inverted(image);
+    }
+    if (kind == QStringLiteral("Gaussian Blur")) {
+        const double radius = settings.value(QStringLiteral("blurRadius")).toDouble(10.0);
+        return gaussianBlur(image, radius);
+    }
+    if (kind == QStringLiteral("Motion Blur")) {
+        const double angle = settings.value(QStringLiteral("motionAngle")).toDouble(0.0);
+        const double dist = settings.value(QStringLiteral("motionDistance")).toDouble(10.0);
+        return motionBlur(image, angle, dist);
+    }
+    if (kind == QStringLiteral("Add Noise")) {
+        const float amount = float(settings.value(QStringLiteral("noiseAmount")).toDouble(10.0));
+        const bool gaussian = settings.value(QStringLiteral("noiseGaussian")).toBool(false);
+        const bool monochromatic = settings.value(QStringLiteral("noiseMonochromatic")).toBool(false);
+        const quint32 seed = quint32(settings.value(QStringLiteral("noiseSeed")).toDouble(0.0));
+        return addNoise(image, amount, gaussian, monochromatic, seed);
+    }
+    if (kind == QStringLiteral("Black & White")) {
+        QJsonObject bw = settings.value(QStringLiteral("blackWhiteSettings")).toObject();
+        if (bw.isEmpty()) bw = settings.value(QStringLiteral("blackWhite")).toObject();
+        const float reds = float(bw.value(QStringLiteral("reds")).toDouble(40.0) / 100.0);
+        const float yellows = float(bw.value(QStringLiteral("yellows")).toDouble(60.0) / 100.0);
+        const float greens = float(bw.value(QStringLiteral("greens")).toDouble(40.0) / 100.0);
+        const float cyans = float(bw.value(QStringLiteral("cyans")).toDouble(60.0) / 100.0);
+        const float blues = float(bw.value(QStringLiteral("blues")).toDouble(20.0) / 100.0);
+        const float magentas = float(bw.value(QStringLiteral("magentas")).toDouble(80.0) / 100.0);
+        const float weights[6] = {reds, yellows, greens, cyans, blues, magentas};
+        const bool tint = bw.value(QStringLiteral("tint")).toBool(false);
+        const double tintHue = bw.value(QStringLiteral("tintHue")).toDouble(40.0);
+        const double tintSaturation = bw.value(QStringLiteral("tintSaturation")).toDouble(20.0) / 100.0;
+        return blackWhite(image, weights, tint, tintHue, tintSaturation);
+    }
+    if (kind == QStringLiteral("Color Balance")) {
+        QJsonObject cb = settings.value(QStringLiteral("colorBalanceSettings")).toObject();
+        if (cb.isEmpty()) cb = settings.value(QStringLiteral("colorBalance")).toObject();
+        const float shadows[3] = {
+            float(cb.value(QStringLiteral("shadowCyanRed")).toDouble(0.0) / 100.0),
+            float(cb.value(QStringLiteral("shadowMagentaGreen")).toDouble(0.0) / 100.0),
+            float(cb.value(QStringLiteral("shadowYellowBlue")).toDouble(0.0) / 100.0)
+        };
+        const float midtones[3] = {
+            float(cb.value(QStringLiteral("midCyanRed")).toDouble(0.0) / 100.0),
+            float(cb.value(QStringLiteral("midMagentaGreen")).toDouble(0.0) / 100.0),
+            float(cb.value(QStringLiteral("midYellowBlue")).toDouble(0.0) / 100.0)
+        };
+        const float highlights[3] = {
+            float(cb.value(QStringLiteral("highlightCyanRed")).toDouble(0.0) / 100.0),
+            float(cb.value(QStringLiteral("highlightMagentaGreen")).toDouble(0.0) / 100.0),
+            float(cb.value(QStringLiteral("highlightYellowBlue")).toDouble(0.0) / 100.0)
+        };
+        const bool preserveLuminosity = cb.value(QStringLiteral("preserveLuminosity")).toBool(true);
+        return colorBalance(image, shadows, midtones, highlights, preserveLuminosity);
+    }
+    throw std::runtime_error("Unsupported adjustment kind: " + kind.toStdString());
+}
+
+QImage RasterOperations::blackWhite(const QImage &image, const float *weights, bool tint, double tintHue, double tintSaturation)
+{
+    QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    adjust_black_white(result.bits(), size_t(result.width()), size_t(result.height()),
+                       size_t(result.bytesPerLine()), weights, tint ? 1 : 0, tintHue, tintSaturation);
+    return result;
+}
+
+QImage RasterOperations::colorBalance(const QImage &image, const float *shadows, const float *midtones, const float *highlights, bool preserveLuminosity)
+{
+    QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    adjust_color_balance(result.bits(), size_t(result.width()), size_t(result.height()),
+                         size_t(result.bytesPerLine()), shadows, midtones, highlights, preserveLuminosity ? 1 : 0);
+    return result;
+}
+
+QImage RasterOperations::vignette(const QImage &image, double amount, const QColor &color,
+                                  double midpoint, double roundness, double feather,
+                                  double highlights, const std::optional<QRectF> &canvasFrame)
+{
+    if (image.isNull()) return image;
+    QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    if (!std::isfinite(amount) || amount <= 0) return result;
+
+    const double frameX = canvasFrame ? canvasFrame->x() : 0.0;
+    const double frameY = canvasFrame ? canvasFrame->y() : 0.0;
+    const double frameW = canvasFrame ? canvasFrame->width() : double(result.width());
+    const double frameH = canvasFrame ? canvasFrame->height() : double(result.height());
+    const int fillsClear = canvasFrame.has_value() ? 1 : 0;
+
+    adjust_colored_vignette(result.bits(), size_t(result.width()), size_t(result.height()),
+                            size_t(result.bytesPerLine()),
+                            frameX, frameY, frameW, frameH, fillsClear,
+                            std::clamp(amount, 0.0, 100.0),
+                            std::clamp(midpoint, 0.0, 100.0),
+                            std::clamp(roundness, -100.0, 100.0),
+                            std::clamp(feather, 0.0, 100.0),
+                            std::clamp(highlights, 0.0, 100.0),
+                            std::clamp(double(color.redF()), 0.0, 1.0),
+                            std::clamp(double(color.greenF()), 0.0, 1.0),
+                            std::clamp(double(color.blueF()), 0.0, 1.0));
+    return result;
+}
+
+QImage RasterOperations::bloomGlow(const QImage &image, double amount, double radius)
+{
+    if (image.isNull()) return image;
+    const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    if (!std::isfinite(amount) || amount <= 0 || !std::isfinite(radius) || radius <= 0) return source;
+
+    const double rad = std::clamp(radius, 1.0, 150.0);
+    const QImage blurred = gaussianBlur(source, rad);
+    const double k = std::clamp(amount, 0.0, 100.0) / 50.0;
+
+    QImage result(source.size(), source.format());
+    for (int y = 0; y < source.height(); ++y) {
+        const uchar *srcLine = source.constScanLine(y);
+        const uchar *blurLine = blurred.constScanLine(y);
+        uchar *dstLine = result.scanLine(y);
+        for (int x = 0; x < source.width(); ++x) {
+            const int idx = x * 4;
+            const double sR = srcLine[idx];
+            const double sG = srcLine[idx + 1];
+            const double sB = srcLine[idx + 2];
+            const double sA = srcLine[idx + 3];
+
+            const double bR = std::min(255.0, blurLine[idx] * k);
+            const double bG = std::min(255.0, blurLine[idx + 1] * k);
+            const double bB = std::min(255.0, blurLine[idx + 2] * k);
+            const double bA = std::min(255.0, blurLine[idx + 3] * k);
+
+            // Screen blend: C_out = C_0 + C_bloom - (C_0 * C_bloom) / 255
+            const double outA = std::clamp(sA + bA - (sA * bA) / 255.0, 0.0, 255.0);
+            const double outR = std::clamp(sR + bR - (sR * bR) / 255.0, 0.0, outA);
+            const double outG = std::clamp(sG + bG - (sG * bG) / 255.0, 0.0, outA);
+            const double outB = std::clamp(sB + bB - (sB * bB) / 255.0, 0.0, outA);
+
+            dstLine[idx] = static_cast<uchar>(std::round(outR));
+            dstLine[idx + 1] = static_cast<uchar>(std::round(outG));
+            dstLine[idx + 2] = static_cast<uchar>(std::round(outB));
+            dstLine[idx + 3] = static_cast<uchar>(std::round(outA));
+        }
+    }
+    return result;
+}
+
+QImage RasterOperations::tonalContrast(const QImage &image, double amount, double radius,
+                                       double shadows, double midtones, double highlights)
+{
+    if (image.isNull()) return image;
+    QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    if (!std::isfinite(amount) || amount <= 0 || (shadows == 0 && midtones == 0 && highlights == 0)) return result;
+
+    const double rad = std::clamp(radius, 1.0, 100.0);
+    const QImage blurred = gaussianBlur(result, rad);
+
+    adjust_tonal_contrast(result.bits(), blurred.constBits(),
+                          size_t(result.width()), size_t(result.height()),
+                          size_t(result.bytesPerLine()), size_t(blurred.bytesPerLine()),
+                          std::clamp(amount, 0.0, 100.0),
+                          std::clamp(shadows, -100.0, 100.0),
+                          std::clamp(midtones, -100.0, 100.0),
+                          std::clamp(highlights, -100.0, 100.0));
+    return result;
 }
 
 QImage RasterOperations::gradientMap(const QImage &image, const QColor &shadows, const QColor &highlights, bool reversed)
@@ -443,6 +605,49 @@ QImage RasterOperations::gaussianBlur(const QImage &image, double radius)
     return result;
 }
 
+QImage RasterOperations::featherMask(const QImage &image, double amount)
+{
+    if (image.isNull() || !std::isfinite(amount) || amount <= 0) return image;
+    const double radius = std::clamp(amount / 2.0, 0.1, 125.0);
+    const QImage source = image.convertToFormat(QImage::Format_Grayscale8);
+    constexpr int passes = 3;
+    const double ideal = std::sqrt(12 * radius * radius / passes + 1);
+    int lower = int(std::floor(ideal)); if (!(lower & 1)) --lower;
+    const int upper = lower + 2;
+    const int lowerCount = qRound((12 * radius * radius - passes * lower * lower - 4 * passes * lower - 3 * passes) / (-4.0 * lower - 4));
+    const auto boxPass = [](const QImage &input, int boxRadius, bool horizontal) {
+        if (boxRadius <= 0) return input;
+        QImage output(input.size(), QImage::Format_Grayscale8);
+        const int divisor = boxRadius * 2 + 1;
+        const int lines = horizontal ? input.height() : input.width();
+        const int length = horizontal ? input.width() : input.height();
+        for (int line = 0; line < lines; ++line) {
+            int sum = 0;
+            const auto pixel = [&](int position) {
+                const int p = std::clamp(position, 0, length - 1);
+                return int(horizontal ? input.constScanLine(line)[p] : input.constScanLine(p)[line]);
+            };
+            for (int position = -boxRadius; position <= boxRadius; ++position)
+                sum += pixel(position);
+            for (int position = 0; position < length; ++position) {
+                uchar *out = horizontal ? output.scanLine(line) + position : output.scanLine(position) + line;
+                *out = uchar((sum + divisor / 2) / divisor);
+                const int leaving = pixel(position - boxRadius);
+                const int entering = pixel(position + boxRadius + 1);
+                sum += entering - leaving;
+            }
+        }
+        return output;
+    };
+    QImage result = source;
+    for (int pass = 0; pass < passes; ++pass) {
+        const int width = pass < lowerCount ? lower : upper;
+        const int boxRadius = std::max(0, (width - 1) / 2);
+        result = boxPass(boxPass(result, boxRadius, true), boxRadius, false);
+    }
+    return result;
+}
+
 QImage RasterOperations::motionBlur(const QImage &image, double angleDegrees, double distance)
 {
     const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
@@ -486,6 +691,226 @@ std::optional<QImage> RasterOperations::spotHeal(const QImage &image, const QIma
     const int status = spot_heal(result.bits(), packed.data(), size_t(result.width()), size_t(result.height()),
                                  size_t(result.bytesPerLine()), float(opacity), mode, seed);
     return status == 0 ? std::optional<QImage>(result) : std::nullopt;
+}
+
+QJsonObject RasterOperations::levelsSettingsToJson(const LevelsSettings &settings)
+{
+    QJsonArray ranges;
+    for (const LevelRange &range : settings.ranges) {
+        ranges.append(QJsonObject{
+            {QStringLiteral("black"), range.black},
+            {QStringLiteral("gamma"), range.gamma},
+            {QStringLiteral("white"), range.white},
+            {QStringLiteral("outputBlack"), range.outputBlack},
+            {QStringLiteral("outputWhite"), range.outputWhite}
+        });
+    }
+    return {
+        {QStringLiteral("kind"), QStringLiteral("Levels")},
+        {QStringLiteral("levels"), QJsonObject{
+            {QStringLiteral("channel"), QStringLiteral("RGB")},
+            {QStringLiteral("ranges"), ranges}
+        }}
+    };
+}
+
+QJsonObject RasterOperations::curvesSettingsToJson(const CurvesSettings &settings)
+{
+    QJsonArray channels;
+    for (const auto &curve : settings.channels) {
+        QJsonArray points;
+        for (const CurvePoint &point : curve) {
+            points.append(QJsonObject{{QStringLiteral("x"), point.x}, {QStringLiteral("y"), point.y}});
+        }
+        channels.append(points);
+    }
+    return {
+        {QStringLiteral("kind"), QStringLiteral("Curves")},
+        {QStringLiteral("curves"), QJsonObject{
+            {QStringLiteral("channel"), QStringLiteral("RGB")},
+            {QStringLiteral("channels"), channels}
+        }}
+    };
+}
+
+QJsonObject RasterOperations::hueSaturationSettingsToJson(const HueSaturationSettings &settings)
+{
+    static const QStringList names{
+        QStringLiteral("Master"), QStringLiteral("Reds"), QStringLiteral("Yellows"),
+        QStringLiteral("Greens"), QStringLiteral("Cyans"), QStringLiteral("Blues"),
+        QStringLiteral("Magentas")
+    };
+    QJsonArray adjustments, bands;
+    for (int i = 0; i < names.size(); ++i) {
+        const RangeAdjustment &a = settings.adjustments[size_t(i)];
+        adjustments.append(names[i]);
+        adjustments.append(QJsonObject{
+            {QStringLiteral("hue"), a.hue},
+            {QStringLiteral("saturation"), a.saturation},
+            {QStringLiteral("lightness"), a.lightness}
+        });
+        const HueBand &b = settings.bands[size_t(i)];
+        bands.append(names[i]);
+        bands.append(QJsonObject{
+            {QStringLiteral("falloffStart"), b.falloffStart},
+            {QStringLiteral("rangeStart"), b.rangeStart},
+            {QStringLiteral("rangeEnd"), b.rangeEnd},
+            {QStringLiteral("falloffEnd"), b.falloffEnd}
+        });
+    }
+    const int rangeIdx = std::clamp(static_cast<int>(settings.range), 0, static_cast<int>(names.size()) - 1);
+    const QJsonObject hsv{
+        {QStringLiteral("range"), names.at(rangeIdx)},
+        {QStringLiteral("colorize"), settings.colorize},
+        {QStringLiteral("invertRange"), settings.invertRange},
+        {QStringLiteral("adjustments"), adjustments},
+        {QStringLiteral("bands"), bands}
+    };
+    const RangeAdjustment &master = settings.adjustments[size_t(ColorRange::Master)];
+    return QJsonObject{
+        {QStringLiteral("kind"), QStringLiteral("Hue/Saturation")},
+        {QStringLiteral("hue"), master.hue},
+        {QStringLiteral("saturation"), master.saturation},
+        {QStringLiteral("lightness"), master.lightness},
+        {QStringLiteral("colorize"), settings.colorize},
+        {QStringLiteral("hsvSettings"), hsv}
+    };
+}
+
+QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings &settingsIn,
+                                   CameraRawClipping clipping, double scale, quint32 seed,
+                                   int visualizePointColor, bool sharpenMask)
+{
+    if (image.isNull() || image.width() <= 0 || image.height() <= 0) return image;
+    const CameraRawSettings settings = settingsIn.normalized();
+    if (settings.isIdentity() && clipping == CameraRawClipping::None && visualizePointColor < 0 && !sharpenMask) {
+        return image;
+    }
+    if (!settings.isValid()) return image;
+
+    const auto [redGain, greenGain, blueGain] = settings.gains();
+    const int mode = static_cast<int>(clipping);
+    const double pixelScale = (scale > 0.0) ? scale : 1.0;
+
+    const bool paintColor = (clipping == CameraRawClipping::None && !sharpenMask) &&
+        (settings.adjustsCurve() || settings.adjustsMixer() || settings.adjustsGrading() || visualizePointColor >= 0);
+    const bool paintEffects = (clipping == CameraRawClipping::None && !sharpenMask && settings.adjustsEffects());
+    const bool paintDetailOptics = (clipping == CameraRawClipping::None) &&
+        (settings.adjustsDetail() || settings.adjustsOptics() || sharpenMask);
+
+    QImage source = image;
+    if (clipping == CameraRawClipping::None && !sharpenMask && visualizePointColor < 0 && settings.adjustsGeometry()) {
+        source = settings.geometry.apply(source);
+    }
+
+    QImage result = source.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    uint8_t *pixels = result.bits();
+    const int width = result.width();
+    const int height = result.height();
+    const int stride = result.bytesPerLine();
+
+    // 1. Calibration
+    if (clipping == CameraRawClipping::None && !sharpenMask && settings.adjustsCalibration()) {
+        adjust_camera_raw_calibration(pixels, width, height, stride,
+                                      settings.calibration.shadowTint,
+                                      settings.calibration.redHue, settings.calibration.redSaturation,
+                                      settings.calibration.greenHue, settings.calibration.greenSaturation,
+                                      settings.calibration.blueHue, settings.calibration.blueSaturation,
+                                      static_cast<int>(settings.calibration.process));
+    }
+
+    // 2. Light & Color
+    if (settings.adjustsLight() || settings.adjustsColor() || clipping != CameraRawClipping::None) {
+        adjust_camera_raw(pixels, width, height, stride,
+                          redGain, greenGain, blueGain,
+                          settings.exposure, settings.contrast,
+                          settings.highlights, settings.shadows,
+                          settings.whites, settings.blacks,
+                          settings.vibrance, settings.saturation, mode);
+    }
+
+    // 3. Curve, Mixer, Grading
+    if (paintColor) {
+        const auto luma = settings.curve.lumaTable();
+        const auto redTable = settings.curve.channelTable(settings.curve.red);
+        const auto greenTable = settings.curve.channelTable(settings.curve.green);
+        const auto blueTable = settings.curve.channelTable(settings.curve.blue);
+        const auto mixer = settings.mixer.mixerFloats();
+        const auto points = settings.mixer.pointFloats();
+        const auto grade = settings.grading.gradeFloats();
+
+        adjust_camera_raw_curve_color(pixels, width, height, stride,
+                                      luma.data(), redTable.data(), greenTable.data(), blueTable.data(),
+                                      settings.curve.refineSaturation / 100.0, mixer.data(),
+                                      static_cast<int>(settings.mixer.points.size()), points.constData(),
+                                      grade.data(), settings.grading.blending / 100.0, settings.grading.balance / 100.0,
+                                      visualizePointColor);
+    }
+
+    // 4. Effects
+    if (paintEffects) {
+        if (settings.texture != 0.0 || settings.clarity != 0.0 || settings.dehaze != 0.0 ||
+            settings.glow != 0.0 || settings.vignetteAmount != 0.0) {
+            adjust_camera_raw_effects(pixels, width, height, stride,
+                                      settings.texture, settings.clarity, settings.dehaze,
+                                      settings.glow, static_cast<int>(settings.glowStyle),
+                                      settings.glowRange, settings.glowSpread, settings.glowWarmth,
+                                      settings.vignetteAmount, settings.vignetteMidpoint,
+                                      settings.vignetteRoundness, settings.vignetteFeather,
+                                      settings.vignetteHighlights, static_cast<int>(settings.vignetteStyle),
+                                      pixelScale);
+        }
+        if (settings.grainAmount > 0.0) {
+            adjust_grain(pixels, width, height, stride,
+                         settings.grainAmount, settings.grainKernelSize(),
+                         settings.grainRoughness, seed, 0, 0, 1.0 / pixelScale);
+        }
+    }
+
+    // 5. Detail & Optics
+    if (paintDetailOptics) {
+        if (sharpenMask) {
+            adjust_camera_raw_sharpen_mask_overlay(pixels, width, height, stride,
+                                                   settings.detail.sharpenRadius,
+                                                   settings.detail.sharpenDetail,
+                                                   settings.detail.sharpenMasking,
+                                                   pixelScale);
+        } else {
+            if (settings.adjustsOptics()) {
+                adjust_camera_raw_optics(pixels, width, height, stride,
+                                         settings.optics.removeChromaticAberration ? 1 : 0,
+                                         settings.optics.enableLensProfile ? 1 : 0,
+                                         settings.optics.profileDistortion,
+                                         settings.optics.profileVignetting,
+                                         settings.optics.distortionK(0.35),
+                                         settings.optics.purpleAmount,
+                                         settings.optics.purpleHueLow,
+                                         settings.optics.purpleHueHigh,
+                                         settings.optics.greenAmount,
+                                         settings.optics.greenHueLow,
+                                         settings.optics.greenHueHigh,
+                                         settings.optics.vignetteAmount,
+                                         settings.optics.vignetteMidpoint,
+                                         pixelScale);
+            }
+            if (settings.adjustsDetail()) {
+                adjust_camera_raw_detail(pixels, width, height, stride,
+                                         settings.detail.sharpenAmount,
+                                         settings.detail.sharpenRadius,
+                                         settings.detail.sharpenDetail,
+                                         settings.detail.sharpenMasking,
+                                         settings.detail.noiseLuminance,
+                                         settings.detail.noiseLuminanceDetail,
+                                         settings.detail.noiseLuminanceContrast,
+                                         settings.detail.noiseColor,
+                                         settings.detail.noiseColorDetail,
+                                         settings.detail.noiseColorSmoothness,
+                                         pixelScale);
+            }
+        }
+    }
+
+    return result.convertToFormat(image.format());
 }
 
 } // namespace compositor

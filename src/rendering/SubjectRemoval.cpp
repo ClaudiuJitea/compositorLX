@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <queue>
 #include <thread>
 #include <vector>
 
@@ -30,6 +31,14 @@ QString modelPath()
     if (QFileInfo::exists(installed)) return installed;
     const QString buildTree = executable.absoluteFilePath(QStringLiteral("models/u2netp.onnx"));
     if (QFileInfo::exists(buildTree)) return buildTree;
+    const QString testBuildTree = executable.absoluteFilePath(QStringLiteral("../models/u2netp.onnx"));
+    if (QFileInfo::exists(testBuildTree)) return testBuildTree;
+    const QString currentDir = QDir::current().absoluteFilePath(QStringLiteral("models/u2netp.onnx"));
+    if (QFileInfo::exists(currentDir)) return currentDir;
+    const QString buildDir = QDir::current().absoluteFilePath(QStringLiteral("build/models/u2netp.onnx"));
+    if (QFileInfo::exists(buildDir)) return buildDir;
+    const QString parentBuildDir = QDir::current().absoluteFilePath(QStringLiteral("../build/models/u2netp.onnx"));
+    if (QFileInfo::exists(parentBuildDir)) return parentBuildDir;
     return installed;
 }
 
@@ -103,11 +112,57 @@ QImage levelsImage(const std::vector<float> &levels, const QSize &size)
     return result;
 }
 
+static std::mutex s_providerMutex;
+static SubjectRemoval::SegmentationProvider s_customProvider;
+
 } // namespace
 
-QImage SubjectRemoval::rawMask(const QImage &source, QString *error)
+void SubjectRemoval::setSegmentationProvider(SegmentationProvider provider)
 {
+    std::lock_guard<std::mutex> lock(s_providerMutex);
+    s_customProvider = std::move(provider);
+}
+
+void SubjectRemoval::resetSegmentationProvider()
+{
+    std::lock_guard<std::mutex> lock(s_providerMutex);
+    s_customProvider = nullptr;
+}
+
+bool SubjectRemoval::isModelAvailable()
+{
+    return QFileInfo::exists(modelPath());
+}
+
+QString SubjectRemoval::modelFilePath()
+{
+    return modelPath();
+}
+
+QImage SubjectRemoval::rawMask(const QImage &source, QString *error, std::atomic<bool> *cancelled)
+{
+    if (cancelled && cancelled->load()) return {};
+    {
+        std::lock_guard<std::mutex> lock(s_providerMutex);
+        if (s_customProvider) return s_customProvider(source, error, cancelled);
+    }
     if (source.isNull()) { if (error) *error = QObject::tr("The selected layer has no pixels."); return {}; }
+
+    const QImage converted = source.convertToFormat(QImage::Format_RGBA8888);
+    bool hasOpaque = false;
+    for (int y = 0; y < converted.height(); ++y) {
+        const uchar *row = converted.constScanLine(y);
+        for (int x = 0; x < converted.width(); ++x) {
+            if (row[x * 4 + 3] > 0) { hasOpaque = true; break; }
+        }
+        if (hasOpaque) break;
+    }
+    if (!hasOpaque) {
+        if (error) *error = QObject::tr("The selected layer has no pixels.");
+        return {};
+    }
+
+    if (cancelled && cancelled->load()) return {};
     Runtime &engine = runtime();
     if (!engine.session) { if (error) *error = QString::fromStdString(engine.error); return {}; }
     try {
@@ -129,7 +184,13 @@ QImage SubjectRemoval::rawMask(const QImage &source, QString *error)
         const auto inputName = engine.session->GetInputNameAllocated(0, allocator);
         const auto outputName = engine.session->GetOutputNameAllocated(0, allocator);
         const char *inputs[] = {inputName.get()}, *outputs[] = {outputName.get()};
+        // Cancellation checkpoint: before native inference
+        if (cancelled && cancelled->load()) return {};
+        // Note: ONNX Runtime Session::Run executes synchronously as an atomic compute kernel on CPU.
+        // In-flight cancellation currently takes effect immediately after Run() completes or at stage boundaries.
         auto values = engine.session->Run(Ort::RunOptions{nullptr}, inputs, &tensor, 1, outputs, 1);
+        // Cancellation checkpoint: immediately after native inference (takes effect here if cancelled during Run)
+        if (cancelled && cancelled->load()) return {};
         const float *prediction = values.front().GetTensorData<float>();
         const size_t count = size_t(side * side);
         const auto bounds = std::minmax_element(prediction, prediction + count);
@@ -137,11 +198,135 @@ QImage SubjectRemoval::rawMask(const QImage &source, QString *error)
         if (!std::isfinite(range) || range < 1e-6f) { if (error) *error = QObject::tr("No foreground subject was detected in this layer."); return {}; }
         std::vector<float> normalized(count);
         for (size_t i = 0; i < count; ++i) normalized[i] = std::clamp((prediction[i] - *bounds.first) / range, 0.0f, 1.0f);
+        if (cancelled && cancelled->load()) return {};
         return levelsImage(normalized, QSize(side, side)).scaled(source.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     } catch (const Ort::Exception &exception) {
         if (error) *error = QString::fromUtf8(exception.what());
         return {};
     }
+}
+
+QImage SubjectRemoval::connectedInstance(const QImage &mask, const QPoint &clickPoint, std::atomic<bool> *cancelled)
+{
+    if (mask.isNull() || !QRect(QPoint(), mask.size()).contains(clickPoint)) return {};
+    const QImage gray = mask.convertToFormat(QImage::Format_Grayscale8);
+    const int clickX = clickPoint.x(), clickY = clickPoint.y();
+    if (gray.constScanLine(clickY)[clickX] < 128) return {};
+
+    const int width = gray.width(), height = gray.height();
+    QImage instance(width, height, QImage::Format_Grayscale8);
+    instance.fill(0);
+
+    std::vector<bool> visited(size_t(width) * height, false);
+    std::queue<QPoint> queue;
+
+    visited[size_t(clickY) * width + clickX] = true;
+    instance.scanLine(clickY)[clickX] = 255;
+    queue.push(clickPoint);
+
+    constexpr int dx[8] = {-1, 1, 0, 0, -1, 1, -1, 1};
+    constexpr int dy[8] = {0, 0, -1, 1, -1, -1, 1, 1};
+
+    while (!queue.empty()) {
+        if (cancelled && cancelled->load()) return {};
+        const QPoint current = queue.front();
+        queue.pop();
+
+        for (int i = 0; i < 8; ++i) {
+            const int nx = current.x() + dx[i];
+            const int ny = current.y() + dy[i];
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                const size_t idx = size_t(ny) * width + nx;
+                if (!visited[idx]) {
+                    visited[idx] = true;
+                    if (gray.constScanLine(ny)[nx] >= 128) {
+                        instance.scanLine(ny)[nx] = 255;
+                        queue.push(QPoint(nx, ny));
+                    }
+                }
+            }
+        }
+    }
+    return instance;
+}
+
+QImage SubjectRemoval::adjustEdgeOffset(const QImage &mask, int edgeOffset)
+{
+    const int steps = std::min(10, std::abs(edgeOffset));
+    if (steps == 0 || mask.isNull()) return mask;
+    QImage current = mask.convertToFormat(QImage::Format_Grayscale8);
+    const int width = current.width(), height = current.height();
+
+    for (int step = 0; step < steps; ++step) {
+        QImage next = current;
+        if (edgeOffset > 0) {
+            for (int y = 0; y < height; ++y) {
+                const uchar *prev = y > 0 ? current.constScanLine(y - 1) : nullptr;
+                const uchar *cur = current.constScanLine(y);
+                const uchar *nextRow = y < height - 1 ? current.constScanLine(y + 1) : nullptr;
+                uchar *out = next.scanLine(y);
+                for (int x = 0; x < width; ++x) {
+                    if (cur[x] != 0) {
+                        if ((x > 0 && cur[x - 1] == 0) ||
+                            (x < width - 1 && cur[x + 1] == 0) ||
+                            (prev && prev[x] == 0) ||
+                            (nextRow && nextRow[x] == 0)) {
+                            out[x] = 0;
+                        }
+                    }
+                }
+            }
+        } else {
+            for (int y = 0; y < height; ++y) {
+                const uchar *prev = y > 0 ? current.constScanLine(y - 1) : nullptr;
+                const uchar *cur = current.constScanLine(y);
+                const uchar *nextRow = y < height - 1 ? current.constScanLine(y + 1) : nullptr;
+                uchar *out = next.scanLine(y);
+                for (int x = 0; x < width; ++x) {
+                    if (cur[x] == 0) {
+                        if ((x > 0 && cur[x - 1] != 0) ||
+                            (x < width - 1 && cur[x + 1] != 0) ||
+                            (prev && prev[x] != 0) ||
+                            (nextRow && nextRow[x] != 0)) {
+                            out[x] = 255;
+                        }
+                    }
+                }
+            }
+        }
+        current = next;
+    }
+    return current;
+}
+
+QImage SubjectRemoval::smoothBinaryMask(const QImage &mask)
+{
+    if (mask.isNull()) return {};
+    const QImage gray = mask.convertToFormat(QImage::Format_Grayscale8);
+    const int width = gray.width(), height = gray.height();
+    QImage softened(width, height, QImage::Format_Grayscale8);
+    softened.fill(0);
+
+    for (int y = 0; y < height; ++y) {
+        uchar *out = softened.scanLine(y);
+        for (int x = 0; x < width; ++x) {
+            if (gray.constScanLine(y)[x] == 0) continue;
+            int sum = 0;
+            for (int dy = -1; dy <= 1; ++dy) {
+                const int sy = y + dy;
+                if (sy < 0 || sy >= height) continue;
+                const uchar *row = gray.constScanLine(sy);
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int sx = x + dx;
+                    if (sx < 0 || sx >= width) continue;
+                    const int weight = (dx == 0 ? 2 : 1) * (dy == 0 ? 2 : 1);
+                    sum += row[sx] * weight;
+                }
+            }
+            out[x] = uchar((sum + 8) / 16);
+        }
+    }
+    return softened;
 }
 
 QImage SubjectRemoval::refined(const QImage &inputMask, const QImage &guide, const SubjectRemovalSettings &settings)

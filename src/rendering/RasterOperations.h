@@ -9,6 +9,9 @@
 
 namespace compositor {
 
+struct CameraRawSettings;
+enum class CameraRawClipping;
+
 struct LevelRange {
     double black = 0, gamma = 1, white = 255, outputBlack = 0, outputWhite = 255;
     bool operator==(const LevelRange &) const = default;
@@ -87,10 +90,26 @@ public:
     static QImage grain(const QImage &image, double amount, double size, double roughness, quint32 seed,
                         const QPointF &origin = {}, double unitsPerPixel = 1);
     static QImage gaussianBlur(const QImage &image, double radius);
+    static QImage featherMask(const QImage &mask, double amount);
     static QImage motionBlur(const QImage &image, double angleDegrees, double distance);
+    static QImage blackWhite(const QImage &image, const float *weights, bool tint, double tintHue, double tintSaturation);
+    static QImage colorBalance(const QImage &image, const float *shadows, const float *midtones, const float *highlights, bool preserveLuminosity);
+    static QImage vignette(const QImage &image, double amount, const QColor &color,
+                           double midpoint = 50.0, double roundness = 100.0, double feather = 60.0,
+                           double highlights = 25.0, const std::optional<QRectF> &canvasFrame = std::nullopt);
+    static QImage bloomGlow(const QImage &image, double amount, double radius);
+    static QImage tonalContrast(const QImage &image, double amount, double radius,
+                                double shadows = 40.0, double midtones = 60.0, double highlights = 30.0);
     static std::optional<QImage> contentAwareFill(const QImage &image, const QImage &coverage);
     static std::optional<QImage> spotHeal(const QImage &image, const QImage &coverage,
                                           double opacity, int mode, quint32 seed);
+    static QImage cameraRaw(const QImage &image, const CameraRawSettings &settings,
+                            CameraRawClipping clipping = static_cast<CameraRawClipping>(0),
+                            double scale = 1.0, quint32 seed = 0,
+                            int visualizePointColor = -1, bool sharpenMask = false);
+    static QJsonObject levelsSettingsToJson(const LevelsSettings &settings);
+    static QJsonObject curvesSettingsToJson(const CurvesSettings &settings);
+    static QJsonObject hueSaturationSettingsToJson(const HueSaturationSettings &settings);
 };
 
 } // namespace compositor

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CompositorLX VERSION 0.2.0 LANGUAGES C CXX)
+project(CompositorLX VERSION 0.3.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(FetchContent)
@@ -12,6 +12,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Network)
+find_package(ZLIB REQUIRED)
 find_package(PkgConfig QUIET)
 find_package(libheif CONFIG QUIET)
 if(PkgConfig_FOUND)
@@ -23,6 +24,11 @@ if(NOT LIBHEIF_FOUND)
 endif()
 if(NOT TARGET heif AND NOT LIBHEIF_FOUND AND NOT (LIBHEIF_INCLUDE_DIR AND LIBHEIF_LIBRARY))
     message(WARNING "libheif development files were not found; HEIC/HEIF import will rely on an installed Qt image plugin")
+endif()
+
+find_library(LIBRAW_LIBRARY NAMES raw raw_r libraw.so.23 libraw_r.so.23 PATHS /usr/lib/x86_64-linux-gnu /usr/lib)
+if(NOT LIBRAW_LIBRARY)
+    message(WARNING "libraw was not found; RAW image import will be disabled")
 endif()
 
 # Foreground segmentation is local and deterministic.  Pin both the runtime
@@ -63,22 +69,38 @@ if(NOT EXISTS "${SUBJECT_MODEL_LICENSE}")
 endif()
 
 add_library(compositor_core
+    src/core/CameraRaw.cpp
+    src/core/CameraRaw.h
     src/core/Document.cpp
     src/core/Document.h
     src/core/DocumentHistory.cpp
     src/core/DocumentHistory.h
     src/core/EditorSession.cpp
     src/core/EditorSession.h
+    src/core/ImageTrim.cpp
+    src/core/ImageTrim.h
     src/io/ProjectReader.cpp
     src/io/ProjectReader.h
     src/io/ProjectWriter.cpp
     src/io/ProjectWriter.h
+    src/io/ProjectDigest.cpp
+    src/io/ProjectDigest.h
+    src/io/ProjectWatcher.cpp
+    src/io/ProjectWatcher.h
     src/io/ImageExporter.cpp
     src/io/ImageExporter.h
     src/io/ImageImporter.cpp
     src/io/ImageImporter.h
+    src/io/PSDReader.cpp
+    src/io/PSDReader.h
+    src/io/RawImporter.cpp
+    src/io/RawImporter.h
+    src/io/SvgImporter.cpp
+    src/io/SvgImporter.h
     src/rendering/LayerRenderer.cpp
     src/rendering/LayerRenderer.h
+    src/rendering/LayerEffectsRenderer.cpp
+    src/rendering/LayerEffectsRenderer.h
     src/rendering/DownsampleCache.cpp
     src/rendering/DownsampleCache.h
     src/rendering/RasterOperations.cpp
@@ -95,7 +117,7 @@ add_library(compositor_core
     vendor/compositor-rendering/WandPixels.c
 )
 target_include_directories(compositor_core PUBLIC src vendor/compositor-rendering)
-target_link_libraries(compositor_core PUBLIC Qt6::Core Qt6::Gui)
+target_link_libraries(compositor_core PUBLIC Qt6::Core Qt6::Gui Qt6::Concurrent ZLIB::ZLIB)
 if(TARGET heif OR LIBHEIF_FOUND OR (LIBHEIF_INCLUDE_DIR AND LIBHEIF_LIBRARY))
     if(TARGET heif)
         target_link_libraries(compositor_core PRIVATE heif)
@@ -116,21 +138,52 @@ elseif(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
 else()
     message(FATAL_ERROR "ONNX Runtime is required for Remove Background")
 endif()
+if(LIBRAW_LIBRARY)
+    target_include_directories(compositor_core PUBLIC vendor/libraw/include)
+    target_link_libraries(compositor_core PRIVATE "${LIBRAW_LIBRARY}")
+    target_compile_definitions(compositor_core PUBLIC COMPOSITOR_HAVE_LIBRAW=1)
+endif()
 target_compile_options(compositor_core PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(compositor-lx
-    src/main.cpp
+add_library(compositor_ui STATIC
     src/resources.qrc
+    src/ui/CameraRawDialog.cpp
+    src/ui/CameraRawDialog.h
+    src/ui/CanvasRulerWidget.cpp
+    src/ui/CanvasRulerWidget.h
     src/ui/CanvasWidget.cpp
     src/ui/CanvasWidget.h
+    src/ui/EffectsDialog.cpp
+    src/ui/EffectsDialog.h
+    src/ui/InlineTextEditor.h
+    src/ui/KeyboardShortcutsDialog.cpp
+    src/ui/KeyboardShortcutsDialog.h
     src/ui/LayerListModel.cpp
     src/ui/LayerListModel.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+    src/ui/NumericScrub.cpp
+    src/ui/NumericScrub.h
+    src/ui/RawDevelopDialog.cpp
+    src/ui/RawDevelopDialog.h
     src/ui/SegmentedControl.h
+    src/ui/ShortcutManager.cpp
+    src/ui/ShortcutManager.h
+    src/ui/TrimDialog.cpp
+    src/ui/TrimDialog.h
 )
-target_link_libraries(compositor-lx PRIVATE compositor_core Qt6::Widgets Qt6::Concurrent Qt6::Network)
+target_include_directories(compositor_ui PUBLIC src vendor/compositor-rendering)
+target_link_libraries(compositor_ui PUBLIC compositor_core Qt6::Widgets Qt6::Concurrent Qt6::Network)
+target_compile_options(compositor_ui PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(compositor-lx
+    src/main.cpp
+)
+target_link_libraries(compositor-lx PRIVATE compositor_ui)
 target_compile_options(compositor-lx PRIVATE -Wall -Wextra -Wpedantic)
+
+enable_testing()
+add_subdirectory(tests)
 
 install(TARGETS compositor-lx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(ONNXRUNTIME_ROOT)

@@ -1,0 +1,53 @@
+{
+  "activeLayerID": "55555555-5555-5555-5555-555555555552",
+  "colorSpace": "sRGB",
+  "documentID": "00000005-0000-0000-0000-000000000005",
+  "format": "com.compositor.project",
+  "height": 64,
+  "layers": [
+    {
+      "id": "55555555-5555-5555-5555-555555555551",
+      "imageFile": "55555555-5555-5555-5555-555555555551.png",
+      "isVisible": true,
+      "name": "Base",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    },
+    {
+      "id": "55555555-5555-5555-5555-555555555552",
+      "imageFile": "55555555-5555-5555-5555-555555555552.png",
+      "isVisible": true,
+      "maskSourceID": "55555555-5555-5555-5555-555555555551",
+      "name": "Clipped",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 5,
+  "width": 64
+}

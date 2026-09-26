@@ -56,6 +56,8 @@ inline QString editorStyleSheet()
         QWidget#transformBar { background: #242425; border-bottom: 1px solid #414145; }
         QWidget#transformBar QPushButton, QWidget#transformBar QToolButton, QWidget#transformBar QComboBox, QWidget#transformBar QDoubleSpinBox, QWidget#transformBar QSpinBox { min-height: 26px; max-height: 26px; height: 26px; }
         QWidget#transformBar QLabel#sectionTitle { color: #ffffff; padding-right: 8px; }
+        QWidget#transformBar QLabel[scrubbable="true"] { color: #a0a0a5; font-size: 11px; padding: 0 2px; }
+        QWidget#transformBar QLabel[scrubbable="true"]:hover { color: #ffffff; }
         QWidget#transformBar QAbstractSpinBox:focus, QWidget#transformBar QComboBox:focus { border: 1px solid #67aaff; }
         QWidget#transformBar QToolButton:checked { background: #31577c; border-color: #67aaff; }
         QWidget#segmentedControl,
@@ -198,12 +200,12 @@ inline QString editorStyleSheet()
         QPushButton#textDone:enabled { background: #236fcb; border-color: #2d7ddd; }
         QFontComboBox#textFont { padding-right: 28px; }
         QDoubleSpinBox, QSpinBox { padding: 0 7px; background: #303032; selection-background-color: #286fc5; }
-        QAbstractSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; border: 0; border-left: 1px solid #44474d; border-top-right-radius: 5px; background: #35373c; }
-        QAbstractSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; border: 0; border-left: 1px solid #44474d; border-bottom-right-radius: 5px; background: #35373c; }
-        QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover { background: #48566a; }
-        QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed { background: #2a486a; }
-        QAbstractSpinBox::up-arrow { image: url(:/icons/chevron-up.svg); width: 12px; height: 12px; }
-        QAbstractSpinBox::down-arrow { image: url(:/icons/chevron-down.svg); width: 12px; height: 12px; }
+        QAbstractSpinBox::up-button, QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; border: 0; border-left: 1px solid #44474d; border-top-right-radius: 5px; background: #35373c; }
+        QAbstractSpinBox::down-button, QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; border: 0; border-left: 1px solid #44474d; border-bottom-right-radius: 5px; background: #35373c; }
+        QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover, QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover { background: #48566a; }
+        QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed, QSpinBox::up-button:pressed, QSpinBox::down-button:pressed, QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed { background: #2a486a; }
+        QAbstractSpinBox::up-arrow, QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url(:/icons/chevron-up.svg); width: 12px; height: 12px; }
+        QAbstractSpinBox::down-arrow, QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url(:/icons/chevron-down.svg); width: 12px; height: 12px; }
         QComboBox { padding: 0 28px 0 8px; font-weight: 400; }
         QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right; border: 0; width: 24px; }
         QComboBox::down-arrow { image: url(:/icons/chevron-down.svg); width: 12px; height: 12px; }
@@ -245,6 +247,8 @@ inline QString editorStyleSheet()
         QLabel#emptyStateHint { color: #777a82; font-size: 11px; }
         QWidget#newCanvasPanel QSpinBox { min-height: 35px; background: #1e1e21; border: 1px solid #414148; border-radius: 7px; padding: 0 10px; font-size: 13px; selection-background-color: #286fc5; }
         QWidget#newCanvasPanel QSpinBox:focus { border-color: #438bd3; }
+        QWidget#newCanvasPanel QSpinBox::up-button { border-top-right-radius: 6px; }
+        QWidget#newCanvasPanel QSpinBox::down-button { border-bottom-right-radius: 6px; }
         QWidget#newCanvasPanel QPushButton { min-height: 33px; border-radius: 7px; padding: 0 14px; }
         QPushButton#createCanvas { background: #2d78ce; border-color: #3887dd; color: white; font-weight: 600; }
         QPushButton#createCanvas:hover { background: #3886dc; }

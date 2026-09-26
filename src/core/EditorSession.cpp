@@ -1,13 +1,22 @@
 #include "core/EditorSession.h"
+#include "io/ProjectReader.h"
+#include "io/ProjectWriter.h"
+#include "io/PSDReader.h"
+#include "io/SvgImporter.h"
 #include "rendering/TextLayout.h"
 
 #include "rendering/LayerRenderer.h"
 #include "rendering/RasterOperations.h"
 #include "rendering/SubjectRemoval.h"
+extern "C" {
+#include "BrushPixels.h"
+}
 
 #include <QPainter>
 #include <QPainterPath>
 #include <QFontMetrics>
+#include <QFileInfo>
+#include <QJsonArray>
 #include <QRandomGenerator>
 
 #include <algorithm>
@@ -16,12 +25,24 @@
 
 namespace compositor {
 
+quint64 EditorSession::advanceRevision() noexcept
+{
+    ++sessionRevision_;
+    if (document_) {
+        document_->generation = sessionRevision_;
+    }
+    return sessionRevision_;
+}
+
 void EditorSession::setDocument(std::shared_ptr<Document> document, bool markSaved)
 {
     floating_.reset();
     document_ = std::move(document);
     selectedLayerIds_.clear();
-    if (document_ && document_->activeLayerId) selectedLayerIds_.insert(*document_->activeLayerId);
+    advanceRevision();
+    if (document_) {
+        if (document_->activeLayerId) selectedLayerIds_.insert(*document_->activeLayerId);
+    }
     history_.reset();
     if (markSaved) history_.markSaved(); else history_.markModified();
 }
@@ -52,8 +73,9 @@ void EditorSession::createDocument(int width, int height, bool emptyLayer)
     if (width < 1 || width > 30000 || height < 1 || height > 30000) return;
     beginEdit(QStringLiteral("New Canvas"));
     document_ = std::make_shared<Document>();
-    document_->formatVersion = 7;
+    document_->formatVersion = 9;
     document_->id = QUuid::createUuid();
+    document_->generation = 1;
     document_->canvasSize = QSize(width, height);
     if (emptyLayer) {
         Layer layer;
@@ -69,17 +91,31 @@ void EditorSession::createDocument(int width, int height, bool emptyLayer)
     endEdit();
 }
 
+bool EditorSession::openProject(const QString &path)
+{
+    ProjectWriter::recoverInterruptedPackage(path);
+    auto loaded = std::make_shared<Document>(ProjectReader::load(path));
+    setDocument(std::move(loaded));
+    return true;
+}
+
 bool EditorSession::insertImage(const QImage &image, const QString &name, const std::optional<QPointF> &center)
 {
     if (image.isNull() || image.width() < 1 || image.height() < 1 || image.width() > 30000 || image.height() > 30000) return false;
     qint64 used = 0;
-    if (document_) for (const Layer &layer : document_->layers) used += qint64(layer.image.width()) * layer.image.height();
+    if (document_) {
+        for (const Layer &layer : document_->layers) {
+            used += qint64(layer.image.width()) * layer.image.height();
+            used += qint64(layer.mask.width()) * layer.mask.height();
+        }
+    }
     if (qint64(image.width()) * image.height() > 100000000LL - used) return false;
     beginEdit(QStringLiteral("Import Image"));
     if (!document_) {
         document_ = std::make_shared<Document>();
-        document_->formatVersion = 7;
+        document_->formatVersion = 9;
         document_->id = QUuid::createUuid();
+        document_->generation = 1;
         document_->canvasSize = image.size();
     }
     Layer layer;
@@ -92,6 +128,132 @@ bool EditorSession::insertImage(const QImage &image, const QString &name, const 
     if (const Layer *active = activeLayer()) layer.parentId = active->group ? document_->activeLayerId : active->parentId;
     document_->layers.push_back(layer);
     selectLayer(layer.id);
+    endEdit();
+    return true;
+}
+
+bool EditorSession::insertSvg(const QString &path, const std::optional<QPointF> &center, QString *error)
+{
+    qint64 usedPixels = 0;
+    if (document_) {
+        for (const Layer &l : document_->layers) {
+            if (!l.image.isNull()) usedPixels += (qint64(l.image.width()) * l.image.height());
+            if (!l.mask.isNull()) usedPixels += (qint64(l.mask.width()) * l.mask.height());
+        }
+    }
+    const qint64 remaining = std::max(0LL, 100000000LL - usedPixels);
+    const std::optional<QSize> fitting = document_ ? std::make_optional(document_->canvasSize) : std::nullopt;
+    const QImage image = SvgImporter::read(path, fitting, remaining, error);
+    if (image.isNull()) return false;
+    return insertImage(image, QFileInfo(path).completeBaseName(), center);
+}
+
+bool EditorSession::insertPhotoshop(const PSDImportResult &imported, const QString &named,
+                                    const std::optional<QPointF> &center, QString *error)
+{
+    if (confirmConversions_ && !imported.conversions.isEmpty()) {
+        if (!confirmConversions_(imported.conversions)) {
+            if (error) *error = QStringLiteral("Import cancelled by user.");
+            return false;
+        }
+    }
+
+    const auto &incoming = imported.document.layers;
+    const bool wrapping = (document_ != nullptr);
+    const int added = incoming.size() + (wrapping ? 1 : 0);
+    const int currentCount = document_ ? document_->layers.size() : 0;
+    if (currentCount + added > 10000) {
+        if (error) *error = QStringLiteral("The document exceeds the 10,000 layer limit.");
+        return false;
+    }
+
+    qint64 usedPixels = 0;
+    if (document_) {
+        for (const Layer &l : document_->layers) {
+            if (!l.image.isNull()) usedPixels += (qint64(l.image.width()) * l.image.height());
+            if (!l.mask.isNull()) usedPixels += (qint64(l.mask.width()) * l.mask.height());
+        }
+    }
+    for (const Layer &l : incoming) {
+        if (!l.image.isNull()) usedPixels += (qint64(l.image.width()) * l.image.height());
+        if (!l.mask.isNull()) usedPixels += (qint64(l.mask.width()) * l.mask.height());
+    }
+    if (usedPixels > 100000000LL) {
+        if (error) *error = QStringLiteral("The image is too large to import.");
+        return false;
+    }
+
+    beginEdit(QStringLiteral("Import Photoshop File"));
+
+    if (!document_) {
+        document_ = std::make_shared<Document>();
+        document_->formatVersion = 9;
+        document_->id = QUuid::createUuid();
+        document_->generation = 1;
+        document_->canvasSize = imported.document.canvasSize;
+        document_->resolution = imported.document.resolution;
+        document_->layers = incoming;
+        QUuid activeId;
+        for (int i = document_->layers.size() - 1; i >= 0; --i) {
+            if (!document_->layers[i].parentId) {
+                activeId = document_->layers[i].id;
+                break;
+            }
+        }
+        if (activeId.isNull() && !document_->layers.isEmpty()) {
+            activeId = document_->layers.last().id;
+        }
+        document_->activeLayerId = activeId;
+        selectedLayerIds_ = activeId.isNull() ? QSet<QUuid>{} : QSet<QUuid>{activeId};
+        endEdit();
+        return true;
+    }
+
+    Layer group;
+    group.id = QUuid::createUuid();
+    group.name = named.trimmed().isEmpty() ? nextName(QStringLiteral("Folder")) : named.trimmed();
+    group.group = true;
+    group.transform.origin = QPointF(0, 0);
+    group.transform.size = document_->canvasSize;
+
+    const Layer *active = activeLayer();
+    group.parentId = (active && active->group) ? std::optional<QUuid>(active->id) : (active ? active->parentId : std::nullopt);
+
+    QVector<Layer> adjustedIncoming = incoming;
+    if (center.has_value()) {
+        QRectF box;
+        bool hasBox = false;
+        for (const Layer &l : adjustedIncoming) {
+            if (!l.group && l.transform.size.width() > 0 && l.transform.size.height() > 0) {
+                const QRectF r(l.transform.origin, l.transform.size);
+                box = hasBox ? box.united(r) : r;
+                hasBox = true;
+            }
+        }
+        if (hasBox && !box.isNull() && !box.isEmpty() && std::isfinite(box.x()) && std::isfinite(box.y())) {
+            const double dx = center->x() - box.center().x();
+            const double dy = center->y() - box.center().y();
+            for (Layer &l : adjustedIncoming) {
+                l.transform.origin.rx() += dx;
+                l.transform.origin.ry() += dy;
+            }
+        }
+    }
+
+    for (Layer &l : adjustedIncoming) {
+        if (!l.parentId) {
+            l.parentId = group.id;
+        }
+    }
+
+    document_->layers.push_back(std::move(group));
+    for (Layer &l : adjustedIncoming) {
+        document_->layers.push_back(std::move(l));
+    }
+
+    document_->activeLayerId = group.id;
+    selectedLayerIds_ = {group.id};
+
     endEdit();
     return true;
 }
@@ -211,6 +373,18 @@ static bool resizeSelectionMask(std::shared_ptr<Document> &document, int amount,
 
 bool EditorSession::expandSelection(int amount) { return resizeSelectionMask(document_, amount, true, history_); }
 bool EditorSession::contractSelection(int amount) { return resizeSelectionMask(document_, amount, false, history_); }
+
+bool EditorSession::featherSelection(int amount)
+{
+    if (!document_ || !document_->selection || amount < 1 || amount > 250 || !maskHasCoverage(*document_->selection))
+        return false;
+    const QImage result = RasterOperations::featherMask(*document_->selection, amount);
+    if (result == *document_->selection) return false;
+    beginEdit(QStringLiteral("Feather Selection"));
+    document_->selection = result;
+    endEdit();
+    return true;
+}
 
 bool EditorSession::moveSelection(const QPoint &offset)
 {
@@ -344,6 +518,235 @@ bool EditorSession::magicWand(const QPoint &documentPoint, int tolerance, int sa
     beginEdit(QStringLiteral("Magic Wand")); document_->selection = result; endEdit(); return true;
 }
 
+EditorSession::SelectionSnapshot EditorSession::createSelectionSnapshot(bool sampleAllLayers, QString *error) const
+{
+    SelectionSnapshot snapshot;
+    if (!document_) {
+        if (error) *error = QObject::tr("No document is open.");
+        snapshot.error = error ? *error : QObject::tr("No document is open.");
+        return snapshot;
+    }
+    if (qint64(document_->canvasSize.width()) * document_->canvasSize.height() > 100000000LL ||
+        document_->canvasSize.width() > 30000 || document_->canvasSize.height() > 30000) {
+        if (error) *error = QObject::tr("Image dimensions exceed memory limits.");
+        snapshot.error = error ? *error : QObject::tr("Image dimensions exceed memory limits.");
+        return snapshot;
+    }
+
+    snapshot.documentId = document_->id;
+    snapshot.documentGeneration = sessionRevision_;
+    snapshot.canvasSize = document_->canvasSize;
+
+    if (sampleAllLayers) {
+        snapshot.sampleImage = LayerRenderer::flattened(*document_);
+    } else if (const Layer *layer = activeLayer(); layer && !layer->group) {
+        if (layer->image.isNull()) {
+            if (error) *error = QObject::tr("The selected layer has no pixels.");
+            snapshot.error = error ? *error : QObject::tr("The selected layer has no pixels.");
+            return snapshot;
+        }
+        Document one = *document_;
+        Layer copy = *layer;
+        copy.parentId.reset();
+        copy.visible = true;
+        one.layers = {copy};
+        one.selection.reset();
+        snapshot.sampleImage = LayerRenderer::flattened(one);
+    } else {
+        if (error) *error = QObject::tr("No active layer selected.");
+        snapshot.error = error ? *error : QObject::tr("No active layer selected.");
+        return snapshot;
+    }
+
+    snapshot.sampleImage.detach();
+    snapshot.valid = true;
+    return snapshot;
+}
+
+EditorSession::SelectionComputationResult EditorSession::computeSubjectSelection(
+    const SelectionSnapshot &snapshot,
+    quint64 requestId,
+    std::atomic<bool> *cancelled)
+{
+    SelectionComputationResult result;
+    result.documentId = snapshot.documentId;
+    result.documentGeneration = snapshot.documentGeneration;
+    result.requestId = requestId;
+
+    if (!snapshot.valid || snapshot.sampleImage.isNull()) {
+        result.error = snapshot.error.isEmpty() ? QObject::tr("Invalid selection snapshot.") : snapshot.error;
+        return result;
+    }
+    if (cancelled && cancelled->load()) return result;
+
+    QString error;
+    const QImage raw = SubjectRemoval::rawMask(snapshot.sampleImage, &error, cancelled);
+    if (cancelled && cancelled->load()) return result;
+    if (raw.isNull() || !maskHasCoverage(raw)) {
+        result.error = error.isEmpty() ? QObject::tr("No foreground subject was detected in this layer.") : error;
+        return result;
+    }
+
+    const int width = raw.width(), height = raw.height();
+    QImage binary(width, height, QImage::Format_Grayscale8);
+    for (int y = 0; y < height; ++y) {
+        const uchar *in = raw.constScanLine(y);
+        uchar *out = binary.scanLine(y);
+        for (int x = 0; x < width; ++x)
+            out[x] = in[x] >= 128 ? 255 : 0;
+    }
+
+    if (!maskHasCoverage(binary)) {
+        result.error = QObject::tr("No foreground subject was detected in this layer.");
+        return result;
+    }
+
+    if (cancelled && cancelled->load()) return result;
+    result.mask = SubjectRemoval::smoothBinaryMask(binary);
+    if (cancelled && cancelled->load()) {
+        result.mask = QImage();
+        return result;
+    }
+
+    result.success = true;
+    return result;
+}
+
+EditorSession::SelectionComputationResult EditorSession::computeObjectSelection(
+    const SelectionSnapshot &snapshot,
+    const QPoint &documentPoint,
+    int edgeOffset,
+    bool smoothEdges,
+    quint64 requestId,
+    std::atomic<bool> *cancelled)
+{
+    SelectionComputationResult result;
+    result.documentId = snapshot.documentId;
+    result.documentGeneration = snapshot.documentGeneration;
+    result.requestId = requestId;
+
+    if (!snapshot.valid || snapshot.sampleImage.isNull()) {
+        result.error = snapshot.error.isEmpty() ? QObject::tr("Invalid selection snapshot.") : snapshot.error;
+        return result;
+    }
+    if (!QRect(QPoint(), snapshot.canvasSize).contains(documentPoint)) {
+        return result;
+    }
+    if (cancelled && cancelled->load()) return result;
+
+    QString error;
+    const QImage raw = SubjectRemoval::rawMask(snapshot.sampleImage, &error, cancelled);
+    if (cancelled && cancelled->load()) return result;
+    if (raw.isNull()) {
+        result.error = error;
+        return result;
+    }
+
+    QImage maskToTrace = raw;
+    if (!snapshot.sampleImage.isNull()) {
+        SubjectRemovalSettings refSettings;
+        refSettings.advanced = true;
+        refSettings.refineEdges = 2.0;
+        maskToTrace = SubjectRemoval::refined(raw, snapshot.sampleImage, refSettings);
+        if (maskToTrace.isNull()) maskToTrace = raw;
+    }
+
+    if (cancelled && cancelled->load()) return result;
+    const QImage instance = SubjectRemoval::connectedInstance(maskToTrace, documentPoint, cancelled);
+    if (cancelled && cancelled->load()) return result;
+    if (instance.isNull() || !maskHasCoverage(instance)) {
+        return result;
+    }
+
+    QImage adjusted = instance;
+    if (edgeOffset != 0) {
+        adjusted = SubjectRemoval::adjustEdgeOffset(adjusted, edgeOffset);
+        if (cancelled && cancelled->load()) return result;
+    }
+
+    const QImage finalMask = smoothEdges ? SubjectRemoval::smoothBinaryMask(adjusted) : adjusted;
+    if (cancelled && cancelled->load()) return result;
+
+    result.mask = finalMask;
+    result.success = true;
+    return result;
+}
+
+bool EditorSession::applySelectionResult(
+    const SelectionComputationResult &result,
+    SelectionMode mode,
+    const QString &historyName,
+    QString *error)
+{
+    if (!document_) {
+        if (error) *error = QObject::tr("No document is open.");
+        return false;
+    }
+    if (document_->id != result.documentId) {
+        if (error) *error = QObject::tr("Document identity mismatch.");
+        return false;
+    }
+    if (sessionRevision_ != result.documentGeneration || document_->generation != result.documentGeneration) {
+        if (error) *error = QObject::tr("Document generation mismatch.");
+        return false;
+    }
+    if (mode == SelectionMode::Subtract && !document_->selection) {
+        return false;
+    }
+    if (!result.success || result.mask.isNull() || !maskHasCoverage(result.mask)) {
+        if (mode == SelectionMode::Replace && document_->selection.has_value()) {
+            deselect();
+        }
+        if (error && !result.error.isEmpty()) *error = result.error;
+        return false;
+    }
+
+    const QImage combined = combineSelection(document_->selection, result.mask, mode);
+    beginEdit(historyName.isEmpty() ? QStringLiteral("Selection") : historyName);
+    document_->selection = combined;
+    endEdit();
+    return true;
+}
+
+bool EditorSession::selectSubject(bool sampleAllLayers, SelectionMode mode, QString *error, std::atomic<bool> *cancelled)
+{
+    if (cancelled && cancelled->load()) return false;
+    if (mode == SelectionMode::Subtract && (!document_ || !document_->selection)) return false;
+
+    auto snapshot = createSelectionSnapshot(sampleAllLayers, error);
+    if (!snapshot.valid) return false;
+    if (cancelled && cancelled->load()) return false;
+
+    auto compResult = computeSubjectSelection(snapshot, 0, cancelled);
+    if (cancelled && cancelled->load()) return false;
+
+    return applySelectionResult(compResult, mode, QStringLiteral("Select Subject"), error);
+}
+
+bool EditorSession::selectObject(const QPoint &documentPoint, int edgeOffset, bool smoothEdges,
+                                bool sampleAllLayers, SelectionMode mode, QString *error,
+                                std::atomic<bool> *cancelled)
+{
+    if (cancelled && cancelled->load()) return false;
+    if (mode == SelectionMode::Subtract && (!document_ || !document_->selection)) return false;
+
+    auto snapshot = createSelectionSnapshot(sampleAllLayers, error);
+    if (!snapshot.valid) return false;
+    if (cancelled && cancelled->load()) return false;
+
+    auto compResult = computeObjectSelection(snapshot, documentPoint, edgeOffset, smoothEdges, 0, cancelled);
+    if (cancelled && cancelled->load()) return false;
+
+    return applySelectionResult(compResult, mode, QStringLiteral("Object Selection"), error);
+}
+
+static void rasterizeLayer(Layer &layer)
+{
+    layer.shape = {};
+    layer.shapeStyle = std::nullopt;
+    layer.text = std::nullopt;
+}
+
 bool EditorSession::invertActiveLayerPixels()
 {
     const Layer *layer = activeLayer();
@@ -353,7 +756,7 @@ bool EditorSession::invertActiveLayerPixels()
     if (result == layer->image) return false;
     beginEdit(QStringLiteral("Invert"));
     document_->layers[index].image = result;
-    document_->layers[index].shape = {};
+    rasterizeLayer(document_->layers[index]);
     endEdit(); return true;
 }
 
@@ -411,7 +814,7 @@ bool EditorSession::fillSelection(const QColor &color)
     QImage painted(original.size(), QImage::Format_RGBA8888_Premultiplied); painted.fill(color);
     const QImage result = clippedPixels(original, painted, *layer, document_->selection);
     if (result == original) return false;
-    beginEdit(QStringLiteral("Fill")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Fill")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 bool EditorSession::clearSelectedPixels()
@@ -424,7 +827,7 @@ bool EditorSession::clearSelectedPixels()
     QImage cleared(layer->image.size(), QImage::Format_RGBA8888_Premultiplied); cleared.fill(Qt::transparent);
     const QImage result = clippedPixels(layer->image, cleared, *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Clear")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Clear")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 static QTransform pixelToDocument(const LayerTransform &placement, const QSize &pixels)
@@ -450,8 +853,8 @@ bool EditorSession::beginSelectionTransform(bool duplicate)
     const QUuid sourceId = source->id;
     beginEdit(duplicate ? QStringLiteral("Duplicate Pixels") : QStringLiteral("Transform Selection"));
     QImage cleared(source->image.size(), QImage::Format_RGBA8888_Premultiplied);
-    cleared.fill(Qt::transparent);
     document_->layers[sourceIndex].image = clippedPixels(source->image, cleared, *source, document_->selection);
+    if (!duplicate) rasterizeLayer(document_->layers[sourceIndex]);
     if (duplicate) document_->layers[sourceIndex].image = before.layers.at(sourceIndex).image;
     Layer layer;
     layer.id = QUuid::createUuid();
@@ -508,7 +911,7 @@ bool EditorSession::commitSelectionTransform()
     // pixel. Use the geometric center so a pure move never shifts the source.
     const QPointF newCenter = sourceToDocument.map(QRectF(extent).center());
     source.image = merged;
-    source.shape = {};
+    rasterizeLayer(source);
     source.transform.size = QSizeF(extent.width() * source.transform.size.width() / originalBounds.width(),
                                    extent.height() * source.transform.size.height() / originalBounds.height());
     source.transform.origin = newCenter - QPointF(source.transform.size.width() / 2.0, source.transform.size.height() / 2.0);
@@ -603,54 +1006,135 @@ bool EditorSession::applyGradient(const QPointF &start, const QPointF &end, cons
         beginEdit(QStringLiteral("Gradient Mask")); document_->layers[index].mask = gray; endEdit(); return true;
     }
     if (result == original) return false;
-    beginEdit(QStringLiteral("Gradient")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Gradient")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
-bool EditorSession::addShape(const QRectF &input, const QColor &fill, const QColor &stroke, double strokeWidth, bool ellipse, double cornerRadius)
+bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &fill, const QColor &stroke,
+                             double strokeWidth, double cornerRadius,
+                             const std::optional<QPointF> &start,
+                             const std::optional<QPointF> &end)
 {
     if (!document_ || !fill.isValid() || !stroke.isValid() || !std::isfinite(strokeWidth) || strokeWidth < 0 || strokeWidth > 1000
         || !std::isfinite(cornerRadius) || cornerRadius < 0 || cornerRadius > 5000) return false;
-    const QRectF rect = input.normalized();
+    QRectF rect = input.normalized();
     if (rect.width() < 1 || rect.height() < 1 || rect.width() > 30000 || rect.height() > 30000) return false;
-    const int margin = strokeWidth > 0 ? qCeil(strokeWidth / 2.0) + 2 : 0;
-    const QSize size(qCeil(rect.width()) + margin * 2, qCeil(rect.height()) + margin * 2);
+
+    QPointF startUnit(0.0, 0.0);
+    QPointF endUnit(1.0, 1.0);
+    QPointF origin;
+    QSize size;
+
+    if (kind == ShapeKind::Line) {
+        const double thickness = std::max(1.0, strokeWidth > 0 ? strokeWidth : 2.0);
+        QPointF from, to;
+        if (start && end) {
+            from = *start;
+            to = *end;
+        } else {
+            from = rect.topLeft();
+            to = rect.bottomRight();
+        }
+        const double minX = std::min(from.x(), to.x());
+        const double minY = std::min(from.y(), to.y());
+        const double spanW = std::abs(to.x() - from.x());
+        const double spanH = std::abs(to.y() - from.y());
+        const double pad = thickness / 2.0;
+        rect = QRectF(minX - pad, minY - pad, std::max(1.0, spanW + thickness), std::max(1.0, spanH + thickness));
+        startUnit = QPointF(rect.width() > 0 ? (from.x() - rect.left()) / rect.width() : 0.5,
+                            rect.height() > 0 ? (from.y() - rect.top()) / rect.height() : 0.5);
+        endUnit = QPointF(rect.width() > 0 ? (to.x() - rect.left()) / rect.width() : 0.5,
+                          rect.height() > 0 ? (to.y() - rect.top()) / rect.height() : 0.5);
+        size = QSize(qCeil(rect.width()), qCeil(rect.height()));
+        origin = rect.topLeft();
+    } else {
+        const int margin = strokeWidth > 0 ? qCeil(strokeWidth / 2.0) + 2 : 0;
+        size = QSize(qCeil(rect.width()) + margin * 2, qCeil(rect.height()) + margin * 2);
+        origin = QPointF(std::floor(rect.left()) - margin, std::floor(rect.top()) - margin);
+    }
+
     if (qint64(size.width()) * size.height() > 100000000LL) return false;
-    QImage image(size, QImage::Format_RGBA8888_Premultiplied); image.fill(Qt::transparent);
-    QPainter painter(&image); painter.setRenderHint(QPainter::Antialiasing);
-    const QRectF bounds(margin, margin, rect.width(), rect.height());
-    QPainterPath path;
-    if (ellipse) path.addEllipse(bounds);
-    else if (cornerRadius > 0) { const double radius = std::min({cornerRadius, rect.width() / 2.0, rect.height() / 2.0}); path.addRoundedRect(bounds, radius, radius); }
-    else path.addRect(bounds);
-    painter.fillPath(path, fill);
-    if (strokeWidth > 0) painter.strokePath(path, QPen(stroke, strokeWidth));
+    QImage image(size, QImage::Format_RGBA8888_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    if (kind == ShapeKind::Line) {
+        const double thickness = std::max(1.0, strokeWidth > 0 ? strokeWidth : 2.0);
+        const QColor color = (fill.isValid() && fill != Qt::transparent) ? fill : (stroke.isValid() ? stroke : Qt::black);
+        QPen pen(color, thickness, Qt::SolidLine, Qt::RoundCap);
+        painter.setPen(pen);
+        painter.drawLine(QPointF(startUnit.x() * size.width(), startUnit.y() * size.height()),
+                         QPointF(endUnit.x() * size.width(), endUnit.y() * size.height()));
+    } else {
+        const int margin = strokeWidth > 0 ? qCeil(strokeWidth / 2.0) + 2 : 0;
+        const QRectF bounds(margin, margin, rect.width(), rect.height());
+        QPainterPath path;
+        if (kind == ShapeKind::Ellipse) path.addEllipse(bounds);
+        else if (cornerRadius > 0) {
+            const double radius = std::min({cornerRadius, rect.width() / 2.0, rect.height() / 2.0});
+            path.addRoundedRect(bounds, radius, radius);
+        } else path.addRect(bounds);
+        painter.fillPath(path, fill);
+        if (strokeWidth > 0 && stroke.isValid() && stroke != Qt::transparent) {
+            painter.strokePath(path, QPen(stroke, strokeWidth));
+        }
+    }
     painter.end();
-    const QPointF origin(std::floor(rect.left()) - margin, std::floor(rect.top()) - margin);
-    const QString kind = ellipse ? QStringLiteral("Ellipse") : QStringLiteral("Rectangle");
-    beginEdit(kind);
-    if (!insertPixelLayer(image, origin, nextName(kind), kind, false)) { endEdit(); return false; }
-    Layer *shapeLayer = activeLayer(); if (shapeLayer) {
-        shapeLayer->shape.insert(QStringLiteral("kind"), ellipse ? QStringLiteral("Ellipse") : QStringLiteral("Rectangle"));
+
+    const QString kindStr = (kind == ShapeKind::Line) ? QStringLiteral("Line")
+                          : (kind == ShapeKind::Ellipse) ? QStringLiteral("Ellipse")
+                          : QStringLiteral("Rectangle");
+
+    beginEdit(kindStr);
+    if (!insertPixelLayer(image, origin, nextName(kindStr), kindStr, false)) { endEdit(); return false; }
+    Layer *shapeLayer = activeLayer();
+    if (shapeLayer) {
+        LayerShapeStyle style;
+        style.kind = kind;
+        const QColor shapeColor = (kind == ShapeKind::Line && fill == Qt::transparent && stroke.isValid()) ? stroke : fill;
+        style.red = shapeColor.redF();
+        style.green = shapeColor.greenF();
+        style.blue = shapeColor.blueF();
+        style.cornerRadius = (kind == ShapeKind::Rectangle) ? cornerRadius : 0.0;
+        if (kind == ShapeKind::Line) {
+            style.lineWidth = strokeWidth > 0 ? strokeWidth : 2.0;
+            style.start = startUnit;
+            style.end = endUnit;
+        }
+        shapeLayer->shapeStyle = style;
+        shapeLayer->shape.insert(QStringLiteral("kind"), kindStr);
         shapeLayer->shape.insert(QStringLiteral("fill"), fill.name(QColor::HexArgb));
-        shapeLayer->shape.insert(QStringLiteral("red"), fill.redF());
-        shapeLayer->shape.insert(QStringLiteral("green"), fill.greenF());
-        shapeLayer->shape.insert(QStringLiteral("blue"), fill.blueF());
+        shapeLayer->shape.insert(QStringLiteral("red"), style.red);
+        shapeLayer->shape.insert(QStringLiteral("green"), style.green);
+        shapeLayer->shape.insert(QStringLiteral("blue"), style.blue);
         shapeLayer->shape.insert(QStringLiteral("stroke"), stroke.name(QColor::HexArgb));
         shapeLayer->shape.insert(QStringLiteral("strokeWidth"), strokeWidth);
-        shapeLayer->shape.insert(QStringLiteral("cornerRadius"), ellipse ? 0 : cornerRadius);
+        shapeLayer->shape.insert(QStringLiteral("cornerRadius"), style.cornerRadius);
+        if (kind == ShapeKind::Line) {
+            shapeLayer->shape.insert(QStringLiteral("lineWidth"), *style.lineWidth);
+            shapeLayer->shape.insert(QStringLiteral("start"), QJsonArray{startUnit.x(), startUnit.y()});
+            shapeLayer->shape.insert(QStringLiteral("end"), QJsonArray{endUnit.x(), endUnit.y()});
+        }
     }
     endEdit();
     return true;
 }
 
+bool EditorSession::addShape(const QRectF &rect, const QColor &fill, const QColor &stroke, double strokeWidth, bool ellipse, double cornerRadius)
+{
+    return addShape(ellipse ? ShapeKind::Ellipse : ShapeKind::Rectangle, rect, fill, stroke, strokeWidth, cornerRadius);
+}
+
 bool EditorSession::addText(const QString &text, const QRectF &input, const QString &fontFamily,
-                            int pixelSize, bool bold, bool italic, bool underline, int alignment, const QColor &color, bool areaText)
+                            int pixelSize, bool bold, bool italic, bool underline, int alignment, const QColor &color, bool areaText,
+                            double tracking, double leading)
 {
     const QRectF box = input.normalized();
     if (!document_ || text.trimmed().isEmpty() || !std::isfinite(box.x()) || !std::isfinite(box.y())
         || pixelSize < 4 || pixelSize > 1000 || !color.isValid()) return false;
     QFont font(fontFamily); font.setPixelSize(pixelSize); font.setBold(bold); font.setItalic(italic); font.setUnderline(underline);
-    const QImage image = renderText(text, QSize(qCeil(box.width()), qCeil(box.height())), font, color, alignment, areaText);
+    if (tracking != 0.0) font.setLetterSpacing(QFont::AbsoluteSpacing, tracking);
+    const QImage image = renderText(text, QSize(qCeil(box.width()), qCeil(box.height())), font, color, alignment, areaText, tracking, leading);
     if (image.isNull()) return false;
     const QSize size = image.size();
     beginEdit(QStringLiteral("Text"));
@@ -661,29 +1145,62 @@ bool EditorSession::addText(const QString &text, const QRectF &input, const QStr
             {QStringLiteral("bold"), bold}, {QStringLiteral("italic"), italic}, {QStringLiteral("underline"), underline},
             {QStringLiteral("alignment"), alignment}, {QStringLiteral("areaText"), areaText}, {QStringLiteral("fill"), color.name(QColor::HexArgb)},
             {QStringLiteral("baseWidth"), size.width()}, {QStringLiteral("baseHeight"), size.height()}};
+        TextStyle ts;
+        ts.content = text;
+        ts.fontName = font.family();
+        ts.fontSize = double(pixelSize);
+        ts.red = color.redF();
+        ts.green = color.greenF();
+        ts.blue = color.blueF();
+        ts.alignment = (alignment == 1 ? TextAlignment::Center : alignment == 2 ? TextAlignment::Right : TextAlignment::Left);
+        ts.tracking = tracking;
+        ts.leading = leading;
+        if (areaText) ts.boxSize = QSizeF(size.width(), size.height());
+        layer->text = ts;
     }
     endEdit();
     return true;
 }
 
 bool EditorSession::updateText(const QUuid &id, const QString &text, const QRectF &input, const QString &fontFamily,
-                               int pixelSize, bool bold, bool italic, bool underline, int alignment, const QColor &color, bool areaText)
+                               int pixelSize, bool bold, bool italic, bool underline, int alignment, const QColor &color, bool areaText,
+                               double tracking, double leading)
 {
     if (!document_) return false;
-    const int index = indexOf(id); if (index < 0 || document_->layers[index].shape.value(QStringLiteral("kind")).toString() != QStringLiteral("Text")) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    Layer &layer = document_->layers[index];
+    if (layer.shape.value(QStringLiteral("kind")).toString() != QStringLiteral("Text") && !layer.text.has_value()) return false;
     const QRectF box = input.normalized();
     if (text.trimmed().isEmpty() || box.width() < 1 || box.height() < 1 || pixelSize < 4 || pixelSize > 1000 || !color.isValid()) return false;
     QFont font(fontFamily); font.setPixelSize(pixelSize); font.setBold(bold); font.setItalic(italic); font.setUnderline(underline);
-    const QImage image = renderText(text, QSize(qCeil(box.width()), qCeil(box.height())), font, color, alignment, areaText);
+    if (tracking != 0.0) font.setLetterSpacing(QFont::AbsoluteSpacing, tracking);
+    const QImage image = renderText(text, QSize(qCeil(box.width()), qCeil(box.height())), font, color, alignment, areaText, tracking, leading);
     if (image.isNull()) return false;
     const QSize size = image.size();
     beginEdit(QStringLiteral("Edit Text"));
-    Layer &layer = document_->layers[index]; layer.image = image; layer.transform.origin = box.topLeft(); layer.transform.size = size;
+    if (!layer.mask.isNull() && !layer.maskPlacement) layer.maskPlacement = layer.transform;
+    layer.image = image;
+    layer.transform.origin = box.topLeft();
+    layer.transform.size = size;
     layer.shape = {{QStringLiteral("kind"), QStringLiteral("Text")}, {QStringLiteral("text"), text}, {QStringLiteral("fontFamily"), font.family()},
         {QStringLiteral("pixelSize"), pixelSize}, {QStringLiteral("bold"), bold}, {QStringLiteral("italic"), italic}, {QStringLiteral("underline"), underline},
         {QStringLiteral("alignment"), alignment}, {QStringLiteral("areaText"), areaText}, {QStringLiteral("fill"), color.name(QColor::HexArgb)},
         {QStringLiteral("baseWidth"), size.width()}, {QStringLiteral("baseHeight"), size.height()}};
-    endEdit(); return true;
+    TextStyle ts;
+    ts.content = text;
+    ts.fontName = font.family();
+    ts.fontSize = double(pixelSize);
+    ts.red = color.redF();
+    ts.green = color.greenF();
+    ts.blue = color.blueF();
+    ts.alignment = (alignment == 1 ? TextAlignment::Center : alignment == 2 ? TextAlignment::Right : TextAlignment::Left);
+    ts.tracking = tracking;
+    ts.leading = leading;
+    if (areaText) ts.boxSize = QSizeF(size.width(), size.height());
+    layer.text = ts;
+    endEdit();
+    return true;
 }
 
 void EditorSession::redrawSelectedShapes()
@@ -691,39 +1208,130 @@ void EditorSession::redrawSelectedShapes()
     if (!document_) return;
     const QSet<QUuid> targets = selectedTransformLayerIds();
     for (Layer &layer : document_->layers) {
-        if (!targets.contains(layer.id) || layer.shape.isEmpty() || layer.group) continue;
+        if (!targets.contains(layer.id) || layer.group) continue;
+        if (layer.shape.isEmpty() && !layer.shapeStyle && !layer.text) continue;
         const int width = std::max(1, qRound(layer.transform.size.width()));
         const int height = std::max(1, qRound(layer.transform.size.height()));
         if (width == layer.image.width() && height == layer.image.height()) continue;
         if (qint64(width) * height > 100000000LL) continue;
         const LayerTransform oldPlacement = layer.transform;
-        const QString kind = layer.shape.value(QStringLiteral("kind")).toString();
-        const QColor fill(layer.shape.value(QStringLiteral("fill")).toString());
-        const QColor stroke(layer.shape.value(QStringLiteral("stroke")).toString());
-        const double strokeWidth = layer.shape.value(QStringLiteral("strokeWidth")).toDouble();
-        const double cornerRadius = layer.shape.value(QStringLiteral("cornerRadius")).toDouble();
-        QImage image(QSize(width, height), QImage::Format_RGBA8888_Premultiplied); image.fill(Qt::transparent);
-        QPainter painter(&image); painter.setRenderHint(QPainter::Antialiasing);
-        const double margin = strokeWidth > 0 ? std::min(double(qCeil(strokeWidth / 2.0) + 2), std::min(width, height) / 2.0) : 0;
-        const QRectF bounds(margin, margin, std::max(0.0, width - margin * 2), std::max(0.0, height - margin * 2));
-        if (kind == QStringLiteral("Text")) {
-            const QString text = layer.shape.value(QStringLiteral("text")).toString();
-            const double baseWidth = std::max(1, layer.shape.value(QStringLiteral("baseWidth")).toInt(width));
-            const double baseHeight = std::max(1, layer.shape.value(QStringLiteral("baseHeight")).toInt(height));
-            const double scale = std::min(width / baseWidth, height / baseHeight);
-            QFont font(layer.shape.value(QStringLiteral("fontFamily")).toString());
-            font.setPixelSize(std::max(4, qRound(layer.shape.value(QStringLiteral("pixelSize")).toInt(32) * scale)));
-            font.setBold(layer.shape.value(QStringLiteral("bold")).toBool()); font.setItalic(layer.shape.value(QStringLiteral("italic")).toBool()); font.setUnderline(layer.shape.value(QStringLiteral("underline")).toBool());
-            const int alignment = layer.shape.value(QStringLiteral("alignment")).toInt();
-            painter.drawImage(QPoint(), renderText(text, QSize(width, height), font, fill, alignment,
-                                                  layer.shape.value(QStringLiteral("areaText")).toBool()));
+
+        const QString kindStr = layer.shapeStyle
+            ? shapeKindToString(layer.shapeStyle->kind)
+            : layer.shape.value(QStringLiteral("kind")).toString();
+        const bool isText = (kindStr == QStringLiteral("Text") || layer.text.has_value());
+
+        QImage image(QSize(width, height), QImage::Format_RGBA8888_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing);
+
+        if (isText) {
+            QString content;
+            QString fontName;
+            int pixelSize = 48;
+            bool bold = false, italic = false, underline = false;
+            int alignment = 0;
+            bool areaText = false;
+            QColor textColor(Qt::black);
+
+            if (layer.text) {
+                content = layer.text->content;
+                fontName = layer.text->fontName;
+                pixelSize = qRound(layer.text->fontSize);
+                alignment = (layer.text->alignment == TextAlignment::Center ? 1 : layer.text->alignment == TextAlignment::Right ? 2 : 0);
+                textColor = QColor::fromRgbF(layer.text->red, layer.text->green, layer.text->blue);
+                areaText = layer.text->boxSize.has_value();
+            } else {
+                content = layer.shape.value(QStringLiteral("text")).toString();
+                fontName = layer.shape.value(QStringLiteral("fontFamily")).toString();
+                pixelSize = layer.shape.value(QStringLiteral("pixelSize")).toInt(48);
+                bold = layer.shape.value(QStringLiteral("bold")).toBool();
+                italic = layer.shape.value(QStringLiteral("italic")).toBool();
+                underline = layer.shape.value(QStringLiteral("underline")).toBool();
+                alignment = layer.shape.value(QStringLiteral("alignment")).toInt();
+                areaText = layer.shape.value(QStringLiteral("areaText")).toBool();
+                textColor = QColor(layer.shape.value(QStringLiteral("fill")).toString());
+                if (!textColor.isValid()) textColor = Qt::black;
+            }
+
+            QFont font(fontName);
+            font.setBold(bold); font.setItalic(italic); font.setUnderline(underline);
+
+            if (areaText) {
+                // Fixed paragraph box: reflows text within width and height WITHOUT scaling font size!
+                font.setPixelSize(pixelSize);
+                if (layer.text) layer.text->boxSize = QSizeF(width, height);
+                layer.shape.insert(QStringLiteral("baseWidth"), width);
+                layer.shape.insert(QStringLiteral("baseHeight"), height);
+            } else {
+                // Point text: scales with box
+                const double baseWidth = std::max(1, layer.shape.value(QStringLiteral("baseWidth")).toInt(width));
+                const double baseHeight = std::max(1, layer.shape.value(QStringLiteral("baseHeight")).toInt(height));
+                const double scale = std::min(width / baseWidth, height / baseHeight);
+                const int scaledSize = std::max(4, qRound(pixelSize * scale));
+                font.setPixelSize(scaledSize);
+            }
+
+            const double tracking = layer.text ? layer.text->tracking : 0.0;
+            const double leading = layer.text ? layer.text->leading : 0.0;
+            if (tracking != 0.0) font.setLetterSpacing(QFont::AbsoluteSpacing, tracking);
+            painter.drawImage(QPoint(), renderText(content, QSize(width, height), font, textColor, alignment, areaText, tracking, leading));
+        } else if (kindStr == QStringLiteral("Line") || (layer.shapeStyle && layer.shapeStyle->kind == ShapeKind::Line)) {
+            double thickness = 2.0;
+            QPointF startUnit(0.0, 0.0);
+            QPointF endUnit(1.0, 1.0);
+            QColor lineColor = Qt::black;
+            if (layer.shapeStyle) {
+                thickness = layer.shapeStyle->lineWidth.value_or(2.0);
+                startUnit = layer.shapeStyle->start.value_or(QPointF(0, 0));
+                endUnit = layer.shapeStyle->end.value_or(QPointF(1, 1));
+                lineColor = QColor::fromRgbF(layer.shapeStyle->red, layer.shapeStyle->green, layer.shapeStyle->blue);
+            } else {
+                thickness = layer.shape.value(QStringLiteral("lineWidth")).toDouble(layer.shape.value(QStringLiteral("strokeWidth")).toDouble(2.0));
+                if (layer.shape.contains(QStringLiteral("start"))) {
+                    const QJsonArray s = layer.shape.value(QStringLiteral("start")).toArray();
+                    if (s.size() >= 2) startUnit = QPointF(s.at(0).toDouble(), s.at(1).toDouble());
+                }
+                if (layer.shape.contains(QStringLiteral("end"))) {
+                    const QJsonArray e = layer.shape.value(QStringLiteral("end")).toArray();
+                    if (e.size() >= 2) endUnit = QPointF(e.at(0).toDouble(), e.at(1).toDouble());
+                }
+                lineColor = QColor(layer.shape.value(QStringLiteral("stroke")).toString(layer.shape.value(QStringLiteral("fill")).toString()));
+                if (!lineColor.isValid()) lineColor = Qt::black;
+            }
+            thickness = std::max(1.0, thickness);
+            QPen pen(lineColor, thickness, Qt::SolidLine, Qt::RoundCap);
+            painter.setPen(pen);
+            painter.drawLine(QPointF(startUnit.x() * width, startUnit.y() * height),
+                             QPointF(endUnit.x() * width, endUnit.y() * height));
         } else {
+            const QColor fill = layer.shapeStyle
+                ? QColor::fromRgbF(layer.shapeStyle->red, layer.shapeStyle->green, layer.shapeStyle->blue)
+                : QColor(layer.shape.value(QStringLiteral("fill")).toString());
+            const QColor stroke = layer.shape.contains(QStringLiteral("stroke"))
+                ? QColor(layer.shape.value(QStringLiteral("stroke")).toString())
+                : Qt::transparent;
+            const double strokeWidth = layer.shape.value(QStringLiteral("strokeWidth")).toDouble(0.0);
+            const double cornerRadius = layer.shapeStyle
+                ? layer.shapeStyle->cornerRadius
+                : layer.shape.value(QStringLiteral("cornerRadius")).toDouble(0.0);
+
+            const double margin = strokeWidth > 0 ? std::min(double(qCeil(strokeWidth / 2.0) + 2), std::min(width, height) / 2.0) : 0;
+            const QRectF bounds(margin, margin, std::max(0.0, width - margin * 2), std::max(0.0, height - margin * 2));
             QPainterPath path;
-            if (kind == QStringLiteral("Ellipse")) path.addEllipse(bounds);
-            else if (cornerRadius > 0) { const double radius = std::min({cornerRadius, bounds.width() / 2.0, bounds.height() / 2.0}); path.addRoundedRect(bounds, radius, radius); }
-            else path.addRect(bounds);
+            if (kindStr == QStringLiteral("Ellipse") || (layer.shapeStyle && layer.shapeStyle->kind == ShapeKind::Ellipse)) {
+                path.addEllipse(bounds);
+            } else if (cornerRadius > 0) {
+                const double radius = std::min({cornerRadius, bounds.width() / 2.0, bounds.height() / 2.0});
+                path.addRoundedRect(bounds, radius, radius);
+            } else {
+                path.addRect(bounds);
+            }
             painter.fillPath(path, fill);
-            if (strokeWidth > 0) painter.strokePath(path, QPen(stroke, strokeWidth));
+            if (strokeWidth > 0 && stroke.isValid() && stroke != Qt::transparent) {
+                painter.strokePath(path, QPen(stroke, strokeWidth));
+            }
         }
         painter.end();
         if (!layer.mask.isNull() && !layer.maskPlacement) layer.maskPlacement = oldPlacement;
@@ -740,7 +1348,7 @@ bool EditorSession::addNoiseToActiveLayer(float amount, bool gaussian, bool mono
     if (result == layer->image) return false;
     beginEdit(QStringLiteral("Add Noise"));
     document_->layers[index].image = result;
-    document_->layers[index].shape = {};
+    rasterizeLayer(document_->layers[index]);
     endEdit(); return true;
 }
 
@@ -753,7 +1361,7 @@ bool EditorSession::distortActiveLayer(double amount)
     if (result == layer->image) return false;
     beginEdit(QStringLiteral("Lens Correction"));
     document_->layers[index].image = result;
-    document_->layers[index].shape = {};
+    rasterizeLayer(document_->layers[index]);
     endEdit(); return true;
 }
 
@@ -763,7 +1371,7 @@ bool EditorSession::applyLevels(const LevelsSettings &settings)
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::levels(layer->image, settings), *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Levels")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Levels")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 bool EditorSession::applyExposure(double stops, double offset, double gamma)
@@ -774,7 +1382,7 @@ bool EditorSession::applyExposure(double stops, double offset, double gamma)
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::exposure(layer->image, stops, offset, gamma), *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Exposure")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Exposure")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 bool EditorSession::applyHueSaturation(const HueSaturationSettings &settings)
@@ -784,7 +1392,7 @@ bool EditorSession::applyHueSaturation(const HueSaturationSettings &settings)
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::hueSaturation(layer->image, settings), *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Hue/Saturation")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Hue/Saturation")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 bool EditorSession::applyCurves(const CurvesSettings &settings)
@@ -794,7 +1402,7 @@ bool EditorSession::applyCurves(const CurvesSettings &settings)
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::curves(layer->image, settings), *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Curves")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Curves")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 bool EditorSession::applyGradientMap(const QColor &shadows, const QColor &highlights, bool reversed)
@@ -803,7 +1411,7 @@ bool EditorSession::applyGradientMap(const QColor &shadows, const QColor &highli
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::gradientMap(layer->image, shadows, highlights, reversed), *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Gradient Map")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Gradient Map")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 bool EditorSession::applyGrain(double amount, double size, double roughness, quint32 seed)
@@ -815,7 +1423,7 @@ bool EditorSession::applyGrain(double amount, double size, double roughness, qui
     const QImage adjusted = RasterOperations::grain(layer->image, amount, size, roughness, seed, layer->transform.origin, units);
     const QImage result = clippedPixels(layer->image, adjusted, *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Grain")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Grain")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 bool EditorSession::applyGaussianBlur(double radius)
@@ -824,7 +1432,7 @@ bool EditorSession::applyGaussianBlur(double radius)
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::gaussianBlur(layer->image, radius), *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Gaussian Blur")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Gaussian Blur")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 bool EditorSession::applyMotionBlur(double angleDegrees, double distance)
@@ -833,10 +1441,206 @@ bool EditorSession::applyMotionBlur(double angleDegrees, double distance)
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::motionBlur(layer->image, angleDegrees, distance), *layer, document_->selection);
     if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Motion Blur")); document_->layers[index].image = result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Motion Blur")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
+}
+
+bool EditorSession::applyBlackWhite(const float *weights, bool tint, double tintHue, double tintSaturation)
+{
+    const Layer *layer = activeLayer(); if (!layer || layer->group || layer->image.isNull()) return false;
+    const int index = indexOf(layer->id);
+    const QImage adjusted = RasterOperations::blackWhite(layer->image, weights, tint, tintHue, tintSaturation);
+    const QImage result = clippedPixels(layer->image, adjusted, *layer, document_->selection);
+    if (result == layer->image) return false;
+    beginEdit(QStringLiteral("Black & White")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
+}
+
+bool EditorSession::applyColorBalance(const float *shadows, const float *midtones, const float *highlights, bool preserveLuminosity)
+{
+    const Layer *layer = activeLayer(); if (!layer || layer->group || layer->image.isNull()) return false;
+    const int index = indexOf(layer->id);
+    const QImage adjusted = RasterOperations::colorBalance(layer->image, shadows, midtones, highlights, preserveLuminosity);
+    const QImage result = clippedPixels(layer->image, adjusted, *layer, document_->selection);
+    if (result == layer->image) return false;
+    beginEdit(QStringLiteral("Color Balance")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
+}
+
+bool EditorSession::applyVignette(double amount, const QColor &color, double midpoint, double roundness, double feather, double highlights)
+{
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || amount <= 0) return false;
+    const int index = indexOf(layer->id);
+    if (index < 0) return false;
+
+    if (layer->image.isNull()) {
+        if (!layer->adjustment.isEmpty()) return false;
+        const QSize canvasSize = document_->canvasSize;
+        if (canvasSize.width() <= 0 || canvasSize.height() <= 0) return false;
+
+        QImage base(canvasSize, QImage::Format_RGBA8888_Premultiplied);
+        base.fill(0);
+        const QRectF canvasFrame(0.0, 0.0, canvasSize.width(), canvasSize.height());
+        const QImage adjusted = RasterOperations::vignette(base, amount, color, midpoint, roundness, feather, highlights, canvasFrame);
+
+        Layer canvasLayer = *layer;
+        canvasLayer.transform.origin = QPointF(0, 0);
+        canvasLayer.transform.size = canvasSize;
+        const QImage result = clippedPixels(base, adjusted, canvasLayer, document_->selection);
+        if (result == base) return false;
+
+        beginEdit(QStringLiteral("Vignette"));
+        Layer &dst = document_->layers[index];
+        dst.image = result;
+        dst.transform.origin = QPointF(0, 0);
+        dst.transform.size = canvasSize;
+        rasterizeLayer(dst);
+        endEdit();
+        return true;
+    }
+
+    const QImage adjusted = RasterOperations::vignette(layer->image, amount, color, midpoint, roundness, feather, highlights);
+    const QImage result = clippedPixels(layer->image, adjusted, *layer, document_->selection);
+    if (result == layer->image) return false;
+    beginEdit(QStringLiteral("Vignette"));
+    document_->layers[index].image = result;
+    rasterizeLayer(document_->layers[index]);
+    endEdit();
+    return true;
+}
+
+bool EditorSession::applyBloomGlow(double amount, double radius)
+{
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || layer->image.isNull() || amount <= 0 || radius <= 0) return false;
+    const int index = indexOf(layer->id);
+    if (index < 0) return false;
+
+    // 1. Calculate blur margin: radius * 3 + 2 matching macOS Filters.swift:377
+    const double margin = std::ceil(radius * 3.0 + 2.0);
+    const QRectF bounds(0, 0, layer->image.width(), layer->image.height());
+    const QRectF extent = bounds.adjusted(-margin, -margin, margin, margin);
+    const int grownWidth = qRound(extent.width());
+    const int grownHeight = qRound(extent.height());
+
+    if (grownWidth > 30000 || grownHeight > 30000 || qint64(grownWidth) * grownHeight > 100000000) {
+        return false;
+    }
+
+    // 2. Pad original image into grown buffer
+    QImage grown(grownWidth, grownHeight, QImage::Format_RGBA8888_Premultiplied);
+    grown.fill(0);
+    {
+        QPainter p(&grown);
+        p.setCompositionMode(QPainter::CompositionMode_Source);
+        p.drawImage(QPoint(int(margin), int(margin)), layer->image);
+    }
+
+    // 3. Compute grown transform placing the larger grid at identical document coordinates
+    LayerTransform grownTransform = layer->transform;
+    grownTransform.size = QSizeF(extent.width() * layer->transform.size.width() / bounds.width(),
+                                 extent.height() * layer->transform.size.height() / bounds.height());
+    const QTransform toDoc = LayerRenderer::pixelToDocument(layer->transform, layer->image.size());
+    const QPointF centerInDoc = toDoc.map(extent.center());
+    grownTransform.origin = QPointF(centerInDoc.x() - grownTransform.size.width() / 2.0,
+                                    centerInDoc.y() - grownTransform.size.height() / 2.0);
+
+    // 4. Run Bloom / Glow on grown image
+    const QImage bloomed = RasterOperations::bloomGlow(grown, amount, radius);
+
+    // 5. Apply selection clipping
+    Layer grownLayer = *layer;
+    grownLayer.image = grown;
+    grownLayer.transform = grownTransform;
+    const QImage clipped = clippedPixels(grown, bloomed, grownLayer, document_->selection);
+
+    // 6. Trimming: cut away transparent padding left empty (matching macOS PixelFilter.trimmed)
+    size_t edges[4] = {0, 0, 0, 0};
+    brush_alpha_bounds(clipped.constBits(), clipped.width(), clipped.height(), clipped.bytesPerLine(), edges);
+    const int cropX = static_cast<int>(edges[0]);
+    const int cropY = static_cast<int>(edges[1]);
+    const int cropW = static_cast<int>(edges[2] - edges[0]);
+    const int cropH = static_cast<int>(edges[3] - edges[1]);
+    const QRect crop(cropX, cropY, cropW, cropH);
+
+    QImage finalImage = clipped;
+    LayerTransform finalTransform = grownTransform;
+
+    if (crop.width() >= 1 && crop.height() >= 1 && crop != QRect(0, 0, clipped.width(), clipped.height())) {
+        finalImage = clipped.copy(crop);
+        finalTransform.size = QSizeF(crop.width() * grownTransform.size.width() / double(clipped.width()),
+                                     crop.height() * grownTransform.size.height() / double(clipped.height()));
+        const QTransform grownToDoc = LayerRenderer::pixelToDocument(grownTransform, clipped.size());
+        const QPointF cropCenterDoc = grownToDoc.map(QRectF(crop).center());
+        finalTransform.origin = QPointF(cropCenterDoc.x() - finalTransform.size.width() / 2.0,
+                                        cropCenterDoc.y() - finalTransform.size.height() / 2.0);
+    }
+
+    // 7. Mask handling: carried onto new grid
+    QImage finalMask = layer->mask;
+    std::optional<LayerTransform> finalMaskPlacement = layer->maskPlacement;
+    if (!layer->mask.isNull()) {
+        if (!layer->maskPlacement) {
+            Layer targetLayer = *layer;
+            targetLayer.transform = finalTransform;
+            finalMask = LayerRenderer::placedMask(*layer, targetLayer, finalImage.size());
+            finalMaskPlacement.reset();
+        }
+    }
+
+    if (finalImage == layer->image && finalTransform == layer->transform && finalMask == layer->mask) {
+        return false;
+    }
+
+    // 8. Commit
+    beginEdit(QStringLiteral("Bloom / Glow"));
+    Layer &dst = document_->layers[index];
+    dst.image = finalImage;
+    dst.transform = finalTransform;
+    if (!layer->mask.isNull()) {
+        dst.mask = finalMask;
+        dst.maskPlacement = finalMaskPlacement;
+    }
+    rasterizeLayer(dst);
+    endEdit();
+    return true;
+}
+
+bool EditorSession::applyTonalContrast(double amount, double radius, double shadows, double midtones, double highlights)
+{
+    const Layer *layer = activeLayer(); if (!layer || layer->group || layer->image.isNull() || amount <= 0) return false;
+    const int index = indexOf(layer->id);
+    const QImage adjusted = RasterOperations::tonalContrast(layer->image, amount, radius, shadows, midtones, highlights);
+    const QImage result = clippedPixels(layer->image, adjusted, *layer, document_->selection);
+    if (result == layer->image) return false;
+    beginEdit(QStringLiteral("Tonal Contrast")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
+}
+
+bool EditorSession::applyCameraRaw(const CameraRawSettings &settings)
+{
+    const Layer *layer = activeLayer();
+    if (!layer) return false;
+    return applyCameraRaw(layer->id, settings);
+}
+
+bool EditorSession::applyCameraRaw(const QUuid &id, const CameraRawSettings &settings)
+{
+    if (!document_) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    const Layer &layer = document_->layers.at(index);
+    if (layer.group || layer.image.isNull()) return false;
+    if (settings.isIdentity()) return false;
+    const QImage graded = RasterOperations::cameraRaw(layer.image, settings);
+    const QImage result = clippedPixels(layer.image, graded, layer, document_->selection);
+    if (result == layer.image) return false;
+    beginEdit(QStringLiteral("Camera Raw Filter"));
+    document_->layers[index].image = result;
+    rasterizeLayer(document_->layers[index]);
+    endEdit();
+    return true;
 }
 
 bool EditorSession::contentAwareFill()
+
 {
     const Layer *layer = activeLayer();
     if (!document_ || !document_->selection || !maskHasCoverage(*document_->selection) || !layer || layer->group || layer->image.isNull()) return false;
@@ -844,7 +1648,7 @@ bool EditorSession::contentAwareFill()
     const QImage coverage = selectionCoverageForLayer(*layer, layer->image.size(), document_->selection);
     const auto result = RasterOperations::contentAwareFill(layer->image, coverage);
     if (!result || *result == layer->image) return false;
-    beginEdit(QStringLiteral("Content-Aware Fill")); document_->layers[index].image = *result; document_->layers[index].shape = {}; endEdit(); return true;
+    beginEdit(QStringLiteral("Content-Aware Fill")); document_->layers[index].image = *result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
 static std::optional<QPointF> documentToPixel(const Layer &layer, const QPointF &point, const QSize &size)
@@ -985,7 +1789,16 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
                         paintingMask ? (erasing ? 255 : 0) : 0, clonePixel ? *clonePixel - *pixel : QPointF(),
                         healMode, effectSeed, original, original, coverage, coverage, {}, {}, {}, {}};
     if (document_->selection) brush_->selectionCoverage = selectionCoverageForLayer(editable, original.size(), document_->selection);
-    continueBrushStroke(documentPoint);
+
+    // Audit against macOS EditorSession+Brush.swift:
+    // Smoothing is enabled only for tool == .brush (which includes Paint and Erase).
+    // Clone Stamp, Spot Healing, and Blur/Smear do NOT enable smoothing.
+    const bool enablesSmoothing = (!cloneSource.has_value() && healMode < 0);
+    brushSmoothingEnabled_ = enablesSmoothing && (brushSmoothing_ > 0.0);
+    brushAnchor_ = documentPoint;
+    brushPointer_ = documentPoint;
+
+    continueBrushStrokeInternal(documentPoint);
     return true;
 }
 
@@ -1121,7 +1934,45 @@ static void restoreCoverage(QImage &destination, const QImage &settled, const QR
         std::copy_n(settled.constScanLine(y) + rect.left(), rect.width(), destination.scanLine(y) + rect.left());
 }
 
+std::optional<QPointF> EditorSession::smoothedBrushPoint(const QPointF &point)
+{
+    if (!brushSmoothingEnabled_ || brushSmoothing_ <= 0.0 || !brushAnchor_) {
+        return point;
+    }
+    const double radius = brushSmoothing_ / std::max(0.01, viewportZoom_);
+    const QPointF delta = point - *brushAnchor_;
+    const double distance = std::hypot(delta.x(), delta.y());
+    if (distance <= radius) {
+        return std::nullopt;
+    }
+    const double step = (distance - radius) / distance;
+    const QPointF moved = *brushAnchor_ + delta * step;
+    brushAnchor_ = moved;
+    return moved;
+}
+
 void EditorSession::continueBrushStroke(const QPointF &documentPoint)
+{
+    if (warp_) {
+        continueBrushStrokeInternal(documentPoint);
+        return;
+    }
+    if (!brush_ || !document_) return;
+
+    brushPointer_ = documentPoint;
+    if (brushSmoothingEnabled_) {
+        const auto painted = smoothedBrushPoint(documentPoint);
+        if (!painted) {
+            return;
+        }
+        continueBrushStrokeInternal(*painted);
+    } else {
+        brushAnchor_ = documentPoint;
+        continueBrushStrokeInternal(documentPoint);
+    }
+}
+
+void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
 {
     if (warp_ && document_) {
         const int index = indexOf(warp_->layerId); if (index < 0) return;
@@ -1224,7 +2075,7 @@ void EditorSession::continueBrushStroke(const QPointF &documentPoint)
             } else { pixel[0] = uchar(std::min(255, brush_->color.red() * alpha / 255 + (int(base[0]) * inverse + 127) / 255)); pixel[1] = uchar(std::min(255, brush_->color.green() * alpha / 255 + (int(base[1]) * inverse + 127) / 255)); pixel[2] = uchar(std::min(255, brush_->color.blue() * alpha / 255 + (int(base[2]) * inverse + 127) / 255)); pixel[3] = uchar(std::min(255, alpha + (int(base[3]) * inverse + 127) / 255)); }
             changedPixels |= !std::equal(pixel, pixel + 4, base);
         } }
-        if (changedPixels) layer.shape = {};
+        if (changedPixels) rasterizeLayer(layer);
     }
     brush_->previousPixel = *current;
     brush_->changed |= changedPixels;
@@ -1239,11 +2090,21 @@ bool EditorSession::endBrushStroke()
             for (int y=0;y<result.height();++y) { uchar *out=result.scanLine(y); const uchar *changed=warp_->working.constScanLine(y),*coverage=warp_->coverage.constScanLine(y),*clip=selection.constScanLine(y); for(int x=0;x<result.width();++x) {
                 const int amount=(int(coverage[x])*clip[x]+127)/255, inverse=255-amount; for(int c=0;c<4;++c) out[x*4+c]=uchar((int(out[x*4+c])*inverse+int(changed[x*4+c])*amount+127)/255);
             } }
-            layer.image=result; warp_->changed=result!=warp_->original; if (warp_->changed) layer.shape = {};
+            layer.image=result; warp_->changed=result!=warp_->original; if (warp_->changed) rasterizeLayer(layer);
         }
         const bool changed=warp_->changed; warp_.reset(); endEdit(); return changed;
     }
     if (!brush_) return false;
+
+    // Smoothing leaves the brush short of the pointer; the stroke ends where the hand did.
+    if (brushSmoothingEnabled_ && brushSmoothing_ > 0.0 && brushPointer_ && brushAnchor_ && *brushPointer_ != *brushAnchor_) {
+        continueBrushStrokeInternal(*brushPointer_);
+        brushAnchor_ = brushPointer_;
+    }
+    brushAnchor_.reset();
+    brushPointer_.reset();
+    brushSmoothingEnabled_ = false;
+
     if (document_ && brush_->samples.size() >= 2) {
         const int index = indexOf(brush_->layerId);
         if (index >= 0) {
@@ -1264,7 +2125,7 @@ bool EditorSession::endBrushStroke()
             brush_->tailBounds = {};
             brush_->dirtyPixels |= dirty;
             const QPointF lastDocument = pixelToDocument(layer.transform, brush_->original.size()).map(brush_->samples.constLast());
-            continueBrushStroke(lastDocument);
+            continueBrushStrokeInternal(lastDocument);
         }
     }
     if (brush_->healMode >= 0 && document_) {
@@ -1281,10 +2142,10 @@ bool EditorSession::endBrushStroke()
                     const int amount = qRound(mask[x] * brush_->opacity), inverse = 255 - amount;
                     for (int c = 0; c < 4; ++c) out[x * 4 + c] = uchar((int(base[x * 4 + c]) * inverse + int(soft[x * 4 + c]) * amount + 127) / 255);
                 } }
-                layer.image = result; brush_->changed = result != brush_->original; if (brush_->changed) layer.shape = {};
+                layer.image = result; brush_->changed = result != brush_->original; if (brush_->changed) rasterizeLayer(layer);
             } else {
                 const auto healed = RasterOperations::spotHeal(brush_->original, coverage, brush_->opacity, brush_->healMode, brush_->effectSeed);
-                if (healed) { layer.image = *healed; brush_->changed = layer.image != brush_->original; if (brush_->changed) layer.shape = {}; }
+                if (healed) { layer.image = *healed; brush_->changed = layer.image != brush_->original; if (brush_->changed) rasterizeLayer(layer); }
             }
         }
     }
@@ -1296,6 +2157,9 @@ bool EditorSession::endBrushStroke()
 
 bool EditorSession::cancelBrushStroke()
 {
+    brushAnchor_.reset();
+    brushPointer_.reset();
+    brushSmoothingEnabled_ = false;
     if (!document_ || (!brush_ && !warp_)) return false;
     if (brush_) {
         const int index = indexOf(brush_->layerId);
@@ -1380,6 +2244,37 @@ bool EditorSession::invertLayerMask()
     QImage mask = layer->mask.convertToFormat(QImage::Format_Grayscale8);
     for (int y = 0; y < mask.height(); ++y) { uchar *row = mask.scanLine(y); for (int x = 0; x < mask.width(); ++x) row[x] = uchar(255 - row[x]); }
     beginEdit(QStringLiteral("Invert")); document_->layers[index].mask = mask; endEdit(); return true;
+}
+
+bool EditorSession::canCopyLayerMask(const QUuid &sourceId, const QUuid &targetId) const
+{
+    if (!document_ || sourceId == targetId || !canEditLayers()) return false;
+    const int srcIdx = indexOf(sourceId);
+    const int dstIdx = indexOf(targetId);
+    if (srcIdx < 0 || dstIdx < 0) return false;
+    const Layer &srcLayer = document_->layers.at(srcIdx);
+    const Layer &dstLayer = document_->layers.at(dstIdx);
+    return !srcLayer.mask.isNull() && !dstLayer.group;
+}
+
+bool EditorSession::copyLayerMask(const QUuid &sourceId, const QUuid &targetId)
+{
+    if (!canCopyLayerMask(sourceId, targetId)) return false;
+    const int srcIdx = indexOf(sourceId);
+    const int dstIdx = indexOf(targetId);
+    if (srcIdx < 0 || dstIdx < 0) return false;
+    const bool wasNull = document_->layers.at(dstIdx).mask.isNull();
+    beginEdit(wasNull ? QStringLiteral("Copy Layer Mask") : QStringLiteral("Replace Layer Mask"));
+    const Layer &srcLayer = document_->layers.at(srcIdx);
+    Layer &dstLayer = document_->layers[dstIdx];
+    dstLayer.mask = srcLayer.mask;
+    dstLayer.maskPlacement = srcLayer.maskPlacement.value_or(srcLayer.transform);
+    dstLayer.maskEnabled = srcLayer.maskEnabled;
+    dstLayer.maskLinked = srcLayer.maskLinked;
+    selectLayer(targetId);
+    maskSelected_ = true;
+    endEdit();
+    return true;
 }
 
 static QImage placedBinarySelection(const QSize &canvasSize, const QImage &source, const LayerTransform &placement, bool selectDark)
@@ -1487,6 +2382,29 @@ static bool validDocumentSize(const QSize &size)
     return size.width() >= 1 && size.width() <= 30000 && size.height() >= 1 && size.height() <= 30000;
 }
 
+void EditorSession::translateCanvas(const QSize &newSize, const QPointF &offset)
+{
+    if (!document_) return;
+    for (Layer &layer : document_->layers) {
+        layer.transform.origin += offset;
+        if (layer.maskPlacement) {
+            layer.maskPlacement->origin += offset;
+        }
+    }
+    for (CanvasGuide &guide : document_->guides) {
+        guide = guide.offset(offset.x(), offset.y());
+    }
+    if (document_->selection) {
+        QImage moved(newSize, QImage::Format_Grayscale8);
+        moved.fill(0);
+        QPainter painter(&moved);
+        painter.drawImage(offset, *document_->selection);
+        painter.end();
+        document_->selection = moved;
+    }
+    document_->canvasSize = newSize;
+}
+
 bool EditorSession::resizeCanvas(const QSize &size, int anchor, const std::optional<QColor> &extension)
 {
     if (!document_ || !validDocumentSize(size) || anchor < 0 || anchor > 8) return false;
@@ -1495,12 +2413,7 @@ bool EditorSession::resizeCanvas(const QSize &size, int anchor, const std::optio
                          std::floor(double(size.height() - old.height()) * (anchor / 3) / 2.0));
     if (size == old && offset.isNull()) return false;
     beginEdit(QStringLiteral("Canvas Size"));
-    for (Layer &layer : document_->layers) layer.transform.origin += offset;
-    if (document_->selection) {
-        QImage moved(size, QImage::Format_Grayscale8); moved.fill(0);
-        QPainter painter(&moved); painter.drawImage(offset, *document_->selection); painter.end();
-        document_->selection = moved;
-    }
+    translateCanvas(size, offset);
     if (extension && (size.width() > old.width() || size.height() > old.height())) {
         QImage image(size, QImage::Format_RGBA8888_Premultiplied); image.fill(*extension);
         QPainter painter(&image); painter.setCompositionMode(QPainter::CompositionMode_Clear);
@@ -1509,7 +2422,6 @@ bool EditorSession::resizeCanvas(const QSize &size, int anchor, const std::optio
         layer.image = image; layer.transform.size = size;
         document_->layers.prepend(layer);
     }
-    document_->canvasSize = size;
     endEdit(); return true;
 }
 
@@ -1519,14 +2431,50 @@ bool EditorSession::crop(const QRect &documentRect)
         || std::abs(documentRect.y()) > 1000000) return false;
     const QPointF offset(-documentRect.x(), -documentRect.y());
     beginEdit(QStringLiteral("Crop"));
-    for (Layer &layer : document_->layers) layer.transform.origin += offset;
-    if (document_->selection) {
-        QImage cropped(documentRect.size(), QImage::Format_Grayscale8); cropped.fill(0);
-        QPainter painter(&cropped); painter.drawImage(offset, *document_->selection); painter.end();
-        document_->selection = cropped;
-    }
-    document_->canvasSize = documentRect.size();
+    translateCanvas(documentRect.size(), offset);
     endEdit(); return true;
+}
+
+bool EditorSession::trim(const TrimOptions &options)
+{
+    if (!document_ || !options.trimsAny()) return false;
+    const QImage composite = LayerRenderer::flattened(*document_);
+    const auto rectOpt = ImageTrim::calculateTrimRect(composite, options);
+    if (!rectOpt) return false;
+    const QRect rect = *rectOpt;
+    if (rect.x() == 0 && rect.y() == 0 && rect.size() == document_->canvasSize) {
+        return false;
+    }
+
+    if (!validDocumentSize(rect.size()) || std::abs(rect.x()) > 1000000 || std::abs(rect.y()) > 1000000) {
+        return false;
+    }
+
+    const QPointF offset(-rect.x(), -rect.y());
+    beginEdit(QStringLiteral("Trim"));
+    translateCanvas(rect.size(), offset);
+    endEdit();
+    return true;
+}
+
+std::optional<QRect> EditorSession::selectionBounds() const
+{
+    if (!document_ || !document_->selection) return std::nullopt;
+    const QImage mask = document_->selection->convertToFormat(QImage::Format_Grayscale8);
+    int left = mask.width(), top = mask.height(), right = -1, bottom = -1;
+    for (int y = 0; y < mask.height(); ++y) {
+        const uchar *row = mask.constScanLine(y);
+        for (int x = 0; x < mask.width(); ++x) {
+            if (row[x] > 0) {
+                left = std::min(left, x);
+                right = std::max(right, x);
+                top = std::min(top, y);
+                bottom = std::max(bottom, y);
+            }
+        }
+    }
+    if (right < left) return std::nullopt;
+    return QRect(left, top, right - left + 1, bottom - top + 1);
 }
 
 static std::array<QPointF, 4> layerCorners(const LayerTransform &value)
@@ -1718,7 +2666,7 @@ bool EditorSession::distortSelectedLayers(const std::array<QPointF, 4> &corners,
     for (const Result &result : results) {
         Layer &layer = document_->layers[result.index];
         if (result.maskOnly) { layer.mask = result.mask; layer.maskPlacement = result.maskPlacement; }
-        else { layer.image = result.image; layer.transform = result.transform; layer.mask = result.mask; layer.maskPlacement = result.maskPlacement; layer.shape = {}; }
+        else { layer.image = result.image; layer.transform = result.transform; layer.mask = result.mask; layer.maskPlacement = result.maskPlacement; rasterizeLayer(layer); }
     }
     endEdit(); return true;
 }
@@ -1759,6 +2707,9 @@ bool EditorSession::resizeImage(const QSize &size, double resolution, Sampling s
     }
     if (document_->selection && size != old) document_->selection = document_->selection->scaled(size, Qt::IgnoreAspectRatio,
         sampling == Sampling::Nearest ? Qt::FastTransformation : Qt::SmoothTransformation);
+    if (size != old) {
+        for (CanvasGuide &guide : document_->guides) guide = guide.scaled(sx, sy);
+    }
     document_->canvasSize = size; document_->resolution = resolution;
     endEdit(); return true;
 }
@@ -1806,6 +2757,7 @@ bool EditorSession::flipCanvas(bool horizontally)
     const double axis = horizontally ? document_->canvasSize.width() / 2.0 : document_->canvasSize.height() / 2.0;
     beginEdit(horizontally ? QStringLiteral("Flip Canvas Horizontal") : QStringLiteral("Flip Canvas Vertical"));
     for (Layer &layer : document_->layers) layer.transform = mirroredTransform(layer.transform, horizontally, axis);
+    for (CanvasGuide &guide : document_->guides) guide = guide.mirrored(horizontally, axis);
     if (document_->selection) document_->selection = document_->selection->flipped(
         horizontally ? Qt::Horizontal : Qt::Vertical);
     endEdit(); return true;
@@ -1977,38 +2929,151 @@ void EditorSession::addGroup()
     endEdit();
 }
 
+bool EditorSession::canSaveAdjustment(AdjustmentKind kind) const
+{
+    Q_UNUSED(kind);
+    return bool(document_);
+}
+
+bool EditorSession::canSaveAdjustment(const QString &kind) const
+{
+    const auto optKind = adjustmentKindFromString(kind);
+    return optKind.has_value() && canSaveAdjustment(*optKind);
+}
+
 bool EditorSession::addAdjustment(const QString &kind, const QJsonObject &settings)
 {
-    static const QSet<QString> kinds{QStringLiteral("Hue/Saturation"), QStringLiteral("Levels"), QStringLiteral("Curves"),
-        QStringLiteral("Exposure"), QStringLiteral("Gradient Map"), QStringLiteral("Grain")};
-    if (!document_ || document_->layers.size() >= 10000 || !kinds.contains(kind)) return false;
+    const auto optKind = adjustmentKindFromString(kind);
+    if (!document_ || document_->layers.size() >= 10000 || !optKind) return false;
+    if (!canSaveAdjustment(*optKind)) return false;
+
     Layer layer; layer.id = QUuid::createUuid(); layer.name = kind; layer.transform.size = document_->canvasSize;
     layer.adjustment = settings;
     if (kind == QStringLiteral("Grain") && !layer.adjustment.contains(QStringLiteral("grainSettings"))) {
         layer.adjustment.insert(QStringLiteral("grainSettings"), QJsonObject{{QStringLiteral("amount"), 25.0},
             {QStringLiteral("size"), 1.5}, {QStringLiteral("roughness"), 50.0},
             {QStringLiteral("seed"), double(QRandomGenerator::global()->generate())}});
+    } else if (kind == QStringLiteral("Gradient Map") && !layer.adjustment.contains(QStringLiteral("gradientMapSettings"))) {
+        layer.adjustment.insert(QStringLiteral("gradientMapSettings"), QJsonObject{
+            {QStringLiteral("shadows"), QJsonObject{{QStringLiteral("red"), 0.0}, {QStringLiteral("green"), 0.0}, {QStringLiteral("blue"), 0.0}}},
+            {QStringLiteral("highlights"), QJsonObject{{QStringLiteral("red"), 1.0}, {QStringLiteral("green"), 1.0}, {QStringLiteral("blue"), 1.0}}},
+            {QStringLiteral("reversed"), false}
+        });
+    } else if (kind == QStringLiteral("Black & White") && !layer.adjustment.contains(QStringLiteral("blackWhiteSettings"))) {
+        layer.adjustment.insert(QStringLiteral("blackWhiteSettings"), QJsonObject{
+            {QStringLiteral("reds"), 40.0}, {QStringLiteral("yellows"), 60.0}, {QStringLiteral("greens"), 40.0},
+            {QStringLiteral("cyans"), 60.0}, {QStringLiteral("blues"), 20.0}, {QStringLiteral("magentas"), 80.0},
+            {QStringLiteral("tint"), false}, {QStringLiteral("tintHue"), 40.0}, {QStringLiteral("tintSaturation"), 20.0}
+        });
+    } else if (kind == QStringLiteral("Color Balance") && !layer.adjustment.contains(QStringLiteral("colorBalanceSettings"))) {
+        layer.adjustment.insert(QStringLiteral("colorBalanceSettings"), QJsonObject{
+            {QStringLiteral("shadowCyanRed"), 0.0}, {QStringLiteral("shadowMagentaGreen"), 0.0}, {QStringLiteral("shadowYellowBlue"), 0.0},
+            {QStringLiteral("midCyanRed"), 0.0}, {QStringLiteral("midMagentaGreen"), 0.0}, {QStringLiteral("midYellowBlue"), 0.0},
+            {QStringLiteral("highlightCyanRed"), 0.0}, {QStringLiteral("highlightMagentaGreen"), 0.0}, {QStringLiteral("highlightYellowBlue"), 0.0},
+            {QStringLiteral("preserveLuminosity"), true}
+        });
+    } else if (kind == QStringLiteral("Gaussian Blur") && !layer.adjustment.contains(QStringLiteral("blurRadius"))) {
+        layer.adjustment.insert(QStringLiteral("blurRadius"), 10.0);
+    } else if (kind == QStringLiteral("Motion Blur")) {
+        if (!layer.adjustment.contains(QStringLiteral("motionAngle"))) layer.adjustment.insert(QStringLiteral("motionAngle"), 0.0);
+        if (!layer.adjustment.contains(QStringLiteral("motionDistance"))) layer.adjustment.insert(QStringLiteral("motionDistance"), 10.0);
+    } else if (kind == QStringLiteral("Add Noise")) {
+        if (!layer.adjustment.contains(QStringLiteral("noiseAmount"))) layer.adjustment.insert(QStringLiteral("noiseAmount"), 10.0);
+        if (!layer.adjustment.contains(QStringLiteral("noiseGaussian"))) layer.adjustment.insert(QStringLiteral("noiseGaussian"), false);
+        if (!layer.adjustment.contains(QStringLiteral("noiseMonochromatic"))) layer.adjustment.insert(QStringLiteral("noiseMonochromatic"), false);
+        if (!layer.adjustment.contains(QStringLiteral("noiseSeed"))) layer.adjustment.insert(QStringLiteral("noiseSeed"), double(QRandomGenerator::global()->generate()));
     }
     layer.adjustment.insert(QStringLiteral("kind"), kind);
     if (const Layer *active = activeLayer()) layer.parentId = active->group ? document_->activeLayerId : active->parentId;
     const int insertion = document_->activeLayerId ? indexOf(*document_->activeLayerId) + 1 : document_->layers.size();
-    beginEdit(QStringLiteral("New %1 Adjustment").arg(kind)); document_->layers.insert(insertion, layer); selectLayer(layer.id); endEdit(); return true;
+    beginEdit(QStringLiteral("New %1 Adjustment").arg(kind));
+    if (isVersion9Adjustment(*optKind)) {
+        document_->formatVersion = std::max(document_->formatVersion, 9);
+    }
+    document_->layers.insert(insertion, layer);
+    selectLayer(layer.id);
+    endEdit();
+    return true;
 }
 
 bool EditorSession::updateAdjustment(const QUuid &id, const QJsonObject &settings, const QString &historyName)
 {
     const int index = indexOf(id); if (index < 0 || document_->layers.at(index).adjustment.isEmpty() || settings.value(QStringLiteral("kind")).toString().isEmpty()) return false;
-    if (document_->layers.at(index).adjustment == settings) return false;
-    beginEdit(historyName); document_->layers[index].adjustment = settings; endEdit(); return true;
+    if (document_->layers.at(index).adjustment == settings) return true;
+    beginEdit(historyName);
+    const auto optKind = adjustmentKindFromString(settings.value(QStringLiteral("kind")).toString());
+    if (optKind && isVersion9Adjustment(*optKind)) {
+        document_->formatVersion = std::max(document_->formatVersion, 9);
+    }
+    document_->layers[index].adjustment = settings;
+    endEdit();
+    return true;
 }
 
 bool EditorSession::previewAdjustment(const QUuid &id, const QJsonObject &settings)
 {
-    const int index = indexOf(id); if (index < 0 || document_->layers.at(index).adjustment.isEmpty() || settings.value(QStringLiteral("kind")).toString().isEmpty()) return false;
-    document_->layers[index].adjustment = settings; return true;
+    if (!document_) return false;
+    const int index = indexOf(id);
+    if (index < 0 || document_->layers.at(index).adjustment.isEmpty() || settings.value(QStringLiteral("kind")).toString().isEmpty()) return false;
+    document_->layers[index].adjustment = settings;
+    advanceRevision();
+    return true;
+}
+
+bool EditorSession::previewLayerEffects(const QUuid &id, const std::optional<LayerEffects> &effects)
+{
+    if (!document_) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    document_->layers[index].effects = effects;
+    advanceRevision();
+    return true;
+}
+
+bool EditorSession::previewLayerImage(const QUuid &id, const QImage &image)
+{
+    if (!document_) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    document_->layers[index].image = image;
+    advanceRevision();
+    return true;
+}
+
+bool EditorSession::rollbackLayer(const QUuid &id, const Layer &originalLayer)
+{
+    if (!document_) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    document_->layers[index] = originalLayer;
+    advanceRevision();
+    return true;
+}
+
+bool EditorSession::rollbackLayerImage(const QUuid &id, const QImage &originalImage)
+{
+    if (!document_) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    document_->layers[index].image = originalImage;
+    advanceRevision();
+    return true;
+}
+
+bool EditorSession::previewCameraRaw(const QUuid &id, const CameraRawSettings &settings,
+                                    CameraRawClipping clipping)
+{
+    if (!document_) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    const Layer &layer = document_->layers.at(index);
+    if (layer.group || layer.image.isNull()) return false;
+    const QImage graded = RasterOperations::cameraRaw(layer.image, settings, clipping);
+    return previewLayerImage(id, graded);
 }
 
 QSet<QUuid> EditorSession::descendantIds(const QUuid &id) const
+
 {
     QSet<QUuid> result;
     if (!document_) return result;
@@ -2106,6 +3171,9 @@ void EditorSession::setLayerOpacity(const QUuid &id, double opacity)
     opacity = std::clamp(opacity, 0.0, 1.0);
     if (index < 0 || qFuzzyCompare(document_->layers.at(index).opacity, opacity)) return;
     beginEdit(QStringLiteral("Layer Opacity"));
+    if (document_->layers.at(index).group && opacity < 0.999999) {
+        document_->formatVersion = std::max(document_->formatVersion, 8);
+    }
     document_->layers[index].opacity = opacity;
     endEdit();
 }
@@ -2270,10 +3338,186 @@ void EditorSession::groupSelectedLayers()
     endEdit();
 }
 
+bool EditorSession::canEditEffects() const
+{
+    if (!document_ || !document_->activeLayerId) return false;
+    const int idx = indexOf(*document_->activeLayerId);
+    if (idx < 0 || idx >= document_->layers.size()) return false;
+    const Layer &l = document_->layers[idx];
+    return !l.group && l.adjustment.isEmpty() && !l.image.isNull();
+}
+
+std::optional<LayerEffects> EditorSession::activeLayerEffects() const
+{
+    if (!document_ || !document_->activeLayerId) return std::nullopt;
+    return layerEffects(*document_->activeLayerId);
+}
+
+std::optional<LayerEffects> EditorSession::layerEffects(const QUuid &id) const
+{
+    if (!document_) return std::nullopt;
+    const int idx = indexOf(id);
+    if (idx < 0 || idx >= document_->layers.size()) return std::nullopt;
+    return document_->layers[idx].effects;
+}
+
+bool EditorSession::setLayerEffects(const QUuid &id, const LayerEffects &effects, const QString &historyName)
+{
+    if (!document_ || !effects.isValid()) return false;
+    const int idx = indexOf(id);
+    if (idx < 0 || idx >= document_->layers.size()) return false;
+    const Layer &layer = document_->layers.at(idx);
+    if (layer.group || !layer.adjustment.isEmpty() || layer.image.isNull()) return false;
+
+    const std::optional<LayerEffects> newEffects = effects.isEmpty() ? std::nullopt : std::optional<LayerEffects>(effects);
+    if (layer.effects == newEffects) return true;
+
+    beginEdit(historyName.isEmpty() ? QStringLiteral("Layer Effects") : historyName);
+    document_->layers[idx].effects = newEffects;
+    endEdit();
+    return true;
+}
+
+bool EditorSession::addLayerEffect(const QUuid &id, LayerEffectKind kind)
+{
+    if (!document_ || !canEditEffects()) return false;
+    const int idx = indexOf(id);
+    if (idx < 0 || idx >= document_->layers.size()) return false;
+    LayerEffects eff = document_->layers[idx].effects.value_or(LayerEffects());
+    eff.setEnabled(kind, true);
+    switch (kind) {
+    case LayerEffectKind::Stroke:
+        if (!eff.stroke) {
+            StrokeEffect s;
+            s.enabled = true;
+            s.size = 3.0;
+            s.inside = false;
+            eff.stroke = s;
+        }
+        break;
+    case LayerEffectKind::DropShadow:
+        if (!eff.shadow) {
+            ShadowEffect s;
+            s.enabled = true;
+            eff.shadow = s;
+        }
+        break;
+    case LayerEffectKind::ColorOverlay:
+        if (!eff.colorOverlay) {
+            ColorOverlayEffect s;
+            s.enabled = true;
+            eff.colorOverlay = s;
+        }
+        break;
+    case LayerEffectKind::InnerShadow:
+        if (!eff.innerShadow) {
+            InnerShadowEffect s;
+            s.enabled = true;
+            eff.innerShadow = s;
+        }
+        break;
+    case LayerEffectKind::OuterGlow:
+        if (!eff.outerGlow) {
+            OuterGlowEffect s;
+            s.enabled = true;
+            eff.outerGlow = s;
+        }
+        break;
+    case LayerEffectKind::InnerGlow:
+        if (!eff.innerGlow) {
+            InnerGlowEffect s;
+            s.enabled = true;
+            eff.innerGlow = s;
+        }
+        break;
+    }
+    const QString name = QStringLiteral("Add ") + layerEffectKindToString(kind);
+    return setLayerEffects(id, eff, name);
+}
+
+bool EditorSession::toggleLayerEffect(const QUuid &id, LayerEffectKind kind)
+{
+    if (!document_) return false;
+    const int idx = indexOf(id);
+    if (idx < 0 || idx >= document_->layers.size()) return false;
+    Layer &layer = document_->layers[idx];
+    if (!layer.effects) return false;
+    LayerEffects eff = *layer.effects;
+    const bool enabled = eff.isEnabled(kind);
+    eff.setEnabled(kind, !enabled);
+    const QString name = (enabled ? QStringLiteral("Hide ") : QStringLiteral("Show ")) + layerEffectKindToString(kind);
+    return setLayerEffects(id, eff, name);
+}
+
+bool EditorSession::removeLayerEffect(const QUuid &id, LayerEffectKind kind)
+{
+    if (!document_) return false;
+    const int idx = indexOf(id);
+    if (idx < 0 || idx >= document_->layers.size()) return false;
+    Layer &layer = document_->layers[idx];
+    if (!layer.effects) return false;
+    LayerEffects eff = *layer.effects;
+    eff.remove(kind);
+    const QString name = QStringLiteral("Remove ") + layerEffectKindToString(kind);
+    return setLayerEffects(id, eff, name);
+}
+
+bool EditorSession::canCopyLayerEffect(LayerEffectKind kind, const QUuid &sourceId, const QUuid &targetId) const
+{
+    if (!document_ || sourceId == targetId || !canEditLayers()) return false;
+    const int srcIdx = indexOf(sourceId);
+    const int dstIdx = indexOf(targetId);
+    if (srcIdx < 0 || dstIdx < 0) return false;
+    const Layer &srcLayer = document_->layers.at(srcIdx);
+    const Layer &dstLayer = document_->layers.at(dstIdx);
+    if (!srcLayer.effects || !srcLayer.effects->contains(kind)) return false;
+    if (dstLayer.group || !dstLayer.adjustment.isEmpty() || (dstLayer.image.isNull() && !dstLayer.text && dstLayer.shape.isEmpty())) return false;
+    return true;
+}
+
+bool EditorSession::copyLayerEffect(LayerEffectKind kind, const QUuid &sourceId, const QUuid &targetId)
+{
+    if (!canCopyLayerEffect(kind, sourceId, targetId)) return false;
+    const int srcIdx = indexOf(sourceId);
+    const int dstIdx = indexOf(targetId);
+    if (srcIdx < 0 || dstIdx < 0) return false;
+    const Layer &srcLayer = document_->layers.at(srcIdx);
+    const Layer &dstLayer = document_->layers.at(dstIdx);
+    LayerEffects dstEffects = dstLayer.effects.value_or(LayerEffects());
+    switch (kind) {
+    case LayerEffectKind::Stroke: dstEffects.stroke = srcLayer.effects->stroke; break;
+    case LayerEffectKind::DropShadow: dstEffects.shadow = srcLayer.effects->shadow; break;
+    case LayerEffectKind::ColorOverlay: dstEffects.colorOverlay = srcLayer.effects->colorOverlay; break;
+    case LayerEffectKind::InnerShadow: dstEffects.innerShadow = srcLayer.effects->innerShadow; break;
+    case LayerEffectKind::OuterGlow: dstEffects.outerGlow = srcLayer.effects->outerGlow; break;
+    case LayerEffectKind::InnerGlow: dstEffects.innerGlow = srcLayer.effects->innerGlow; break;
+    }
+    return setLayerEffects(targetId, dstEffects, QStringLiteral("Copy ") + layerEffectKindToString(kind));
+}
+
+bool EditorSession::copyAllLayerEffects(const QUuid &sourceId, const QUuid &targetId)
+{
+    if (!document_ || sourceId == targetId) return false;
+    const int srcIdx = indexOf(sourceId);
+    const int dstIdx = indexOf(targetId);
+    if (srcIdx < 0 || dstIdx < 0) return false;
+    const Layer &srcLayer = document_->layers[srcIdx];
+    Layer &dstLayer = document_->layers[dstIdx];
+    if (!srcLayer.effects) return false;
+    if (dstLayer.group || !dstLayer.adjustment.isEmpty() || dstLayer.image.isNull()) return false;
+    return setLayerEffects(targetId, *srcLayer.effects, QStringLiteral("Copy Layer Effects"));
+}
+
+bool EditorSession::clearLayerEffects(const QUuid &id)
+{
+    return setLayerEffects(id, LayerEffects(), QStringLiteral("Clear Layer Effects"));
+}
+
 void EditorSession::restore(const DocumentHistory::Snapshot &snapshot)
 {
     const bool keepMaskTarget = maskSelected_ && document_ && document_->activeLayerId == snapshot.activeLayerId;
     document_ = snapshot.document ? std::make_shared<Document>(*snapshot.document) : nullptr;
+    advanceRevision();
     selectedLayerIds_.clear();
     if (document_ && snapshot.activeLayerId) {
         document_->activeLayerId = snapshot.activeLayerId;
@@ -2291,6 +3535,279 @@ void EditorSession::undo()
 void EditorSession::redo()
 {
     if (const auto value = history_.redo()) restore(*value);
+}
+
+bool EditorSession::canClearGuides() const
+{
+    return document_ && !document_->guides.isEmpty();
+}
+
+bool EditorSession::canEditGuides() const
+{
+    return document_ != nullptr && !locksGuides_;
+}
+
+QVector<CanvasGuide> EditorSession::displayedGuides() const
+{
+    QVector<CanvasGuide> guides = document_ ? document_->guides : QVector<CanvasGuide>{};
+    if (!guideDrag_) return guides;
+    CanvasGuide current;
+    current.id = guideDrag_->id;
+    current.axis = guideDrag_->axis;
+    current.position = guideDrag_->position;
+    bool found = false;
+    for (int i = 0; i < guides.size(); ++i) {
+        if (guides[i].id == guideDrag_->id) {
+            guides[i] = current;
+            found = true;
+            break;
+        }
+    }
+    if (!found && guideDrag_->isNew) {
+        guides.append(current);
+    }
+    return guides;
+}
+
+std::optional<CanvasGuide> EditorSession::hitGuide(const QPointF &docPoint, double tolerance) const
+{
+    if (!showsGuides_ || locksGuides_ || !document_) return std::nullopt;
+    std::optional<CanvasGuide> best;
+    double bestDist = tolerance + 1.0;
+    for (const CanvasGuide &guide : displayedGuides()) {
+        const double dist = (guide.axis == CanvasGuide::Axis::Vertical)
+            ? std::abs(docPoint.x() - guide.position)
+            : std::abs(docPoint.y() - guide.position);
+        if (dist <= tolerance && dist < bestDist) {
+            best = guide;
+            bestDist = dist;
+        }
+    }
+    return best;
+}
+
+void EditorSession::beginGuideCreation(CanvasGuide::Axis axis, double position)
+{
+    if (!canEditGuides()) return;
+    showsGuides_ = true;
+    GuideDrag drag;
+    drag.id = QUuid::createUuid();
+    drag.axis = axis;
+    drag.position = snappedGuidePosition(position, axis, std::nullopt);
+    drag.isNew = true;
+    drag.original = std::nullopt;
+    guideDrag_ = drag;
+}
+
+void EditorSession::beginGuideMove(const CanvasGuide &guide)
+{
+    if (!canEditGuides()) return;
+    GuideDrag drag;
+    drag.id = guide.id;
+    drag.axis = guide.axis;
+    drag.position = guide.position;
+    drag.isNew = false;
+    drag.original = guide.position;
+    guideDrag_ = drag;
+}
+
+void EditorSession::moveGuideDrag(double position)
+{
+    if (!guideDrag_) return;
+    guideDrag_->position = snappedGuidePosition(position, guideDrag_->axis, guideDrag_->id);
+}
+
+void EditorSession::finishGuideDrag(bool deleteGuide)
+{
+    if (!guideDrag_ || !document_) {
+        guideDrag_ = std::nullopt;
+        return;
+    }
+    const GuideDrag drag = *guideDrag_;
+    guideDrag_ = std::nullopt;
+
+    if (deleteGuide) {
+        if (drag.isNew) return;
+        beginEdit(QStringLiteral("Delete Guide"));
+        for (auto it = document_->guides.begin(); it != document_->guides.end(); ) {
+            if (it->id == drag.id) it = document_->guides.erase(it);
+            else ++it;
+        }
+        endEdit();
+        return;
+    }
+
+    if (drag.isNew) {
+        beginEdit(QStringLiteral("New Guide"));
+        if (document_->formatVersion < 8) document_->formatVersion = 8;
+        CanvasGuide guide;
+        guide.id = drag.id;
+        guide.axis = drag.axis;
+        guide.position = drag.position;
+        document_->guides.append(guide);
+        endEdit();
+    } else if (!drag.original || *drag.original != drag.position) {
+        beginEdit(QStringLiteral("Move Guide"));
+        for (auto &g : document_->guides) {
+            if (g.id == drag.id) {
+                g.position = drag.position;
+                break;
+            }
+        }
+        endEdit();
+    }
+}
+
+void EditorSession::cancelGuideDrag()
+{
+    guideDrag_ = std::nullopt;
+}
+
+void EditorSession::clearGuides()
+{
+    if (!canClearGuides() || !document_) return;
+    beginEdit(QStringLiteral("Clear Guides"));
+    document_->guides.clear();
+    endEdit();
+}
+
+void EditorSession::addGuide(const CanvasGuide &guide)
+{
+    if (!canEditGuides() || !document_) return;
+    showsGuides_ = true;
+    beginEdit(QStringLiteral("New Guide"));
+    if (document_->formatVersion < 8) document_->formatVersion = 8;
+    document_->guides.append(guide);
+    endEdit();
+}
+
+double EditorSession::snappedGuidePosition(double position, CanvasGuide::Axis axis,
+                                          const std::optional<QUuid> &excluding,
+                                          double tolerance) const
+{
+    if (!snapEnabled_ || !document_) return position;
+    QVector<double> targets;
+    const double length = (axis == CanvasGuide::Axis::Vertical)
+        ? double(document_->canvasSize.width())
+        : double(document_->canvasSize.height());
+
+    if (snapToGrid_ && showsGrid_) {
+        targets += LayoutGrid::lines(length);
+    }
+    if (snapToGuides_ && showsGuides_) {
+        for (const CanvasGuide &g : displayedGuides()) {
+            if (g.axis == axis && (!excluding || g.id != *excluding)) {
+                targets.append(g.position);
+            }
+        }
+    }
+    if (snapToDocumentBounds_) {
+        targets.append(0.0);
+        targets.append(length / 2.0);
+        targets.append(length);
+    }
+    if (snapToLayers_) {
+        for (const Layer &layer : document_->layers) {
+            if (layer.group || layer.image.isNull() || !layer.transform.isValid()) continue;
+            const auto corners = layerCorners(layer.transform);
+            double minV = (axis == CanvasGuide::Axis::Vertical) ? corners[0].x() : corners[0].y();
+            double maxV = minV;
+            for (int i = 1; i < 4; ++i) {
+                const double v = (axis == CanvasGuide::Axis::Vertical) ? corners[i].x() : corners[i].y();
+                minV = std::min(minV, v);
+                maxV = std::max(maxV, v);
+            }
+            targets.append(std::round(minV));
+            targets.append(std::round((minV + maxV) / 2.0));
+            targets.append(std::round(maxV));
+        }
+    }
+    std::optional<double> best;
+    double bestDiff = tolerance + 1.0;
+    for (double target : targets) {
+        const double diff = std::abs(target - position);
+        if (diff <= tolerance) {
+            if (!best || diff < bestDiff) {
+                best = target;
+                bestDiff = diff;
+            }
+        }
+    }
+    return best.value_or(position);
+}
+
+EditorSession::SnapTargets EditorSession::alignmentSnapTargets(const QSet<QUuid> &excludingLayers, bool includeCenters) const
+{
+    if (!snapEnabled_ || !document_) return {};
+    QVector<double> xs;
+    QVector<double> ys;
+
+    if (snapToDocumentBounds_) {
+        xs.append(0.0);
+        xs.append(double(document_->canvasSize.width()));
+        ys.append(0.0);
+        ys.append(double(document_->canvasSize.height()));
+        if (includeCenters) {
+            xs.append(double(document_->canvasSize.width()) / 2.0);
+            ys.append(double(document_->canvasSize.height()) / 2.0);
+        }
+    }
+
+    if (snapToLayers_) {
+        for (const Layer &layer : document_->layers) {
+            if (layer.group || layer.image.isNull() || !layer.transform.isValid() || excludingLayers.contains(layer.id)) continue;
+            const auto corners = layerCorners(layer.transform);
+            double minX = corners[0].x(), maxX = corners[0].x();
+            double minY = corners[0].y(), maxY = corners[0].y();
+            for (int i = 1; i < 4; ++i) {
+                minX = std::min(minX, corners[i].x());
+                maxX = std::max(maxX, corners[i].x());
+                minY = std::min(minY, corners[i].y());
+                maxY = std::max(maxY, corners[i].y());
+            }
+            if (includeCenters) {
+                xs.append(std::round(minX));
+                xs.append(std::round((minX + maxX) / 2.0));
+                xs.append(std::round(maxX));
+                ys.append(std::round(minY));
+                ys.append(std::round((minY + maxY) / 2.0));
+                ys.append(std::round(maxY));
+            } else {
+                xs.append(std::round(minX));
+                xs.append(std::round(maxX));
+                ys.append(std::round(minY));
+                ys.append(std::round(maxY));
+            }
+        }
+    }
+
+    // Hidden extras do not snap, matching Photoshop.
+    if (snapToGrid_ && showsGrid_) {
+        xs += LayoutGrid::lines(document_->canvasSize.width());
+        ys += LayoutGrid::lines(document_->canvasSize.height());
+    }
+
+    if (snapToGuides_ && showsGuides_) {
+        for (const CanvasGuide &guide : displayedGuides()) {
+            if (guide.axis == CanvasGuide::Axis::Vertical) {
+                xs.append(guide.position);
+            } else {
+                ys.append(guide.position);
+            }
+        }
+    }
+
+    return {xs, ys};
+}
+
+QVector<double> EditorSession::cropSnapTargetsX() const
+{
+    return alignmentSnapTargets({}, false).xs;
+}
+
+QVector<double> EditorSession::cropSnapTargetsY() const
+{
+    return alignmentSnapTargets({}, false).ys;
 }
 
 } // namespace compositor

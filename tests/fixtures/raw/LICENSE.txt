@@ -1,0 +1,6 @@
+Fixture: sample.kdc (Kodak DC120 RAW Image)
+Source: https://raw.pixls.us/data/Kodak/DC120/RAW_KODAK_DC120_WITH_JPEG.KDC
+License: Creative Commons Zero v1.0 Universal (CC0 1.0) Public Domain Dedication
+https://creativecommons.org/publicdomain/zero/1.0/
+
+This RAW image file was submitted to raw.pixls.us and released by its copyright holder under the CC0 license into the public domain. It is used as a test fixture for LibRaw decoding, metadata extraction, preview generation, and error-handling verification.

@@ -74,15 +74,34 @@ void LayerListModel::setDocument(std::shared_ptr<Document> document, bool reset)
     endResetModel();
 }
 
+QVector<LayerListModel::Item> LayerListModel::visibleItems() const
+{
+    QVector<Item> result;
+    if (!document_) return result;
+    const QVector<int> indexes = visibleLayerIndexes();
+    for (int i : indexes) {
+        const Layer &layer = document_->layers.at(i);
+        result.push_back({false, i, layer.id, LayerEffectKind::Stroke});
+        if (layer.effects.has_value() && !layer.effects->isEmpty()) {
+            if (!effectsCollapsed_.contains(layer.id)) {
+                for (LayerEffectKind kind : layer.effects->kinds()) {
+                    result.push_back({true, i, layer.id, kind});
+                }
+            }
+        }
+    }
+    return result;
+}
+
 int LayerListModel::rowCount(const QModelIndex &parent) const
 {
-    return parent.isValid() || !document_ ? 0 : visibleLayerIndexes().size();
+    return parent.isValid() || !document_ ? 0 : visibleItems().size();
 }
 
 int LayerListModel::layerIndex(int row) const
 {
-    const QVector<int> indexes = visibleLayerIndexes();
-    return row >= 0 && row < indexes.size() ? indexes.at(row) : -1;
+    const QVector<Item> items = visibleItems();
+    return row >= 0 && row < items.size() ? items.at(row).layerIndex : -1;
 }
 
 QVector<int> LayerListModel::visibleLayerIndexes() const
@@ -120,8 +139,26 @@ int LayerListModel::depthFor(const Layer &layer) const
 
 std::optional<QUuid> LayerListModel::layerId(const QModelIndex &index) const
 {
-    const int i = index.isValid() ? layerIndex(index.row()) : -1;
-    return document_ && i >= 0 && i < document_->layers.size() ? std::optional<QUuid>(document_->layers.at(i).id) : std::nullopt;
+    if (!document_ || !index.isValid()) return std::nullopt;
+    const QVector<Item> items = visibleItems();
+    return index.row() >= 0 && index.row() < items.size() ? std::optional<QUuid>(items.at(index.row()).layerId) : std::nullopt;
+}
+
+bool LayerListModel::isEffect(const QModelIndex &index) const
+{
+    if (!document_ || !index.isValid()) return false;
+    const QVector<Item> items = visibleItems();
+    return index.row() >= 0 && index.row() < items.size() ? items.at(index.row()).isEffect : false;
+}
+
+std::optional<LayerEffectKind> LayerListModel::effectKind(const QModelIndex &index) const
+{
+    if (!document_ || !index.isValid()) return std::nullopt;
+    const QVector<Item> items = visibleItems();
+    if (index.row() >= 0 && index.row() < items.size() && items.at(index.row()).isEffect) {
+        return items.at(index.row()).effectKind;
+    }
+    return std::nullopt;
 }
 
 void LayerListModel::toggleExpanded(const QUuid &id)
@@ -134,10 +171,41 @@ void LayerListModel::toggleExpanded(const QUuid &id)
     endResetModel();
 }
 
+void LayerListModel::toggleEffectsExpanded(const QUuid &id)
+{
+    if (!document_) return;
+    beginResetModel();
+    if (effectsCollapsed_.contains(id)) effectsCollapsed_.remove(id); else effectsCollapsed_.insert(id);
+    endResetModel();
+}
+
 QVariant LayerListModel::data(const QModelIndex &index, int role) const
 {
-    if (!document_ || !index.isValid() || index.row() < 0 || index.row() >= document_->layers.size()) return {};
-    const Layer &layer = document_->layers.at(layerIndex(index.row()));
+    if (!document_ || !index.isValid()) return {};
+    const QVector<Item> items = visibleItems();
+    if (index.row() < 0 || index.row() >= items.size()) return {};
+    const Item &item = items.at(index.row());
+    if (item.layerIndex < 0 || item.layerIndex >= document_->layers.size()) return {};
+    const Layer &layer = document_->layers.at(item.layerIndex);
+
+    if (role == IsEffectRole) return item.isEffect;
+    if (role == EffectKindRole) return static_cast<int>(item.effectKind);
+    if (role == HasEffectsRole) return layer.effects.has_value() && !layer.effects->isEmpty();
+    if (role == EffectsExpandedRole) return !effectsCollapsed_.contains(layer.id);
+
+    if (item.isEffect) {
+        const bool enabled = layer.effects.has_value() && layer.effects->isEnabled(item.effectKind);
+        if (role == Qt::DisplayRole) return layerEffectKindToString(item.effectKind);
+        if (role == Qt::CheckStateRole) return enabled ? Qt::Checked : Qt::Unchecked;
+        if (role == Qt::ToolTipRole) {
+            return QStringLiteral("%1 (%2)").arg(layerEffectKindToString(item.effectKind),
+                                                 enabled ? tr("Enabled") : tr("Disabled"));
+        }
+        if (role == Qt::UserRole) return tr("Effect");
+        if (role == Qt::UserRole + 1) return depthFor(layer);
+        return {};
+    }
+
     if (role == Qt::DisplayRole) return layer.name;
     if (role == Qt::CheckStateRole) return layer.visible ? Qt::Checked : Qt::Unchecked;
     if (role == Qt::DecorationRole) {
@@ -165,7 +233,20 @@ QVariant LayerListModel::data(const QModelIndex &index, int role) const
 bool LayerListModel::setData(const QModelIndex &index, const QVariant &value, int role)
 {
     if (!document_ || !index.isValid()) return false;
-    const Layer &layer = document_->layers.at(layerIndex(index.row()));
+    const QVector<Item> items = visibleItems();
+    if (index.row() < 0 || index.row() >= items.size()) return false;
+    const Item &item = items.at(index.row());
+    if (item.layerIndex < 0 || item.layerIndex >= document_->layers.size()) return false;
+    const Layer &layer = document_->layers.at(item.layerIndex);
+
+    if (item.isEffect) {
+        if (role == Qt::CheckStateRole) {
+            emit effectVisibilityToggleRequested(layer.id, item.effectKind);
+            return true;
+        }
+        return false;
+    }
+
     if (role == Qt::EditRole) {
         const QString name = value.toString().trimmed();
         if (name.isEmpty() || name == layer.name) return false;
@@ -181,25 +262,69 @@ bool LayerListModel::setData(const QModelIndex &index, const QVariant &value, in
 Qt::ItemFlags LayerListModel::flags(const QModelIndex &index) const
 {
     if (!index.isValid()) return Qt::ItemIsDropEnabled;
+    const QVector<Item> items = visibleItems();
+    if (index.row() >= 0 && index.row() < items.size() && items.at(index.row()).isEffect) {
+        return Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled;
+    }
     return QAbstractListModel::flags(index) | Qt::ItemIsEditable | Qt::ItemIsUserCheckable | Qt::ItemIsSelectable | Qt::ItemIsEnabled
         | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled;
 }
 
-QStringList LayerListModel::mimeTypes() const { return {QStringLiteral("application/x-compositor-layers")}; }
+QStringList LayerListModel::mimeTypes() const
+{
+    return {
+        QStringLiteral("application/x-compositor-layers"),
+        QStringLiteral("com.compositor.layer-row"),
+        QStringLiteral("application/x-compositor-layer-mask"),
+        QStringLiteral("com.compositor.layer-mask"),
+        QStringLiteral("application/x-compositor-layer-effect"),
+        QStringLiteral("com.compositor.layer-effect")
+    };
+}
 
 QMimeData *LayerListModel::mimeData(const QModelIndexList &indexes) const
 {
     auto *mime = new QMimeData;
-    if (!document_) return mime;
-    QVector<int> rows; for (const QModelIndex &index : indexes) if (index.isValid() && !rows.contains(index.row())) rows.push_back(index.row());
+    if (!document_ || indexes.isEmpty()) return mime;
+
+    if (indexes.size() == 1 && isEffect(indexes.first())) {
+        const QModelIndex &idx = indexes.first();
+        const auto id = layerId(idx);
+        const auto kind = effectKind(idx);
+        if (id && kind) {
+            const QString effectStr = id->toString(QUuid::WithoutBraces) + QStringLiteral(":") + layerEffectKindToString(*kind);
+            const QByteArray data = effectStr.toUtf8();
+            mime->setData(QStringLiteral("application/x-compositor-layer-effect"), data);
+            mime->setData(QStringLiteral("com.compositor.layer-effect"), data);
+            return mime;
+        }
+    }
+
+    QVector<int> rows;
+    for (const QModelIndex &index : indexes) {
+        if (index.isValid() && !rows.contains(index.row()) && !isEffect(index)) {
+            rows.push_back(index.row());
+        }
+    }
     std::sort(rows.begin(), rows.end());
-    QSet<QUuid> selected; for (int row : rows) { const int i=layerIndex(row); if(i>=0) selected.insert(document_->layers.at(i).id); }
+    QSet<QUuid> selected;
+    for (int row : rows) {
+        const int i = layerIndex(row);
+        if (i >= 0 && i < document_->layers.size()) {
+            selected.insert(document_->layers.at(i).id);
+        }
+    }
     QByteArray encoded;
     for (int row : rows) {
-        const Layer &layer = document_->layers.at(layerIndex(row)); bool carried = false; std::optional<QUuid> parent = layer.parentId;
+        const int i = layerIndex(row);
+        if (i < 0 || i >= document_->layers.size()) continue;
+        const Layer &layer = document_->layers.at(i);
+        bool carried = false;
+        std::optional<QUuid> parent = layer.parentId;
         while (parent) {
             if (selected.contains(*parent)) { carried = true; break; }
-            const auto it = std::find_if(document_->layers.cbegin(), document_->layers.cend(), [&](const Layer &candidate) { return candidate.id == *parent; });
+            const auto it = std::find_if(document_->layers.cbegin(), document_->layers.cend(),
+                                         [&](const Layer &cand) { return cand.id == *parent; });
             parent = it == document_->layers.cend() ? std::nullopt : it->parentId;
         }
         if (carried) continue;
@@ -207,37 +332,157 @@ QMimeData *LayerListModel::mimeData(const QModelIndexList &indexes) const
         encoded += layer.id.toString(QUuid::WithoutBraces).toUtf8();
     }
     mime->setData(QStringLiteral("application/x-compositor-layers"), encoded);
+    mime->setData(QStringLiteral("com.compositor.layer-row"), encoded);
     return mime;
+}
+
+bool LayerListModel::canCopyMask(const QUuid &sourceId, const QUuid &targetId) const
+{
+    if (!document_ || sourceId == targetId) return false;
+    const Layer *src = nullptr;
+    const Layer *dst = nullptr;
+    for (const Layer &l : document_->layers) {
+        if (l.id == sourceId) src = &l;
+        if (l.id == targetId) dst = &l;
+    }
+    if (!src || !dst) return false;
+    return !src->mask.isNull() && !dst->group;
+}
+
+bool LayerListModel::canCopyEffect(LayerEffectKind kind, const QUuid &sourceId, const QUuid &targetId) const
+{
+    if (!document_ || sourceId == targetId) return false;
+    const Layer *src = nullptr;
+    const Layer *dst = nullptr;
+    for (const Layer &l : document_->layers) {
+        if (l.id == sourceId) src = &l;
+        if (l.id == targetId) dst = &l;
+    }
+    if (!src || !dst) return false;
+    if (!src->effects || !src->effects->contains(kind)) return false;
+    if (dst->group || !dst->adjustment.isEmpty() || (dst->image.isNull() && !dst->text && dst->shape.isEmpty())) return false;
+    return true;
 }
 
 bool LayerListModel::canDropMimeData(const QMimeData *data, Qt::DropAction action, int row, int column,
                                      const QModelIndex &parent) const
 {
     Q_UNUSED(column)
-    return document_ && data && data->hasFormat(QStringLiteral("application/x-compositor-layers"))
-        && (action == Qt::MoveAction || action == Qt::CopyAction) && row <= rowCount() && (!parent.isValid() || parent.row() < rowCount());
+    if (!document_ || !data) return false;
+
+    if (data->hasFormat(QStringLiteral("application/x-compositor-layer-mask"))
+        || data->hasFormat(QStringLiteral("com.compositor.layer-mask"))) {
+        const int targetRow = parent.isValid() ? parent.row() : row;
+        if (targetRow < 0 || targetRow >= rowCount()) return false;
+        const auto target = layerId(index(targetRow, 0));
+        if (!target) return false;
+        const QByteArray raw = data->hasFormat(QStringLiteral("application/x-compositor-layer-mask"))
+            ? data->data(QStringLiteral("application/x-compositor-layer-mask"))
+            : data->data(QStringLiteral("com.compositor.layer-mask"));
+        const QUuid sourceId(QString::fromUtf8(raw).trimmed());
+        if (sourceId.isNull()) return false;
+        return canCopyMask(sourceId, *target);
+    }
+
+    if (data->hasFormat(QStringLiteral("application/x-compositor-layer-effect"))
+        || data->hasFormat(QStringLiteral("com.compositor.layer-effect"))) {
+        const int targetRow = parent.isValid() ? parent.row() : row;
+        if (targetRow < 0 || targetRow >= rowCount()) return false;
+        const auto target = layerId(index(targetRow, 0));
+        if (!target) return false;
+        const QByteArray raw = data->hasFormat(QStringLiteral("application/x-compositor-layer-effect"))
+            ? data->data(QStringLiteral("application/x-compositor-layer-effect"))
+            : data->data(QStringLiteral("com.compositor.layer-effect"));
+        const QString str = QString::fromUtf8(raw).trimmed();
+        const int colon = str.indexOf(QLatin1Char(':'));
+        if (colon <= 0) return false;
+        const QUuid sourceId(str.left(colon));
+        const auto kind = layerEffectKindFromString(str.mid(colon + 1));
+        if (sourceId.isNull() || !kind) return false;
+        return canCopyEffect(*kind, sourceId, *target);
+    }
+
+    if (data->hasFormat(QStringLiteral("application/x-compositor-layers"))
+        || data->hasFormat(QStringLiteral("com.compositor.layer-row"))) {
+        return (action == Qt::MoveAction || action == Qt::CopyAction)
+            && row <= rowCount() && (!parent.isValid() || parent.row() < rowCount());
+    }
+
+    return false;
 }
 
 bool LayerListModel::dropMimeData(const QMimeData *data, Qt::DropAction action, int row, int column,
                                   const QModelIndex &parent)
 {
     if (!canDropMimeData(data, action, row, column, parent)) return false;
-    QVector<QUuid> ids;
-    for (const QByteArray &part : data->data(QStringLiteral("application/x-compositor-layers")).split('\n')) {
-        const QUuid id(QString::fromUtf8(part)); if (!id.isNull() && !ids.contains(id)) ids.push_back(id);
+
+    if (data->hasFormat(QStringLiteral("application/x-compositor-layer-mask"))
+        || data->hasFormat(QStringLiteral("com.compositor.layer-mask"))) {
+        const int targetRow = parent.isValid() ? parent.row() : row;
+        if (targetRow < 0 || targetRow >= rowCount()) return false;
+        const auto target = layerId(index(targetRow, 0));
+        if (!target) return false;
+        const QByteArray raw = data->hasFormat(QStringLiteral("application/x-compositor-layer-mask"))
+            ? data->data(QStringLiteral("application/x-compositor-layer-mask"))
+            : data->data(QStringLiteral("com.compositor.layer-mask"));
+        const QUuid sourceId(QString::fromUtf8(raw).trimmed());
+        if (sourceId.isNull()) return false;
+        emit maskDropRequested(sourceId, *target);
+        return true;
     }
-    if (ids.isEmpty()) return false;
-    QUuid parentId, aboveId; bool atBottom = false;
-    if (parent.isValid()) {
-        const Layer &target = document_->layers.at(layerIndex(parent.row()));
-        if (target.group) parentId = target.id;
-        else { parentId = target.parentId.value_or(QUuid()); aboveId = target.id; }
-    } else if (row >= rowCount()) atBottom = true;
-    else if (row >= 0) {
-        const Layer &target = document_->layers.at(layerIndex(row)); parentId = target.parentId.value_or(QUuid()); aboveId = target.id;
+
+    if (data->hasFormat(QStringLiteral("application/x-compositor-layer-effect"))
+        || data->hasFormat(QStringLiteral("com.compositor.layer-effect"))) {
+        const int targetRow = parent.isValid() ? parent.row() : row;
+        if (targetRow < 0 || targetRow >= rowCount()) return false;
+        const auto target = layerId(index(targetRow, 0));
+        if (!target) return false;
+        const QByteArray raw = data->hasFormat(QStringLiteral("application/x-compositor-layer-effect"))
+            ? data->data(QStringLiteral("application/x-compositor-layer-effect"))
+            : data->data(QStringLiteral("com.compositor.layer-effect"));
+        const QString str = QString::fromUtf8(raw).trimmed();
+        const int colon = str.indexOf(QLatin1Char(':'));
+        if (colon <= 0) return false;
+        const QUuid sourceId(str.left(colon));
+        const auto kind = layerEffectKindFromString(str.mid(colon + 1));
+        if (sourceId.isNull() || !kind) return false;
+        emit effectDropRequested(sourceId, *kind, *target);
+        return true;
     }
-    emit layersDropRequested(ids, parentId, aboveId, atBottom, action == Qt::CopyAction);
-    return true;
+
+    if (data->hasFormat(QStringLiteral("application/x-compositor-layers"))
+        || data->hasFormat(QStringLiteral("com.compositor.layer-row"))) {
+        const QByteArray raw = data->hasFormat(QStringLiteral("application/x-compositor-layers"))
+            ? data->data(QStringLiteral("application/x-compositor-layers"))
+            : data->data(QStringLiteral("com.compositor.layer-row"));
+        QVector<QUuid> ids;
+        for (const QByteArray &part : raw.split('\n')) {
+            const QUuid id(QString::fromUtf8(part).trimmed());
+            if (!id.isNull() && !ids.contains(id)) ids.push_back(id);
+        }
+        if (ids.isEmpty()) return false;
+        QUuid parentId, aboveId; bool atBottom = false;
+        if (parent.isValid()) {
+            const int targetIdx = layerIndex(parent.row());
+            if (targetIdx >= 0 && targetIdx < document_->layers.size()) {
+                const Layer &target = document_->layers.at(targetIdx);
+                if (target.group) parentId = target.id;
+                else { parentId = target.parentId.value_or(QUuid()); aboveId = target.id; }
+            }
+        } else if (row >= rowCount()) {
+            atBottom = true;
+        } else if (row >= 0) {
+            const int targetIdx = layerIndex(row);
+            if (targetIdx >= 0 && targetIdx < document_->layers.size()) {
+                const Layer &target = document_->layers.at(targetIdx);
+                parentId = target.parentId.value_or(QUuid()); aboveId = target.id;
+            }
+        }
+        emit layersDropRequested(ids, parentId, aboveId, atBottom, action == Qt::CopyAction);
+        return true;
+    }
+
+    return false;
 }
 
 } // namespace compositor

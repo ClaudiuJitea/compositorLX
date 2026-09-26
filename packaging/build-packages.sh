@@ -26,6 +26,7 @@ done
 cmake -S "$source_dir" -B "$work_dir" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release
 cmake --build "$work_dir" --parallel "$(nproc)"
+ctest --test-dir "$work_dir" --output-on-failure
 
 mkdir -p "$output_dir"
 (cd "$work_dir" && cpack -G DEB)

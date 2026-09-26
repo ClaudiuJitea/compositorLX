@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.3.0-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -20,65 +21,81 @@
   <img src="docs/screenshots/editor.png" alt="CompositorLX editor with layered composition, tools, and layer stack" width="920">
 </p>
 
-CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
+CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v9), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
+
+## What's new in version 0.3.0
+
+- **Camera RAW development**: Open and develop RAW camera files (`.raw`, `.dng`, `.cr2`, `.nef`, `.arw`) with non-destructive exposure, white balance, tint, highlights, shadows, and optics
+- **Layer effects & styles**: Live Stroke, Drop Shadow, Inner Shadow, Outer Glow, Inner Glow, and Color Overlay with real-time preview
+- **Vector shape layers**: Rectangle, Ellipse, and Line vector shapes with editable stroke and fill
+- **New import formats**: Import Adobe Photoshop `.psd` files and vector `.svg` / `.svgz` graphics
+- **Canvas rulers & guides**: Draggable horizontal and vertical guides with snapping and layout grid
+- **Inline WYSIWYG text**: On-canvas text editing with alignment (left/center/right) and bounding boxes
+- **Expanded adjustments & trim**: New adjustment layers, Image Trim, and customizable keyboard shortcuts
+- **Project format v9**: Support for project format v9 with backward compatibility (v1–v9) and atomic saving
 
 ## Features
 
-### Layers
+### Layers and effects
 - Layers and folders with blend modes, opacity, visibility swipe, and inline rename
+- **Layer styles / effects**: Stroke, Drop Shadow, Inner Shadow, Outer Glow, Inner Glow, and Color Overlay with live preview
 - Layer masks you can paint, fill, invert, link, unlink, and transform on their own
 - Clipping stacks and folder masks
-- Live adjustment layers: Hue/Saturation, Levels, Curves, Exposure, Gradient Map, Grain
 - Merge down / selection / group, flatten, duplicate, and drag layers between project tabs
 
-### Transform
+### Transform and vector shapes
 - Non-destructive move, scale, rotate, and flip — source pixels keep their resolution
+- **Vector shape layers**: Rectangle, Ellipse, and Line with editable fill, stroke, and corner radius
 - Free-corner distortion, multi-layer and folder transforms, snapping guides
-- Numeric position, size, scale, and rotation with keyboard nudging
+- Numeric position, size, scale, and rotation with keyboard nudging and scrubbable fields
 - Flip layer or canvas, horizontally and vertically
 
 ### Selections
 - Rectangular and elliptical marquee, freehand and polygonal lasso, magic wand
-- Add / subtract / intersect, move the outline, or move and duplicate the pixels inside
+- Add / subtract, move the outline, or move and duplicate the pixels inside
 - Load a layer’s pixels or a mask as a selection
 - Content-aware fill, including extending past a layer’s edges
 
 ### Painting and retouching
 - Brush and eraser with size, hardness, opacity, and Shift for straight lines
 - Spot healing brush and clone stamp (aligned or not, this layer or all layers)
-- Blur, gradient, and shape tools (rectangle, rounded rectangle, ellipse)
-- Live WYSIWYG text, eyedropper with sample ring, and a persistent color picker
+- Blur, gradient, and shape tools
+- **Inline WYSIWYG text**: on-canvas text editing, alignment (left/center/right), bounded text boxes, and typography controls
+- Eyedropper with sample ring, and a persistent color picker
 
 <p align="center">
   <img src="docs/screenshots/text-tool.png" alt="WYSIWYG text tool with live preview on a transparent canvas" width="920">
 </p>
 
-### Adjustments and filters
-- Levels (with Auto), Curves, Hue/Saturation, Exposure, Gradient Map, Grain, Invert
-- Gaussian blur and motion blur that spread past a layer’s edges
-- Add noise, lens correction, and **Remove Background** — local ONNX + U²-Net, no web service
+### Adjustments and Camera RAW
+- **Camera RAW development**: open and develop RAW camera files (`.raw`, `.dng`, `.cr2`, `.nef`, `.arw`, etc.) with non-destructive exposure, white balance, tint, highlights, shadows, vibrance, saturation, and lens optics
+- Live adjustment layers: Levels (with Auto), Curves, Hue/Saturation, Exposure, Color Balance, Brightness/Contrast, Vibrance, Black & White, Gradient Map, Selective Color, Invert, Posterize, Threshold
+- Gaussian blur, motion blur, add noise, lens correction
+- **Remove Background**: local ONNX + U²-Net, no web service
 - Live previews, limited to the selection when one exists
 
-### Canvas and files
+### Canvas, rulers, and files
+- Canvas rulers with draggable horizontal and vertical guides, snapping, and layout grid
+- **Image Trim**: trim transparent borders or sample edge colors
 - Multiple projects in tabs, with cross-tab layer copy and recovery
 - Crop with snapping and Alt symmetry, plus Canvas Size and Image Size
-- Sharp downsampling when zoomed out, optional pixel grid when zoomed in
-- Import PNG, JPEG, TIFF, and HEIC/HEIF; export PNG and JPEG with sRGB rasterization
-- Photoshop-style shortcuts, autosave, and atomic Save / Save As
+- **Expanded format support**: native `.comp` (v1–v9 compatibility), Adobe Photoshop `.psd`, vector `.svg` / `.svgz`, Camera RAW, PNG, JPEG, TIFF, and HEIC/HEIF
+- **Customizable keyboard shortcuts** dialog with searchable actions
+- External file change detection, conflict warning, and atomic crash-resilient saving
 
 ## Install
 
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.2.0-x86_64.AppImage
-./CompositorLX-0.2.0-x86_64.AppImage
+chmod +x CompositorLX-0.3.0-x86_64.AppImage
+./CompositorLX-0.3.0-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.2.0_amd64.deb
+sudo apt install ./compositorlx_0.3.0_amd64.deb
 compositor-lx
 ```
 
@@ -95,7 +112,7 @@ Finished files land in `artifacts/`. Packages include the executable, the local 
 **Ubuntu / Debian**
 
 ```sh
-sudo apt install qt6-base-dev qt6-image-formats-plugins libheif-dev cmake ninja-build
+sudo apt install qt6-base-dev qt6-image-formats-plugins libheif-dev libraw-dev zlib1g-dev cmake ninja-build
 ```
 
 ```sh
@@ -116,14 +133,22 @@ cmake --install build --prefix "$HOME/.local"
 
 | Path | What it is |
 | --- | --- |
-| `src/core` | Document, history, and editor commands |
-| `src/io` | `.comp` v1–v7 reader/writer, import, export |
-| `src/rendering` | Compositing, caches, filters, local subject removal |
-| `src/ui` | Qt Widgets editor, canvas, layers, tools |
+| `src/core` | Document, history, camera RAW, image trim, and editor commands |
+| `src/io` | `.comp` v1–v9 reader/writer, PSD, SVG, and RAW importers, export |
+| `src/rendering` | Compositing, layer effects, caches, filters, local subject removal |
+| `src/ui` | Qt Widgets editor, canvas, rulers, layer effects, shortcuts, tools |
+| `tests/` | Automated test suite for project format, camera raw, and vector import |
 | `packaging/` | Desktop entry, AppStream metadata, icons, package script |
 | `vendor/compositor-rendering/` | Shared pixel kernels from the macOS editor |
+| `vendor/libraw/` | LibRaw headers for RAW digital camera photo import |
 
 The original macOS app remains the behavior and file-format reference. Linux-specific UI and packaging live in this repository.
+
+## Version history
+
+- **v0.3.0**: Camera RAW development pipeline via LibRaw, layer effects & styles, vector shapes, PSD/SVG import, canvas rulers & guides, inline WYSIWYG text, project format v9, and automated test suite.
+- **v0.2.0**: Segmented toolbar controls, improved tool options layout.
+- **v0.1.0**: Initial public Linux release with local ONNX background removal, layer masks, and adjustment layers.
 
 ## License
 

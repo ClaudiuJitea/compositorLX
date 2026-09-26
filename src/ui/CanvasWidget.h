@@ -14,12 +14,17 @@
 
 namespace compositor {
 
+class EditorSession;
+
 class CanvasWidget final : public QWidget {
     Q_OBJECT
 public:
     enum class Tool { Move, Marquee, Lasso, Wand, Crop, Brush, Eraser, Healing, Clone, Blur, Gradient, Shape, Text, Eyedropper, Hand, Zoom, Other };
+    enum class WandMode { Wand, Object };
     explicit CanvasWidget(QWidget *parent = nullptr);
 
+    void setEditorSession(EditorSession *session) { session_ = session; update(); }
+    [[nodiscard]] EditorSession *editorSession() const { return session_; }
     void setDocument(std::shared_ptr<Document> document, bool invalidate = true);
     void fitCanvas();
     void actualPixels();
@@ -27,13 +32,20 @@ public:
     void zoomOut();
     void setZoom(double zoom) { zoomTo(zoom, rect().center()); }
     [[nodiscard]] double zoom() const { return zoom_; }
+    [[nodiscard]] QPointF panOffset() const { return panOffset_; }
+    void setPanOffset(const QPointF &offset) { panOffset_ = offset; fitPending_ = false; emit viewportChanged(); update(); }
+    [[nodiscard]] QRectF canvasRect() const;
     [[nodiscard]] std::optional<QPointF> documentPointAt(const QPointF &widgetPoint) const;
     [[nodiscard]] QRectF widgetRectForDocumentRect(const QRectF &rect) const;
     [[nodiscard]] QRectF documentRectForWidgetRect(const QRectF &rect) const;
     void setTool(Tool tool);
     [[nodiscard]] Tool tool() const { return tool_; }
     void setBrushDiameter(double diameter) { brushDiameter_ = diameter; update(); }
+    [[nodiscard]] double brushDiameter() const { return brushDiameter_; }
+    void setBrushSmoothing(double smoothing) { brushSmoothing_ = smoothing; }
+    [[nodiscard]] double brushSmoothing() const { return brushSmoothing_; }
     void setShapeCornerRadius(double radius) { shapeCornerRadius_ = radius; }
+    [[nodiscard]] double shapeCornerRadius() const { return shapeCornerRadius_; }
     void setCropRatio(double ratio);
     void setTransformAutoSelect(bool enabled) { transformAutoSelect_ = enabled; }
     void setLockTransformRatio(bool enabled) { lockTransformRatio_ = enabled; }
@@ -66,14 +78,41 @@ public:
     void toggleLassoKind() { setPolygonalLasso(!polygonalLasso_); }
     void setMarqueeElliptical(bool enabled) { if (ellipticalMarquee_ == enabled) return; ellipticalMarquee_ = enabled; emit marqueeKindChanged(enabled); update(); }
     void setPolygonalLasso(bool enabled) { if (polygonalLasso_ == enabled) return; polygonalLasso_ = enabled; lassoPoints_.clear(); selectionDragging_ = false; emit lassoKindChanged(enabled); update(); }
+    [[nodiscard]] WandMode wandMode() const { return wandMode_; }
+    void setWandMode(WandMode mode) {
+        if (wandMode_ == mode) return;
+        wandMode_ = mode;
+        emit wandModeChanged(mode);
+        update();
+    }
+    void toggleWandMode() {
+        setWandMode(wandMode_ == WandMode::Wand ? WandMode::Object : WandMode::Wand);
+    }
     void setSelectionMode(int mode) { selectionMode_ = std::clamp(mode, 0, 2); }
     void setSelectionAntialiased(bool enabled) { selectionAntialiased_ = enabled; }
-    void toggleShapeKind() { setEllipticalShape(!ellipticalShape_); }
-    void setEllipticalShape(bool enabled) { if (ellipticalShape_ == enabled) return; ellipticalShape_ = enabled; emit shapeKindChanged(enabled); update(); }
+    [[nodiscard]] ShapeKind shapeKind() const { return shapeKind_; }
+    void setShapeKind(ShapeKind kind) {
+        if (shapeKind_ == kind) return;
+        shapeKind_ = kind;
+        ellipticalShape_ = (kind == ShapeKind::Ellipse);
+        emit shapeKindChanged(kind);
+        update();
+    }
+    void toggleShapeKind() {
+        if (shapeKind_ == ShapeKind::Rectangle) setShapeKind(ShapeKind::Ellipse);
+        else if (shapeKind_ == ShapeKind::Ellipse) setShapeKind(ShapeKind::Line);
+        else setShapeKind(ShapeKind::Rectangle);
+    }
+    [[nodiscard]] bool ellipticalShape() const { return shapeKind_ == ShapeKind::Ellipse; }
+    void setEllipticalShape(bool enabled) { setShapeKind(enabled ? ShapeKind::Ellipse : ShapeKind::Rectangle); }
+    [[nodiscard]] double shapeLineWidth() const { return shapeLineWidth_; }
+    void setShapeLineWidth(double width) { shapeLineWidth_ = std::clamp(width, 1.0, 5000.0); update(); }
     void refreshPendingGradient();
     void resolvePendingGradient(bool commit = true);
     void resolvePendingDistortion(bool apply = true);
     void resolvePendingCrop(bool apply = true);
+    [[nodiscard]] std::optional<QRectF> cropRect() const { return cropRect_; }
+    [[nodiscard]] double cropRatio() const { return cropRatio_; }
     void invalidateDocument();
     [[nodiscard]] quint64 renderGeneration() const { return renderGeneration_; }
     void setBlendModePreview(const std::optional<QUuid> &layerId, const std::optional<BlendMode> &mode);
@@ -81,10 +120,13 @@ public:
 
 signals:
     void zoomChanged(double zoom);
+    void viewportChanged();
     void toolChanged(Tool tool);
+    void cycleSmearModeRequested();
+    void cycleToolModeRequested();
     void marqueeKindChanged(bool elliptical);
     void lassoKindChanged(bool polygonal);
-    void shapeKindChanged(bool elliptical);
+    void shapeKindChanged(ShapeKind kind);
     void layerTransformStarted(bool duplicate);
     void layerTransformChanged();
     void layerTransformFinished();
@@ -101,7 +143,9 @@ signals:
     void selectedPixelsNudgeRequested(const QPoint &offset);
     void selectedPixelsDragStarted(bool duplicate);
     void cropRequested(const QRect &rect);
+    void wandModeChanged(WandMode mode);
     void magicWandRequested(const QPoint &point, int mode);
+    void objectSelectionRequested(const QPoint &point, int mode);
     void brushStrokeStarted(const QPointF &point, bool erasing);
     void brushStrokeContinued(const QPointF &point);
     void brushStrokeFinished();
@@ -114,6 +158,9 @@ signals:
     void gradientCommitRequested();
     void gradientCancelRequested();
     void shapeRequested(const QRectF &rect, bool ellipse, double cornerRadius);
+    void shapeCreated(ShapeKind kind, const QRectF &rect, double strokeWidth, double cornerRadius,
+                      const std::optional<QPointF> &start = std::nullopt,
+                      const std::optional<QPointF> &end = std::nullopt);
     void textBoxRequested(const QRectF &box, bool areaText);
     void textLayerEditRequested(const QUuid &id);
     void colorSampleRequested(const QPoint &point);
@@ -123,6 +170,7 @@ signals:
     void floatingTransformCommitRequested();
     void floatingTransformCancelRequested();
     void layerSelectionRequested(const QUuid &id);
+    void guideChanged();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -134,9 +182,9 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void leaveEvent(QEvent *event) override;
+    bool focusNextPrevChild(bool next) override { Q_UNUSED(next); return false; }
 
 private:
-    [[nodiscard]] QRectF canvasRect() const;
     [[nodiscard]] QRectF selectedLayersBounds() const;
     [[nodiscard]] QSet<QUuid> transformLayerIds() const;
     [[nodiscard]] bool transformsAsGroup() const;
@@ -211,6 +259,7 @@ private:
     bool polygonalLasso_ = false;
     int lassoMode_ = 0;
     bool ellipticalMarquee_ = false;
+    WandMode wandMode_ = WandMode::Wand;
     int selectionMode_ = 0;
     bool selectionAntialiased_ = true;
     bool brushDrawing_ = false;
@@ -224,9 +273,12 @@ private:
     bool creationFromCenter_ = false;
     QPointF creationAnchor_;
     QPointF creationCurrent_;
+    ShapeKind shapeKind_ = ShapeKind::Rectangle;
     bool ellipticalShape_ = false;
     double shapeCornerRadius_ = 0;
+    double shapeLineWidth_ = 2.0;
     double brushDiameter_ = 40;
+    double brushSmoothing_ = 0.0;
     std::optional<QPointF> cursorDocument_;
     std::optional<QPointF> cloneSource_;
     std::optional<QPointF> cloneOffset_;
@@ -238,6 +290,8 @@ private:
     QColor sampleCurrent_ = Qt::black;
     qint64 selectionOutlineKey_ = 0;
     QPainterPath selectionOutline_;
+    EditorSession *session_ = nullptr;
+    bool guideDragging_ = false;
 };
 
 } // namespace compositor

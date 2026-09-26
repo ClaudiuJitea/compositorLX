@@ -23,7 +23,9 @@ public:
     [[nodiscard]] QString redoName() const;
     [[nodiscard]] bool isModified() const;
     [[nodiscard]] int undoCount() const;
+    [[nodiscard]] QUuid currentRevision() const { return revision_; }
     void markSaved();
+    void markSaved(const QUuid &revision);
     void markModified();
     void reset();
     void begin(const QString &name, const std::shared_ptr<Document> &document);

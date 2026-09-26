@@ -1,0 +1,53 @@
+{
+  "activeLayerID": "33333333-BBBB-0000-0000-000000000002",
+  "colorSpace": "sRGB",
+  "documentID": "00000001-0000-0000-0000-000000000001",
+  "format": "com.compositor.project",
+  "height": 64,
+  "layers": [
+    {
+      "id": "33333333-AAAA-0000-0000-000000000001",
+      "isGroup": true,
+      "isVisible": true,
+      "name": "Group",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    },
+    {
+      "id": "33333333-BBBB-0000-0000-000000000002",
+      "imageFile": "33333333-BBBB-0000-0000-000000000002.png",
+      "isVisible": true,
+      "maskSourceID": "33333333-AAAA-0000-0000-000000000001",
+      "name": "Clipped",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 7,
+  "width": 64
+}

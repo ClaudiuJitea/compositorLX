@@ -18,6 +18,7 @@ QString DocumentHistory::redoName() const { return future_.isEmpty() ? QString()
 bool DocumentHistory::isModified() const { return !savedRevision_ || revision_ != *savedRevision_; }
 int DocumentHistory::undoCount() const { return past_.size(); }
 void DocumentHistory::markSaved() { savedRevision_ = revision_; }
+void DocumentHistory::markSaved(const QUuid &revision) { savedRevision_ = revision; }
 void DocumentHistory::markModified() { savedRevision_.reset(); }
 
 DocumentHistory::Snapshot DocumentHistory::snapshot(const std::shared_ptr<Document> &document, const QUuid &revision)

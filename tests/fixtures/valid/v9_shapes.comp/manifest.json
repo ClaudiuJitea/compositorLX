@@ -1,0 +1,120 @@
+{
+  "activeLayerID": "EEEEEEEE-1111-2222-3333-000000000002",
+  "colorSpace": "sRGB",
+  "documentID": "0000000E-0000-0000-0000-00000000000E",
+  "format": "com.compositor.project",
+  "height": 64,
+  "layers": [
+    {
+      "id": "EEEEEEEE-1111-2222-3333-000000000001",
+      "imageFile": "EEEEEEEE-1111-2222-3333-000000000001.png",
+      "isVisible": true,
+      "name": "Background",
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    },
+    {
+      "id": "EEEEEEEE-1111-2222-3333-000000000002",
+      "imageFile": "EEEEEEEE-1111-2222-3333-000000000002.png",
+      "isVisible": true,
+      "name": "RectangleShape",
+      "shape": {
+        "blue": 0.3,
+        "cornerRadius": 12.0,
+        "green": 0.8,
+        "kind": "Rectangle",
+        "red": 0.2
+      },
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    },
+    {
+      "id": "EEEEEEEE-1111-2222-3333-000000000003",
+      "imageFile": "EEEEEEEE-1111-2222-3333-000000000003.png",
+      "isVisible": true,
+      "name": "EllipseShape",
+      "shape": {
+        "blue": 0.2,
+        "green": 0.3,
+        "kind": "Ellipse",
+        "red": 0.9
+      },
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    },
+    {
+      "id": "EEEEEEEE-1111-2222-3333-000000000004",
+      "imageFile": "EEEEEEEE-1111-2222-3333-000000000004.png",
+      "isVisible": true,
+      "name": "LineShape",
+      "shape": {
+        "blue": 0.9,
+        "end": [
+          0.9,
+          0.9
+        ],
+        "green": 0.5,
+        "kind": "Line",
+        "lineWidth": 4.0,
+        "red": 0.2,
+        "start": [
+          0.1,
+          0.1
+        ]
+      },
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 9,
+  "width": 64
+}

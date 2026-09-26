@@ -165,6 +165,16 @@ public:
         case 29: // Subtract from selection (square with minus badge)
             p.drawRect(QRectF(5.0, 7.5, 9.5, 9.5));
             p.drawLine(QPointF(14.0, 9.0), QPointF(19.0, 9.0)); break;
+        case 30: { // Layer effects (fx)
+            QFont f = p.font();
+            f.setPixelSize(11);
+            f.setBold(true);
+            f.setItalic(true);
+            p.setFont(f);
+            p.setPen(ink);
+            p.drawText(QRectF(2, 3, 20, 18), Qt::AlignCenter, QStringLiteral("fx"));
+            break;
+        }
         default: break;
         }
 
