@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
     Q_INIT_RESOURCE(resources);
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("CompositorLX"));
-    QApplication::setApplicationVersion(QStringLiteral("0.3.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.3.1"));
     QApplication::setOrganizationName(QStringLiteral("Compositor"));
     QApplication::setDesktopFileName(QStringLiteral("compositor-lx"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/compositor-lx.png")));

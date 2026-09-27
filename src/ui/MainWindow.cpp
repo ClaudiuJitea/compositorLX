@@ -4653,7 +4653,7 @@ bool MainWindow::hasInFlightSave(int tabIndex) const
     return false;
 }
 
-QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bool asNew, const QString &explicitDestination)
+QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bool asNew, const QString &explicitDestination, bool isAutosave)
 {
     if (tabIndex < 0) tabIndex = currentTab_;
     if (tabIndex < 0 || tabIndex >= workspaceTabs_.size()) return {};
@@ -4703,8 +4703,12 @@ QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bo
                 expectedState = ProjectWriter::ExpectedDestinationState::mustMatch(*d);
             } else {
                 const QString msg = tr("Cannot save to “%1”: destination exists but cannot be fingerprinted (unreadable or malformed).").arg(QFileInfo(destination).fileName());
-                showMessage(this, tr("Could Not Save Project"), msg);
-                statusHint_->setText(tr("Save failed"));
+                if (!isAutosave) {
+                    showMessage(this, tr("Could Not Save Project"), msg);
+                    statusHint_->setText(tr("Save failed"));
+                } else {
+                    statusHint_->setText(tr("Autosave failed: %1").arg(msg));
+                }
                 QPromise<ProjectWriter::SaveResult> promise;
                 promise.start();
                 promise.addResult(ProjectWriter::SaveResult{ProjectWriter::SaveResult::Status::IoError, msg, std::nullopt});
@@ -4727,8 +4731,12 @@ QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bo
                 expectedState = ProjectWriter::ExpectedDestinationState::mustMatch(*destDigest);
             } else {
                 const QString msg = tr("Cannot save to “%1”: destination exists but cannot be fingerprinted (unreadable or malformed).").arg(QFileInfo(destination).fileName());
-                showMessage(this, tr("Could Not Save Project"), msg);
-                statusHint_->setText(tr("Save failed"));
+                if (!isAutosave) {
+                    showMessage(this, tr("Could Not Save Project"), msg);
+                    statusHint_->setText(tr("Save failed"));
+                } else {
+                    statusHint_->setText(tr("Autosave failed: %1").arg(msg));
+                }
                 QPromise<ProjectWriter::SaveResult> promise;
                 promise.start();
                 promise.addResult(ProjectWriter::SaveResult{ProjectWriter::SaveResult::Status::IoError, msg, std::nullopt});
@@ -4762,7 +4770,7 @@ QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bo
     inFlight.future = future;
     inFlight.watcher = watcher;
     inFlight.completed = false;
-    inFlight.completion = [this, watcher, capturedTabIndex, capturedDocId, capturedOriginalPath, capturedDestination, capturedRevision, isSaveAs](const ProjectWriter::SaveResult &result) {
+    inFlight.completion = [this, watcher, capturedTabIndex, capturedDocId, capturedOriginalPath, capturedDestination, capturedRevision, isSaveAs, isAutosave](const ProjectWriter::SaveResult &result) {
         if (!inFlightSaves_.contains(capturedDestination)) return;
         if (inFlightSaves_[capturedDestination].watcher != watcher) return;
         auto entry = inFlightSaves_.take(capturedDestination);
@@ -4770,7 +4778,7 @@ QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bo
             entry.watcher->disconnect();
             entry.watcher->deleteLater();
         }
-        onSaveCompleted(capturedTabIndex, capturedDocId, capturedOriginalPath, capturedDestination, capturedRevision, isSaveAs, result);
+        onSaveCompleted(capturedTabIndex, capturedDocId, capturedOriginalPath, capturedDestination, capturedRevision, isSaveAs, result, isAutosave);
     };
 
     inFlightSaves_.insert(capturedDestination, inFlight);
@@ -4790,7 +4798,7 @@ QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bo
     return future;
 }
 
-void MainWindow::onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocId, const QString &capturedOriginalPath, const QString &capturedDestination, const QUuid &capturedRevision, bool isSaveAs, const ProjectWriter::SaveResult &result)
+void MainWindow::onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocId, const QString &capturedOriginalPath, const QString &capturedDestination, const QUuid &capturedRevision, bool isSaveAs, const ProjectWriter::SaveResult &result, bool isAutosave)
 {
     Q_UNUSED(isSaveAs);
     const bool tabMatches = (capturedTabIndex >= 0 && capturedTabIndex < workspaceTabs_.size()
@@ -4822,21 +4830,30 @@ void MainWindow::onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocI
                 if (session_.hasDocument()) session_.document()->projectPath = capturedDestination;
                 session_.markSaved(capturedRevision);
                 workspaceTabs_[capturedTabIndex] = session_;
-                removeRecovery();
+                removeRecovery(capturedTabIndex);
                 refreshTitle();
-                statusHint_->setText(tr("Saved %1").arg(QFileInfo(capturedDestination).fileName()));
+                if (!isAutosave) {
+                    statusHint_->setText(tr("Saved %1").arg(QFileInfo(capturedDestination).fileName()));
+                } else {
+                    statusHint_->setText(tr("Autosaved %1").arg(QFileInfo(capturedDestination).fileName()));
+                }
             } else {
                 workspaceTabs_[capturedTabIndex].markSaved(capturedRevision);
                 tabs_->setTabText(capturedTabIndex, QFileInfo(capturedDestination).fileName());
+                removeRecovery(capturedTabIndex);
             }
         }
     } else if (result.status == ProjectWriter::SaveResult::Status::Conflict) {
         if (tabWatchers_.size() > capturedTabIndex && tabWatchers_[capturedTabIndex]) {
             tabWatchers_[capturedTabIndex]->setSaving(false);
         }
-        showMessage(this, tr("Save Conflict"),
-            tr("Conflict detected: “%1” was created or modified externally while saving. Save was cancelled to avoid overwriting changes.").arg(QFileInfo(capturedDestination).fileName()));
-        statusHint_->setText(tr("Save conflict detected"));
+        if (!isAutosave) {
+            showMessage(this, tr("Save Conflict"),
+                tr("Conflict detected: “%1” was created or modified externally while saving. Save was cancelled to avoid overwriting changes.").arg(QFileInfo(capturedDestination).fileName()));
+            statusHint_->setText(tr("Save conflict detected"));
+        } else {
+            statusHint_->setText(tr("Autosave conflict detected"));
+        }
 
         // Report any genuine external change that arrived during save and survived the save attempt
         if (tabPendingExternalChange_.value(capturedTabIndex, false) && tabPendingExternalDigest_.value(capturedTabIndex).has_value()) {
@@ -4845,7 +4862,7 @@ void MainWindow::onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocI
             const ProjectDigest survivingDigest = *tabPendingExternalDigest_[capturedTabIndex];
             const bool isDirty = (capturedTabIndex == currentTab_) ? session_.isModified() : workspaceTabs_[capturedTabIndex].isModified();
             if (isDirty) {
-                if (capturedTabIndex == currentTab_) {
+                if (capturedTabIndex == currentTab_ && !isAutosave) {
                     promptExternalChange(capturedTabIndex, path, survivingDigest);
                 }
             } else {
@@ -4886,16 +4903,20 @@ void MainWindow::onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocI
         if (tabWatchers_.size() > capturedTabIndex && tabWatchers_[capturedTabIndex]) {
             tabWatchers_[capturedTabIndex]->setSaving(false);
         }
-        showMessage(this, tr("Could Not Save Project"), result.errorMessage);
-        statusHint_->setText(tr("Save failed"));
+        if (!isAutosave) {
+            showMessage(this, tr("Could Not Save Project"), result.errorMessage);
+            statusHint_->setText(tr("Save failed"));
 
-        if (tabPendingExternalChange_.value(capturedTabIndex, false) && tabPendingExternalDigest_.value(capturedTabIndex).has_value()) {
-            const QString path = (workspaceTabs_.size() > capturedTabIndex && workspaceTabs_[capturedTabIndex].hasDocument())
-                                 ? workspaceTabs_[capturedTabIndex].document()->projectPath : capturedDestination;
-            const ProjectDigest survivingDigest = *tabPendingExternalDigest_[capturedTabIndex];
-            if (capturedTabIndex == currentTab_) {
-                promptExternalChange(capturedTabIndex, path, survivingDigest);
+            if (tabPendingExternalChange_.value(capturedTabIndex, false) && tabPendingExternalDigest_.value(capturedTabIndex).has_value()) {
+                const QString path = (workspaceTabs_.size() > capturedTabIndex && workspaceTabs_[capturedTabIndex].hasDocument())
+                                     ? workspaceTabs_[capturedTabIndex].document()->projectPath : capturedDestination;
+                const ProjectDigest survivingDigest = *tabPendingExternalDigest_[capturedTabIndex];
+                if (capturedTabIndex == currentTab_) {
+                    promptExternalChange(capturedTabIndex, path, survivingDigest);
+                }
             }
+        } else {
+            statusHint_->setText(tr("Autosave failed: %1").arg(result.errorMessage));
         }
     }
 }
@@ -5189,9 +5210,10 @@ void MainWindow::promptExternalChange(int tabIndex, const QString &path, const P
     }
 }
 
-QString MainWindow::recoveryPath() const
+QString MainWindow::recoveryPath(int tabIndex) const
 {
-    if (currentTab_ >= 0 && currentTab_ < tabRecoveryPaths_.size()) return tabRecoveryPaths_.at(currentTab_);
+    if (tabIndex < 0) tabIndex = currentTab_;
+    if (tabIndex >= 0 && tabIndex < tabRecoveryPaths_.size()) return tabRecoveryPaths_.at(tabIndex);
     return {};
 }
 
@@ -5205,11 +5227,79 @@ QString MainWindow::newRecoveryPath() const
     return QDir(recoveryDirectory()).filePath(QStringLiteral("Untitled-%1.comp").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
 }
 
-void MainWindow::removeRecovery()
+void MainWindow::removeRecovery(int tabIndex)
 {
-    const QString path = recoveryPath();
+    const QString path = recoveryPath(tabIndex);
+    if (!path.isEmpty()) finishWriting(path);
     const QString root = QDir(recoveryDirectory()).absolutePath() + QLatin1Char('/');
     if (!path.isEmpty() && QFileInfo(path).isDir() && QFileInfo(path).absoluteFilePath().startsWith(root)) QDir(path).removeRecursively();
+}
+
+QFuture<ProjectWriter::SaveResult> MainWindow::saveRecoveryAsync(int tabIndex)
+{
+    if (tabIndex < 0) tabIndex = currentTab_;
+    if (tabIndex < 0 || tabIndex >= workspaceTabs_.size()) return {};
+    if (tabIndex == currentTab_) {
+        workspaceTabs_[tabIndex] = session_;
+    }
+    EditorSession &tabSession = workspaceTabs_[tabIndex];
+    if (!tabSession.hasDocument()) return {};
+    const QString recoveryDest = tabRecoveryPaths_.value(tabIndex);
+    if (recoveryDest.isEmpty()) return {};
+    if (inFlightSaves_.contains(recoveryDest)) return {};
+
+    if (tabIndex == currentTab_) {
+        finishInlineText();
+        if (transformOriginalDocument_) finishPersistentTransform(true);
+        canvas_->resolvePendingGradient();
+        canvas_->resolvePendingDistortion();
+        if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
+        workspaceTabs_[tabIndex] = session_;
+    }
+
+    QDir().mkpath(recoveryDirectory());
+
+    Document snapshot = *tabSession.document();
+    snapshot.projectPath = recoveryDest;
+
+    auto future = QtConcurrent::run([snapshot, recoveryDest]() -> ProjectWriter::SaveResult {
+        return ProjectWriter::saveAtomicChecked(snapshot, recoveryDest, ProjectWriter::ExpectedDestinationState::any());
+    });
+
+    auto *watcher = new QFutureWatcher<ProjectWriter::SaveResult>(this);
+
+    InFlightSave inFlight;
+    inFlight.tabIndex = tabIndex;
+    inFlight.future = future;
+    inFlight.watcher = watcher;
+    inFlight.completed = false;
+    inFlight.completion = [this, watcher, recoveryDest](const ProjectWriter::SaveResult &result) {
+        if (!inFlightSaves_.contains(recoveryDest)) return;
+        if (inFlightSaves_[recoveryDest].watcher != watcher) return;
+        auto entry = inFlightSaves_.take(recoveryDest);
+        if (entry.watcher) {
+            entry.watcher->disconnect();
+            entry.watcher->deleteLater();
+        }
+        if (result.status != ProjectWriter::SaveResult::Status::Success) {
+            statusHint_->setText(tr("Autosave failed: %1").arg(result.errorMessage));
+        }
+    };
+
+    inFlightSaves_.insert(recoveryDest, inFlight);
+
+    connect(watcher, &QFutureWatcher<ProjectWriter::SaveResult>::finished, this, [this, watcher, recoveryDest]() {
+        if (inFlightSaves_.contains(recoveryDest)) {
+            auto &entry = inFlightSaves_[recoveryDest];
+            if (entry.watcher == watcher && !entry.completed) {
+                entry.completed = true;
+                const ProjectWriter::SaveResult result = watcher->result();
+                if (entry.completion) entry.completion(result);
+            }
+        }
+    });
+    watcher->setFuture(future);
+    return future;
 }
 
 void MainWindow::autosave()
@@ -5219,13 +5309,13 @@ void MainWindow::autosave()
         EditorSession &candidate = workspaceTabs_[i];
         const auto &doc = candidate.document();
         if (!doc || !candidate.isModified() || candidate.isPainting()) continue;
-        const QString dest = doc->projectPath.isEmpty() ? tabRecoveryPaths_.value(i) : doc->projectPath;
-        if (dest.isEmpty()) continue;
-        if (inFlightSaves_.contains(dest)) continue;
         if (doc->projectPath.isEmpty()) {
-            QDir().mkpath(recoveryDirectory());
+            saveRecoveryAsync(i);
+        } else {
+            const QString dest = doc->projectPath;
+            if (inFlightSaves_.contains(dest)) continue;
+            saveProjectAsync(i, false, dest, /*isAutosave=*/true);
         }
-        saveProjectAsync(i, false, dest);
     }
 }
 
@@ -5607,7 +5697,7 @@ void MainWindow::closeTab(int index)
     }
     if (!confirmReplacement()) return;
     if (workspaceTabs_.size() == 1) {
-        removeRecovery(); session_ = EditorSession(); workspaceTabs_[0] = session_; tabRecoveryPaths_[0] = newRecoveryPath();
+        removeRecovery(index); session_ = EditorSession(); workspaceTabs_[0] = session_; tabRecoveryPaths_[0] = newRecoveryPath();
         if (tabWatchers_.size() > 0 && tabWatchers_[0]) {
             tabWatchers_[0]->stop();
             tabWatchers_[0]->deleteLater();
@@ -5619,7 +5709,7 @@ void MainWindow::closeTab(int index)
         tabPendingExternalDoc_[0] = nullptr;
         tabs_->setTabText(0, tr("Untitled")); syncDocumentViews(); return;
     }
-    removeRecovery();
+    removeRecovery(index);
     stashCurrentTab(); workspaceTabs_.removeAt(index);
     tabRecoveryPaths_.removeAt(index);
     if (tabWatchers_.size() > index) {

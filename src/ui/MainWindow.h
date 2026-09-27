@@ -122,7 +122,8 @@ public:
     void cycleToolMode();
     void updateSmearStatusHint();
 
-    QFuture<ProjectWriter::SaveResult> saveProjectAsync(int tabIndex = -1, bool asNew = false, const QString &explicitDestination = QString());
+    QFuture<ProjectWriter::SaveResult> saveProjectAsync(int tabIndex = -1, bool asNew = false, const QString &explicitDestination = QString(), bool isAutosave = false);
+    QFuture<ProjectWriter::SaveResult> saveRecoveryAsync(int tabIndex = -1);
     bool saveProject(bool wait = false, const QString &explicitDestination = QString());
     bool saveProjectAs(const QString &explicitDestination, bool wait = false);
     bool saveProjectAs(bool wait = false);
@@ -141,6 +142,11 @@ public:
     [[nodiscard]] ProjectWatcher *tabWatcher(int tabIndex) const;
     void noteRecentProject(const QString &path);
     [[nodiscard]] QStringList recentProjects() const;
+    [[nodiscard]] QString recoveryPath(int tabIndex = -1) const;
+    [[nodiscard]] QString recoveryDirectory() const;
+    void removeRecovery(int tabIndex = -1);
+    void autosave();
+    void offerRecovery();
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
@@ -155,12 +161,7 @@ private:
     void newProject();
     void importImages();
     bool confirmReplacement();
-    void autosave();
-    void offerRecovery();
-    [[nodiscard]] QString recoveryPath() const;
     [[nodiscard]] QString newRecoveryPath() const;
-    [[nodiscard]] QString recoveryDirectory() const;
-    void removeRecovery();
     void exportPng(bool jpegDefault = false);
     void resizeImageDialog();
     void resizeCanvasDialog();
@@ -343,7 +344,7 @@ private:
         bool completed = false;
     };
     QMap<QString, InFlightSave> inFlightSaves_;
-    void onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocId, const QString &capturedOriginalPath, const QString &capturedDestination, const QUuid &capturedRevision, bool isSaveAs, const ProjectWriter::SaveResult &result);
+    void onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocId, const QString &capturedOriginalPath, const QString &capturedDestination, const QUuid &capturedRevision, bool isSaveAs, const ProjectWriter::SaveResult &result, bool isAutosave = false);
 };
 
 } // namespace compositor

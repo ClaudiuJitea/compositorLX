@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.3.0-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.3.1-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -23,8 +23,10 @@
 
 CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v9), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
 
-## What's new in version 0.3.0
+## What's new in version 0.3.1
 
+- **Crash recovery & autosave fix**: Resolved an issue where background autosaves on untitled projects could trigger spurious "Save Conflict" dialogs, overwrite document paths, or fail on subsequent intervals.
+- **Unobtrusive background autosave**: Autosave operations run entirely in the background without modal dialog interruption.
 - **Camera RAW development**: Open and develop RAW camera files (`.raw`, `.dng`, `.cr2`, `.nef`, `.arw`) with non-destructive exposure, white balance, tint, highlights, shadows, and optics
 - **Layer effects & styles**: Live Stroke, Drop Shadow, Inner Shadow, Outer Glow, Inner Glow, and Color Overlay with real-time preview
 - **Vector shape layers**: Rectangle, Ellipse, and Line vector shapes with editable stroke and fill
@@ -88,14 +90,14 @@ CompositorLX is a full-featured raster editor for Linux: layered `.comp` project
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.3.0-x86_64.AppImage
-./CompositorLX-0.3.0-x86_64.AppImage
+chmod +x CompositorLX-0.3.1-x86_64.AppImage
+./CompositorLX-0.3.1-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.3.0_amd64.deb
+sudo apt install ./compositorlx_0.3.1_amd64.deb
 compositor-lx
 ```
 
@@ -146,6 +148,7 @@ The original macOS app remains the behavior and file-format reference. Linux-spe
 
 ## Version history
 
+- **v0.3.1**: Fix autosave conflict dialog and recovery path handling for untitled projects.
 - **v0.3.0**: Camera RAW development pipeline via LibRaw, layer effects & styles, vector shapes, PSD/SVG import, canvas rulers & guides, inline WYSIWYG text, project format v9, and automated test suite.
 - **v0.2.0**: Segmented toolbar controls, improved tool options layout.
 - **v0.1.0**: Initial public Linux release with local ONNX background removal, layer masks, and adjustment layers.

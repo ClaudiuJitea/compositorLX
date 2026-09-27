@@ -122,6 +122,7 @@ private slots:
     void testSection9MalformedUnreadableDestinationPreserved();
     void testSection9WatcherOffGuiThreadAndStaleTabReplacement();
     void testSection9AsyncSaveAsAndUntitledSave();
+    void testSection9AutosaveRecoveryAndConflictSuppression();
     void testSection9InspectionVersusSaveRace();
     void testSection10BrushSmoothingInteractionAndScreenSpace();
     void testSection10LineShapeInteractionAndUndoUI();
@@ -8323,6 +8324,94 @@ void TestProjectFormat::testSection9AsyncSaveAsAndUntitledSave()
     QVERIFY(!window.hasInFlightSave(0));
     QCOMPARE(window.session().document()->projectPath, untitledDest);
     QVERIFY(!window.session().isModified());
+
+    MainWindow::setMessageDialogHook(nullptr);
+}
+
+void TestProjectFormat::testSection9AutosaveRecoveryAndConflictSuppression()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    bool dialogShown = false;
+    MainWindow::setMessageDialogHook([&](const QString &title, const QString &) -> std::optional<QMessageBox::StandardButton> {
+        dialogShown = true;
+        if (title.contains(QStringLiteral("Unsaved Changes"))) return QMessageBox::Discard;
+        return QMessageBox::Ok;
+    });
+
+    MainWindow window;
+    window.session().createDocument(30, 30, true);
+    QVERIFY(window.session().hasDocument());
+    QVERIFY(window.session().document()->projectPath.isEmpty());
+
+    // 1. Verify Autosave on an untitled document saves to recovery path asynchronously
+    const QString recPath = window.recoveryPath(0);
+    QVERIFY(!recPath.isEmpty());
+    QVERIFY(!QFileInfo::exists(recPath));
+
+    // Make an edit to mark modified
+    const QUuid layerId = *window.session().document()->activeLayerId;
+    window.session().renameLayer(layerId, QStringLiteral("UntitledEdit1"));
+    QVERIFY(window.session().isModified());
+
+    // Trigger autosave
+    window.autosave();
+    QVERIFY(window.hasInFlightSave(0));
+
+    // Finish autosave
+    window.finishWriting(recPath);
+    QVERIFY(!window.hasInFlightSave(0));
+
+    // Untitled project must NOT have its projectPath changed to recovery path
+    QVERIFY(window.session().document()->projectPath.isEmpty());
+    // Untitled project must NOT be marked saved (must remain modified)
+    QVERIFY(window.session().isModified());
+    // Recovery folder must exist on disk with the saved layer
+    QVERIFY(QFileInfo::exists(recPath));
+    const Document loadedRecovery1 = ProjectReader::load(recPath);
+    QCOMPARE(loadedRecovery1.layers[0].name, QStringLiteral("UntitledEdit1"));
+    QVERIFY(!dialogShown);
+
+    // 2. Subsequent autosaves must overwrite the recovery path without conflict errors
+    window.session().renameLayer(layerId, QStringLiteral("UntitledEdit2"));
+    QVERIFY(window.session().isModified());
+
+    window.autosave();
+    window.finishWriting(recPath);
+    QVERIFY(QFileInfo::exists(recPath));
+    const Document loadedRecovery2 = ProjectReader::load(recPath);
+    QCOMPARE(loadedRecovery2.layers[0].name, QStringLiteral("UntitledEdit2"));
+    QVERIFY(window.session().document()->projectPath.isEmpty());
+    QVERIFY(window.session().isModified());
+    QVERIFY(!dialogShown);
+
+    // 3. Explicit user save of untitled document saves to user path and cleans up recovery
+    const QString userChosenPath = tempDir.filePath(QStringLiteral("UserProject.comp"));
+    QVERIFY(window.saveProject(true, userChosenPath));
+    QCOMPARE(window.session().document()->projectPath, userChosenPath);
+    QVERIFY(!window.session().isModified());
+    // Recovery path must now be removed
+    QVERIFY(!QFileInfo::exists(recPath));
+
+    // 4. Autosave on existing project with simulated external conflict does NOT show modal dialog
+    window.session().renameLayer(layerId, QStringLiteral("UserEditAfterSave"));
+    QVERIFY(window.session().isModified());
+
+    // Simulate an external modification on disk
+    Document externalDoc = loadedRecovery2;
+    externalDoc.projectPath = userChosenPath;
+    externalDoc.layers[0].name = QStringLiteral("ExternalEditOnDisk");
+    ProjectWriter::save(externalDoc, userChosenPath);
+
+    // Trigger autosave on existing project (conflict will be detected internally)
+    window.autosave();
+    window.finishWriting(userChosenPath);
+
+    // Verify modal dialog was NOT shown during autosave conflict
+    QVERIFY(!dialogShown);
+    // User edits were kept intact
+    QCOMPARE(window.session().document()->layers[0].name, QStringLiteral("UserEditAfterSave"));
 
     MainWindow::setMessageDialogHook(nullptr);
 }
