@@ -340,6 +340,8 @@ void TestIoAudit::initTestCase()
 
 void TestIoAudit::init()
 {
+    // A leftover recovery copy would make the next window offer it in a modal box.
+    QDir(QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("recovery"))).removeRecursively();
     QSettings settings;
     settings.clear();
     ShortcutManager::instance().resetToDefaults();
@@ -348,6 +350,7 @@ void TestIoAudit::init()
 
 void TestIoAudit::cleanup()
 {
+    QDir(QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("recovery"))).removeRecursively();
     MainWindow::setMessageDialogHook(nullptr);
     QSettings settings;
     settings.clear();

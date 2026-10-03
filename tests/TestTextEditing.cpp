@@ -340,6 +340,10 @@ void TestTextEditing::filtersWaitForTextEditing()
 {
     MainWindow window;
     window.session().createDocument(400, 300);
+    // Filters need a pixel layer to act on (mac canAdjustColors), so the document gets one.
+    QImage pixels(400, 300, QImage::Format_RGBA8888_Premultiplied); pixels.fill(Qt::gray);
+    window.session().insertImage(pixels, QStringLiteral("Pixels"));
+    window.syncDocumentViews();
     window.show();
     QAction *invert = nullptr, *blur = nullptr;
     for (QAction *top : window.menuBar()->actions()) if (QMenu *menu = top->menu())
