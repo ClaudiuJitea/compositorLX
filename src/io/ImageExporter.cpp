@@ -45,8 +45,9 @@ std::optional<JpegResult> ImageExporter::jpeg(const QImage &source, int quality,
         if (error) *error = QStringLiteral("The encoded JPEG preview could not be decoded.");
         return std::nullopt;
     }
-    if (preview.width() > 1000 || preview.height() > 1000)
-        preview = preview.scaled(1000, 1000, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    // Full size, so the dialog's 100% view shows the real artifacts; capped to keep memory in bounds (mac ac6f309).
+    if (preview.width() > 8192 || preview.height() > 8192)
+        preview = preview.scaled(8192, 8192, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     return JpegResult{std::move(bytes), std::move(preview)};
 }
 

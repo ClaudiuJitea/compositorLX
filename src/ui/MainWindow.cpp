@@ -101,6 +101,8 @@
 #include <QJsonDocument>
 #include <QTabBar>
 #include <QTextEdit>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QTimer>
 #include <QToolTip>
 #include <QUrl>
@@ -1400,12 +1402,41 @@ MainWindow::MainWindow(QWidget *parent)
     auto *startLayout = new QVBoxLayout(startPanel); startLayout->setContentsMargins(32, 30, 32, 30); startLayout->setSpacing(14);
     auto *startTitle = new QLabel(tr("Create a new canvas"), startPanel); startTitle->setObjectName(QStringLiteral("emptyStateTitle"));
     auto *startSubtitle = new QLabel(tr("Choose a size, or start from an existing image or project."), startPanel); startSubtitle->setObjectName(QStringLiteral("emptyStateSubtitle"));
-    startLayout->addWidget(startTitle); startLayout->addWidget(startSubtitle);
+    auto *startHeader = new QHBoxLayout; startHeader->addWidget(startTitle, 1);
+    // Preset sizes tucked into a "…" button; the size in use is checked (mac aaf3dc0).
+    auto *presetButton = new QToolButton(startPanel); presetButton->setObjectName(QStringLiteral("newCanvasPresets")); presetButton->setText(QStringLiteral("⋯"));
+    presetButton->setToolTip(tr("Preset sizes for screens and common formats")); presetButton->setPopupMode(QToolButton::InstantPopup); presetButton->setAutoRaise(true);
+    presetButton->setStyleSheet(QStringLiteral("QToolButton::menu-indicator{image:none;}"));
+    auto *presetMenu = new QMenu(presetButton); presetButton->setMenu(presetMenu); startHeader->addWidget(presetButton);
+    startLayout->addLayout(startHeader); startLayout->addWidget(startSubtitle);
     auto *startForm = new QFormLayout;
     startForm->setContentsMargins(0, 10, 0, 0); startForm->setHorizontalSpacing(18); startForm->setVerticalSpacing(12); startForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     newCanvasWidth_ = new QSpinBox(startPanel); newCanvasWidth_->setObjectName(QStringLiteral("newCanvasWidth")); newCanvasWidth_->setRange(1, 30000); newCanvasWidth_->setValue(1920); newCanvasWidth_->setSuffix(tr(" px"));
     newCanvasHeight_ = new QSpinBox(startPanel); newCanvasHeight_->setObjectName(QStringLiteral("newCanvasHeight")); newCanvasHeight_->setRange(1, 30000); newCanvasHeight_->setValue(1080); newCanvasHeight_->setSuffix(tr(" px"));
     startForm->addRow(tr("Width"), newCanvasWidth_); startForm->addRow(tr("Height"), newCanvasHeight_); startLayout->addLayout(startForm);
+    {
+        struct Preset { const char *title; int width, height; };
+        static const QVector<QVector<Preset>> groups = {
+            {{"4K", 3840, 2160}, {"1440p", 2560, 1440}, {"1080p", 1920, 1080}},
+            {{"iPhone 18 Pro", 1206, 2622}, {"iPhone 18 Pro Max", 1320, 2868}, {"MacBook Pro 14\"", 3024, 1964}, {"MacBook Pro 16\"", 3456, 2234}, {"Studio Display", 5120, 2880}},
+            {{"Instagram Square", 1080, 1080}, {"Instagram Portrait", 1080, 1350}, {"Instagram Story", 1080, 1920}, {"YouTube Thumb", 1080, 608}},
+        };
+        connect(presetMenu, &QMenu::aboutToShow, this, [this, presetMenu] {
+            presetMenu->clear();
+            auto *custom = presetMenu->addAction(tr("Custom")); custom->setCheckable(true);
+            bool matched = false;
+            for (const auto &group : groups) {
+                presetMenu->addSeparator();
+                for (const Preset &preset : group) {
+                    auto *action = presetMenu->addAction(QString::fromUtf8(preset.title)); action->setCheckable(true);
+                    const bool current = newCanvasWidth_->value() == preset.width && newCanvasHeight_->value() == preset.height;
+                    action->setChecked(current); matched = matched || current;
+                    connect(action, &QAction::triggered, this, [this, preset] { newCanvasWidth_->setValue(preset.width); newCanvasHeight_->setValue(preset.height); });
+                }
+            }
+            custom->setChecked(!matched);
+        });
+    }
     auto *startHint = new QLabel(tr("Transparent background  ·  sRGB color space"), startPanel); startHint->setObjectName(QStringLiteral("emptyStateHint")); startLayout->addWidget(startHint);
     auto *startButtons = new QHBoxLayout;
     startButtons->setContentsMargins(0, 8, 0, 0); startButtons->setSpacing(10);
@@ -5905,8 +5936,62 @@ void MainWindow::exportPng(bool jpegDefault)
         QSettings settings; const int quality = std::clamp(settings.value(QStringLiteral("jpegExportQuality"), 85).toInt(), 0, 100);
         QDialog dialog(this); dialog.setObjectName(QStringLiteral("jpegExportDialog")); dialog.setWindowTitle(tr("Export JPEG"));
         auto *layout = new QVBoxLayout(&dialog);
-        auto *preview = new QLabel(&dialog); preview->setObjectName(QStringLiteral("jpegPreview")); preview->setFixedSize(560, 330);
+        // The encoded JPEG, fitted or zoomed (100% is one image pixel per screen pixel), dragged or scrolled around;
+        // double-click switches between Fit and 100% (mac ac6f309).
+        auto *zoomRow = new QHBoxLayout;
+        auto *zoomTitle = new QLabel(tr("Export JPEG"), &dialog); QFont titleFont = zoomTitle->font(); titleFont.setBold(true); titleFont.setPointSizeF(titleFont.pointSizeF() * 1.3); zoomTitle->setFont(titleFont);
+        auto *fitButton = new QPushButton(tr("Fit"), &dialog); fitButton->setObjectName(QStringLiteral("jpegZoomFit"));
+        auto *zoomInButton = new QPushButton(QStringLiteral("+"), &dialog); zoomInButton->setObjectName(QStringLiteral("jpegZoomIn")); zoomInButton->setFixedWidth(34);
+        auto *zoomOutButton = new QPushButton(QStringLiteral("−"), &dialog); zoomOutButton->setObjectName(QStringLiteral("jpegZoomOut")); zoomOutButton->setFixedWidth(34);
+        zoomRow->addWidget(zoomTitle); zoomRow->addStretch(); zoomRow->addWidget(fitButton); zoomRow->addWidget(zoomInButton); zoomRow->addWidget(zoomOutButton);
+        layout->addLayout(zoomRow);
+        auto *preview = new QScrollArea(&dialog); preview->setObjectName(QStringLiteral("jpegPreview")); preview->setFixedSize(560, 330);
         preview->setAlignment(Qt::AlignCenter); preview->setStyleSheet(QStringLiteral("background:#1e2024;")); layout->addWidget(preview);
+        auto *picture = new QLabel; picture->setScaledContents(true); picture->setStyleSheet(QStringLiteral("background:transparent;")); preview->setWidget(picture);
+        std::optional<double> zoom;   // nullopt fits the whole image
+        QImage previewImage; QPoint dragFrom; bool dragging = false;
+        static const double zoomSteps[] = {0.25, 0.5, 1, 2, 4, 8};
+        const auto shownZoom = [&] {
+            if (zoom) return *zoom;
+            return previewImage.isNull() ? 1.0 : std::min(double(preview->width() - 2) / image.width(), double(preview->height() - 2) / image.height());
+        };
+        const auto stepFrom = [&](int direction) -> std::optional<double> {
+            const double now = shownZoom();
+            if (direction > 0) { for (double s : zoomSteps) if (s > now * 1.001) return s; }
+            else { for (int i = 5; i >= 0; --i) if (zoomSteps[i] < now * 0.999) return zoomSteps[i]; }
+            return std::nullopt;
+        };
+        const auto layoutPreview = [&] {
+            if (previewImage.isNull()) { picture->clear(); return; }
+            const double z = shownZoom();
+            const QSize size(std::max(1, qRound(image.width() * z)), std::max(1, qRound(image.height() * z)));
+            QImage shown = z >= 1.0 ? previewImage.scaled(size, Qt::IgnoreAspectRatio, Qt::FastTransformation)
+                                    : previewImage.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            picture->setPixmap(QPixmap::fromImage(shown)); picture->resize(size);
+            fitButton->setEnabled(zoom.has_value());
+            zoomInButton->setEnabled(stepFrom(1).has_value()); zoomOutButton->setEnabled(stepFrom(-1).has_value());
+            zoomInButton->setToolTip(tr("Zoom in, now %1%").arg(qRound(z * 100))); zoomOutButton->setToolTip(tr("Zoom out, now %1%").arg(qRound(z * 100)));
+        };
+        connect(fitButton, &QPushButton::clicked, &dialog, [&] { zoom.reset(); layoutPreview(); });
+        connect(zoomInButton, &QPushButton::clicked, &dialog, [&] { if (const auto next = stepFrom(1)) { zoom = next; layoutPreview(); } });
+        connect(zoomOutButton, &QPushButton::clicked, &dialog, [&] { if (const auto next = stepFrom(-1)) { zoom = next; layoutPreview(); } });
+        struct PanFilter : QObject {
+            std::function<bool(QEvent *)> handler;
+            bool eventFilter(QObject *, QEvent *event) override { return handler && handler(event); }
+        } panFilter;
+        panFilter.handler = [&](QEvent *event) {
+            if (event->type() == QEvent::MouseButtonDblClick) { if (zoom) zoom.reset(); else zoom = 1.0; layoutPreview(); return true; }
+            if (event->type() == QEvent::MouseButtonPress) { dragging = true; dragFrom = static_cast<QMouseEvent *>(event)->globalPosition().toPoint(); return true; }
+            if (event->type() == QEvent::MouseMove && dragging) {
+                const QPoint now = static_cast<QMouseEvent *>(event)->globalPosition().toPoint();
+                preview->horizontalScrollBar()->setValue(preview->horizontalScrollBar()->value() - (now.x() - dragFrom.x()));
+                preview->verticalScrollBar()->setValue(preview->verticalScrollBar()->value() - (now.y() - dragFrom.y()));
+                dragFrom = now; return true;
+            }
+            if (event->type() == QEvent::MouseButtonRelease) { dragging = false; return true; }
+            return false;
+        };
+        preview->viewport()->installEventFilter(&panFilter);
         auto *form = new QFormLayout;
         auto *qualityField = new SnapSlider(Qt::Horizontal, &dialog); qualityField->setObjectName(QStringLiteral("jpegQuality")); qualityField->setRange(0, 100); qualityField->setValue(quality);
         auto *qualityValue = new QLabel(QStringLiteral("%1%").arg(quality), &dialog); auto *qualityRow = new QHBoxLayout; qualityRow->addWidget(qualityField, 1); qualityRow->addWidget(qualityValue);
@@ -5920,9 +6005,10 @@ void MainWindow::exportPng(bool jpegDefault)
         const auto updatePreview = [&] {
             QString error; encoded = ImageExporter::jpeg(image, qualityField->value(), matte, document_->resolution, &error);
             buttons->button(QDialogButtonBox::Ok)->setEnabled(encoded.has_value());
-            if (!encoded) { preview->clear(); resultText->setText(error); return; }
-            preview->setPixmap(QPixmap::fromImage(encoded->preview).scaled(preview->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-            resultText->setText(tr("%1 · encoded preview, fitted to window").arg(QLocale().formattedDataSize(encoded->data.size())));
+            if (!encoded) { previewImage = QImage(); layoutPreview(); resultText->setText(error); return; }
+            // The preview may have been decoded smaller than the image (very large exports): it is shown at the image's size.
+            previewImage = encoded->preview; layoutPreview();
+            resultText->setText(tr("%1 · encoded preview, %2% (drag to move, double-click: Fit/100%)").arg(QLocale().formattedDataSize(encoded->data.size())).arg(qRound(shownZoom() * 100)));
         };
         QTimer previewTimer(&dialog); previewTimer.setSingleShot(true); previewTimer.setInterval(200);
         connect(&previewTimer, &QTimer::timeout, &dialog, updatePreview);
