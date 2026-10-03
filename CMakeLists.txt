@@ -101,6 +101,8 @@ add_library(compositor_core
     src/rendering/LayerRenderer.h
     src/rendering/LayerEffectsRenderer.cpp
     src/rendering/LayerEffectsRenderer.h
+    src/rendering/Dither.cpp
+    src/rendering/Dither.h
     src/rendering/DownsampleCache.cpp
     src/rendering/DownsampleCache.h
     src/rendering/RasterOperations.cpp
@@ -118,6 +120,10 @@ add_library(compositor_core
     vendor/compositor-rendering/WandPixels.c
 )
 target_include_directories(compositor_core PUBLIC src vendor/compositor-rendering)
+find_package(OpenMP COMPONENTS C)
+if(OpenMP_C_FOUND)
+    target_link_libraries(compositor_core PRIVATE OpenMP::OpenMP_C)
+endif()
 target_link_libraries(compositor_core PUBLIC Qt6::Core Qt6::Gui Qt6::Concurrent ZLIB::ZLIB)
 if(TARGET heif OR LIBHEIF_FOUND OR (LIBHEIF_INCLUDE_DIR AND LIBHEIF_LIBRARY))
     if(TARGET heif)

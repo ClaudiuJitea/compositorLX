@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rendering/Dither.h"
 #include "core/CameraRaw.h"
 #include "core/DocumentHistory.h"
 #include "core/ImageTrim.h"
@@ -173,6 +174,7 @@ public:
     bool applyColorBalance(const float *shadows, const float *midtones, const float *highlights, bool preserveLuminosity);
     bool applyVignette(double amount, const QColor &color, double midpoint = 50.0, double roundness = 100.0, double feather = 60.0, double highlights = 25.0);
     bool applyBloomGlow(double amount, double radius);
+    bool applyDither(const DitherSettings &settings);
     bool applyTonalContrast(double amount, double radius, double shadows = 40.0, double midtones = 60.0, double highlights = 30.0);
     bool applyCameraRaw(const CameraRawSettings &settings);
     bool applyCameraRaw(const QUuid &id, const CameraRawSettings &settings);
