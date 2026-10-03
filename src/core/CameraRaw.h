@@ -48,7 +48,7 @@ struct CameraRawCurveSettings {
     [[nodiscard]] bool adjusts() const;
     static bool isLinear(const QVector<CurvePoint> &pts);
     [[nodiscard]] double parametric(double tone) const;
-    [[nodiscard]] std::array<float, 256> lumaTable() const;
+    [[nodiscard]] std::array<float, 256> toneTable() const;
     [[nodiscard]] std::array<float, 256> channelTable(const QVector<CurvePoint> &pts) const;
     [[nodiscard]] CameraRawCurveSettings nudged(CameraRawPointChannel ch, double tone, double delta) const;
     [[nodiscard]] CameraRawCurveSettings normalized() const;

@@ -1775,7 +1775,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(addLayer, &QToolButton::clicked, this, [this] { session_.addBlankLayer(); syncDocumentViews(); });
     connect(addGroup, &QToolButton::clicked, this, [this] { session_.addGroup(); syncDocumentViews(); });
     connect(duplicate, &QToolButton::clicked, this, [this] { session_.duplicateActiveLayer(); syncDocumentViews(); });
-    connect(addMask, &QToolButton::clicked, this, [this] { if (session_.addLayerMask()) syncDocumentViews(); });
+    // As in Photoshop: the button reveals the selection; Option-click hides it (a black mask without one).
+    connect(addMask, &QToolButton::clicked, this, [this] { if (session_.addLayerMask(!(QApplication::keyboardModifiers() & Qt::AltModifier))) syncDocumentViews(); });
     connect(trash, &QToolButton::clicked, this, &MainWindow::deleteLayersWithMaskChoice);
     connect(fitTop, &QPushButton::clicked, canvas_, &CanvasWidget::fitCanvas);
     connect(actualTop, &QPushButton::clicked, canvas_, &CanvasWidget::actualPixels);
@@ -2375,6 +2376,8 @@ void MainWindow::createActions()
     auto *maskMenu = layerMenuActions->addMenu(tr("Layer Mask"));
     auto *revealMask = maskMenu->addAction(tr("Reveal All"));
     auto *hideMask = maskMenu->addAction(tr("Hide All"));
+    auto *revealSelectionMask = maskMenu->addAction(tr("Reveal Selection"));
+    auto *hideSelectionMask = maskMenu->addAction(tr("Hide Selection"));
     auto *toggleMask = maskMenu->addAction(tr("Enable/Disable"));
     auto *linkMask = maskMenu->addAction(tr("Link/Unlink from Layer"));
     auto *invertMask = maskMenu->addAction(tr("Invert Mask"));
@@ -2382,6 +2385,8 @@ void MainWindow::createActions()
     auto *deleteMask = maskMenu->addAction(tr("Delete Mask"));
     connect(revealMask, &QAction::triggered, this, [this] { if (session_.addLayerMask(true, false)) syncDocumentViews(); });
     connect(hideMask, &QAction::triggered, this, [this] { if (session_.addLayerMask(false, false)) syncDocumentViews(); });
+    connect(revealSelectionMask, &QAction::triggered, this, [this] { if (session_.addLayerMask(true, true)) syncDocumentViews(); });
+    connect(hideSelectionMask, &QAction::triggered, this, [this] { if (session_.addLayerMask(false, true)) syncDocumentViews(); });
     connect(toggleMask, &QAction::triggered, this, [this] { if (session_.toggleLayerMask()) syncDocumentViews(); });
     connect(linkMask, &QAction::triggered, this, [this] { if (session_.toggleMaskLink()) syncDocumentViews(); });
     connect(invertMask, &QAction::triggered, this, [this] { if (session_.invertLayerMask()) syncDocumentViews(); });

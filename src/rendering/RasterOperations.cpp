@@ -19,6 +19,15 @@ extern "C" {
 namespace compositor {
 
 namespace {
+// Photoshop's Saturation (mac fe7a83d): below 0 it scales toward gray (-100 is gray); above 0 it divides by what is
+// left, so +50 doubles it and +100 takes any color all the way. Multiplicative both ways, so neutral grays stay neutral.
+double adjustedSaturation(double saturation, double amount)
+{
+    amount = std::clamp(amount / 100.0, -1.0, 1.0);
+    if (amount <= 0.0) return std::max(0.0, saturation * (1.0 + amount));
+    if (amount >= 1.0) return saturation > 0.0 ? 1.0 : 0.0;
+    return std::min(1.0, saturation / (1.0 - amount));
+}
 double wrapHue(double value)
 {
     value = std::fmod(value, 360.0);
@@ -311,7 +320,7 @@ QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationS
             } else {
                 const Response &response = responses[size_t(std::clamp(qRound(hueDegrees), 0, 360))];
                 hueDegrees = wrapHue(hueDegrees + response.hue);
-                saturation = std::clamp(saturation * (1 + response.saturation / 100), 0.0, 1.0);
+                saturation = adjustedSaturation(saturation, response.saturation);
                 lightnessAmount = response.lightness / 100;
             }
             lightnessAmount = std::clamp(lightnessAmount, -1.0, 1.0);
@@ -831,7 +840,7 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
 
     // 3. Curve, Mixer, Grading
     if (paintColor) {
-        const auto luma = settings.curve.lumaTable();
+        const auto luma = settings.curve.toneTable();
         const auto redTable = settings.curve.channelTable(settings.curve.red);
         const auto greenTable = settings.curve.channelTable(settings.curve.green);
         const auto blueTable = settings.curve.channelTable(settings.curve.blue);

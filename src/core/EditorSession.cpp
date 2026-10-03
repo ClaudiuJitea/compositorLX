@@ -325,7 +325,10 @@ void EditorSession::invertSelection()
         uchar *row = mask.scanLine(y);
         for (int x = 0; x < mask.width(); ++x) row[x] = uchar(255 - row[x]);
     }
-    document_->selection = mask;
+    // The inverse of everything is no selection at all, as in Photoshop (mac 133c34a) - not an invisible empty one
+    // that quietly stops every brush.
+    const bool empty = std::all_of(mask.constBits(), mask.constBits() + mask.sizeInBytes(), [](uchar v) { return v == 0; });
+    if (empty) document_->selection.reset(); else document_->selection = mask;
     endEdit();
 }
 
@@ -2203,11 +2206,11 @@ bool EditorSession::addLayerMask(bool revealing, bool useSelection)
                 const QPointF mapped = toDocument.map(QPointF(x + .5, y + .5));
                 const QPoint point(qFloor(mapped.x()), qFloor(mapped.y()));
                 const int coverage = QRect(QPoint(), selection.size()).contains(point) ? selection.constScanLine(point.y())[point.x()] : 0;
-                out[x] = uchar(revealing ? 255 - coverage : coverage);
+                out[x] = uchar(revealing ? coverage : 255 - coverage);   // mac b3419ab: the button reveals the selection
             }
         }
     } else { mask = QImage(1, 1, QImage::Format_Grayscale8); mask.fill(revealing ? 255 : 0); }
-    beginEdit(fromSelection ? QStringLiteral("Add Mask from Selection")
+    beginEdit(fromSelection ? (revealing ? QStringLiteral("Reveal Selection") : QStringLiteral("Hide Selection"))
                             : revealing ? QStringLiteral("Add Reveal-All Mask") : QStringLiteral("Add Hide-All Mask"));
     document_->layers[index].mask = mask;
     if (fromSelection) document_->selection.reset();

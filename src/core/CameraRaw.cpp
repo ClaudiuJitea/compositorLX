@@ -49,38 +49,60 @@ bool CameraRawCurveSettings::adjusts() const {
            !isLinear(rgb) || !isLinear(red) || !isLinear(green) || !isLinear(blue);
 }
 
+// Camera Raw's parametric curve, matched to Photoshop's (mac 60d9117): Darks bends the whole range below the middle
+// divider and Lights the whole range above it, Shadows and Highlights just the ranges past the outer dividers. Each
+// bend is a gamma curve across its range, which keeps the curve rising however far the sliders go; the result is run
+// through the same smooth curve as Image > Curves so the halves meet without a corner.
+namespace {
+// Bends tones below `lower` by `low` and above `upper` by `high` (-100..100), leaving black, white and the dividers.
+// Fitted to Photoshop: Darks -51 dips the curve about 0.1 at a quarter of the way up.
+double bendTone(double tone, double lower, double low, double upper, double high) {
+    constexpr double strength = 1.66;
+    if (tone < lower && lower > 0.0) return lower * std::pow(tone / lower, std::pow(2.0, -low / 100.0 * strength));
+    if (tone > upper && upper < 1.0) {
+        const double rest = 1.0 - upper;
+        return 1.0 - rest * std::pow((1.0 - tone) / rest, std::pow(2.0, high / 100.0 * strength));
+    }
+    return tone;
+}
+} // namespace
+
 double CameraRawCurveSettings::parametric(double tone) const {
-    const double shadow = shadowSplit / 100.0;
-    const double dark = darkSplit / 100.0;
-    const double light = lightSplit / 100.0;
-    double amount = 0.0, lo = 0.0, hi = 1.0;
-    if (tone < shadow) {
-        amount = shadows; lo = 0.0; hi = shadow;
-    } else if (tone < dark) {
-        amount = darks; lo = shadow; hi = dark;
-    } else if (tone < light) {
-        amount = lights; lo = dark; hi = light;
-    } else {
-        amount = highlights; lo = light; hi = 1.0;
+    if (shadows == 0.0 && darks == 0.0 && lights == 0.0 && highlights == 0.0) return tone;
+    QVector<CurvePoint> anchors;
+    anchors.reserve(33);
+    for (int i = 0; i <= 32; ++i) {
+        const double x = double(i) / 32.0;
+        const double y = bendTone(bendTone(x, shadowSplit / 100.0, shadows, lightSplit / 100.0, highlights),
+                                  darkSplit / 100.0, darks, darkSplit / 100.0, lights);
+        anchors.push_back({x, y});
     }
-    const double span = std::max(0.02, hi - lo);
-    const double weight = 1.0 - std::abs(tone - (lo + hi) / 2.0) / (span / 2.0);
-    return std::clamp(tone + (amount / 100.0) * std::max(0.0, weight) * 0.22, 0.0, 1.0);
+    return evaluatePoint(tone, anchors);
 }
 
+// The same monotone cubic as Image > Curves (CurvesSettings::value), over 0..1 points and without its 32-point cap,
+// because the parametric curve is sampled at 33 anchors.
 double CameraRawCurveSettings::evaluatePoint(double x, const QVector<CurvePoint> &pts) const {
-    CurvesSettings cs;
-    QVector<CurvePoint> scaled;
-    scaled.reserve(pts.size());
-    for (const auto &p : pts) {
-        scaled.push_back({p.x * 255.0, p.y * 255.0});
-    }
-    cs.channels[0] = scaled;
-    if (scaled.size() < 2) return x;
-    return cs.value(x * 255.0, 0) / 255.0;
+    if (pts.size() < 2) return x;
+    int index = 0;
+    while (index + 2 < pts.size() && pts[index + 1].x <= x) ++index;
+    QVector<double> differences;
+    differences.reserve(pts.size() - 1);
+    for (int i = 0; i + 1 < pts.size(); ++i) differences.push_back((pts[i + 1].y - pts[i].y) / (pts[i + 1].x - pts[i].x));
+    const auto slope = [&](int i) {
+        if (i == 0) return differences.constFirst();
+        if (i == pts.size() - 1) return differences.constLast();
+        if (differences[i - 1] * differences[i] <= 0) return 0.0;
+        return 2 / (1 / differences[i - 1] + 1 / differences[i]);
+    };
+    const double h = pts[index + 1].x - pts[index].x;
+    const double t = std::clamp((x - pts[index].x) / h, 0.0, 1.0);
+    const double y = (2*t*t*t - 3*t*t + 1) * pts[index].y + (t*t*t - 2*t*t + t) * h * slope(index)
+        + (-2*t*t*t + 3*t*t) * pts[index + 1].y + (t*t*t - t*t) * h * slope(index + 1);
+    return std::clamp(y, 0.0, 1.0);
 }
 
-std::array<float, 256> CameraRawCurveSettings::lumaTable() const {
+std::array<float, 256> CameraRawCurveSettings::toneTable() const {
     std::array<float, 256> table{};
     for (int i = 0; i < 256; ++i) {
         const double p = parametric(double(i) / 255.0);
