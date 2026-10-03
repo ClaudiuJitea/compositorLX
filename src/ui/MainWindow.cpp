@@ -8,6 +8,7 @@
 #include "rendering/LayerRenderer.h"
 #include "rendering/TextLayout.h"
 #include "rendering/RasterOperations.h"
+#include "rendering/Dither.h"
 #include "rendering/SubjectRemoval.h"
 #include "ui/CanvasWidget.h"
 #include "ui/LayerListModel.h"
@@ -2567,6 +2568,7 @@ void MainWindow::createActions()
     auto *motionBlur = filterMenu->addAction(tr("Motion Blur…"));
     auto *vignetteAction = filterMenu->addAction(tr("Vignette…"));
     auto *bloomGlowAction = filterMenu->addAction(tr("Bloom / Glow…"));
+    auto *ditherAction = filterMenu->addAction(tr("Dither…"));
     auto *tonalContrastAction = filterMenu->addAction(tr("Tonal Contrast…"));
     auto *removeBackground = filterMenu->addAction(tr("Remove Background…"));
     auto *contentFill = filterMenu->addAction(tr("Content-Aware Fill"));
@@ -2575,6 +2577,7 @@ void MainWindow::createActions()
     connect(motionBlur, &QAction::triggered, this, &MainWindow::motionBlurDialog);
     connect(vignetteAction, &QAction::triggered, this, &MainWindow::vignetteDialog);
     connect(bloomGlowAction, &QAction::triggered, this, &MainWindow::bloomGlowDialog);
+    connect(ditherAction, &QAction::triggered, this, &MainWindow::ditherDialog);
     connect(tonalContrastAction, &QAction::triggered, this, &MainWindow::tonalContrastDialog);
     connect(removeBackground, &QAction::triggered, this, &MainWindow::removeBackgroundDialog);
     connect(contentFill, &QAction::triggered, this, [this] {
@@ -4030,6 +4033,176 @@ void MainWindow::tonalContrastDialog()
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
 
+    preview();
+
+    if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else {
+        restoreLayer(document_.get(), session_, target, original);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+void MainWindow::ditherDialog()
+{
+    Layer *active = session_.activeLayer();
+    if (!active || active->group || active->image.isNull()) return;
+    const QUuid target = active->id;
+    const Layer original = *active;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Dither"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto settings = std::make_shared<DitherSettings>();
+    std::vector<std::pair<int, std::function<bool()>>> rows;  // form row, visibility rule
+    const auto track = [&](std::function<bool()> visible) { rows.emplace_back(form->rowCount() - 1, std::move(visible)); };
+
+    auto *style = new QComboBox(&dialog);
+    style->setObjectName(QStringLiteral("ditherStyle"));
+    const auto &groups = DitherInfo::groups();
+    for (size_t group = 0; group < groups.size(); ++group) {
+        if (group) style->insertSeparator(style->count());
+        for (DitherStyle value : groups[group]) style->addItem(DitherInfo::styleName(value), int(value));
+    }
+    form->addRow(tr("Style"), style);
+
+    const auto spin = [&](const QString &name, const QString &label, double min, double max, double value,
+                          const QString &suffix, double DitherSettings::*field, std::function<bool()> visible) {
+        auto *box = new QDoubleSpinBox(&dialog);
+        box->setObjectName(name);
+        box->setDecimals(0);
+        box->setRange(min, max);
+        box->setValue(value);
+        box->setSuffix(suffix);
+        addScrubRow(form, label, box);
+        track(std::move(visible));
+        connect(box, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, [settings, field](double v) { (*settings).*field = v; });
+        return box;
+    };
+    const auto style_ = [style] { return DitherStyle(style->currentData().toInt()); };
+    const auto always = [] { return true; };
+    const DitherSettings d;
+    spin(QStringLiteral("ditherPixelSize"), tr("Pixel Size"), DitherSettings::pixelSizeMin, DitherSettings::pixelSizeMax, d.pixelSize, tr(" px"),
+         &DitherSettings::pixelSize, [style_] { return DitherInfo::usesPixelSize(style_()); });
+    spin(QStringLiteral("ditherTextSize"), tr("Text Size"), DitherSettings::textSizeMin, DitherSettings::textSizeMax, d.textSize, tr(" px"),
+         &DitherSettings::textSize, [style_] { return style_() == DitherStyle::Ascii; });
+    spin(QStringLiteral("ditherLineSpacing"), tr("Line Spacing"), DitherSettings::lineSpacingMin, DitherSettings::lineSpacingMax, d.lineSpacing, tr(" px"),
+         &DitherSettings::lineSpacing, [style_] { return style_() == DitherStyle::Scanlines; });
+    spin(QStringLiteral("ditherGlow"), tr("Glow"), 0, 100, d.glow, tr("%"), &DitherSettings::glow,
+         [style_] { return style_() == DitherStyle::Scanlines; });
+    spin(QStringLiteral("ditherDots"), tr("Dots"), 0, 100, d.dots, tr("%"), &DitherSettings::dots,
+         [style_] { return style_() == DitherStyle::Scanlines; });
+    spin(QStringLiteral("ditherWobble"), tr("Wobble"), DitherSettings::wobbleMin, DitherSettings::wobbleMax, d.wobble, tr(" px"),
+         &DitherSettings::wobble, [style_] { return style_() == DitherStyle::Scanlines; });
+    spin(QStringLiteral("ditherCellSize"), tr("Cell Size"), DitherSettings::cellSizeMin, DitherSettings::cellSizeMax, d.cellSize, tr(" px"),
+         &DitherSettings::cellSize, [style_] { return DitherInfo::isHalftone(style_()); });
+    spin(QStringLiteral("ditherAngle"), tr("Angle"), -90, 90, d.angle, QString::fromUtf8("\xc2\xb0"), &DitherSettings::angle,
+         [style_] { return DitherInfo::isHalftone(style_()); });
+
+    auto *characters = new QLineEdit(d.characters, &dialog);
+    characters->setObjectName(QStringLiteral("ditherCharacters"));
+    form->addRow(tr("Characters"), characters);
+    track([style_] { return style_() == DitherStyle::Ascii; });
+    connect(characters, &QLineEdit::textChanged, &dialog, [settings](const QString &text) { settings->characters = text; });
+
+    spin(QStringLiteral("ditherLevels"), tr("Tones"), DitherSettings::levelsMin, DitherSettings::levelsMax, d.levels, {},
+         &DitherSettings::levels, [style_] { return DitherInfo::hasTones(style_()); });
+    spin(QStringLiteral("ditherDiffusion"), tr("Diffusion"), 0, 100, d.diffusion, tr("%"), &DitherSettings::diffusion,
+         [style_] { return DitherInfo::diffuses(style_()); });
+    spin(QStringLiteral("ditherDensity"), tr("Density"), -100, 100, d.density, {}, &DitherSettings::density, always);
+    spin(QStringLiteral("ditherContrast"), tr("Contrast"), -100, 100, d.contrast, {}, &DitherSettings::contrast, always);
+
+    auto *lightOnDark = new QCheckBox(tr("Light marks on dark"), &dialog);
+    lightOnDark->setObjectName(QStringLiteral("ditherLightOnDark"));
+    lightOnDark->setChecked(d.lightOnDark);
+    form->addRow(QString(), lightOnDark);
+    track([style_] { return DitherInfo::drawsMarks(style_()); });
+    connect(lightOnDark, &QCheckBox::toggled, &dialog, [settings](bool on) { settings->lightOnDark = on; });
+
+    auto *colors = new QComboBox(&dialog);
+    colors->setObjectName(QStringLiteral("ditherColors"));
+    colors->addItems({tr("Black & White"), tr("Two Colors"), tr("Original")});
+    form->addRow(tr("Colors"), colors);
+
+    const auto toColor = [](const DitherColor &c) { return QColor::fromRgbF(c.red, c.green, c.blue); };
+    const auto swatchStyle = [toColor](QPushButton *button, const DitherColor &c) {
+        button->setStyleSheet(QStringLiteral("background-color: %1;").arg(toColor(c).name()));
+    };
+    auto *darkButton = new QPushButton(&dialog), *lightButton = new QPushButton(&dialog);
+    darkButton->setObjectName(QStringLiteral("ditherDarkColor"));
+    lightButton->setObjectName(QStringLiteral("ditherLightColor"));
+    swatchStyle(darkButton, d.dark);
+    swatchStyle(lightButton, d.light);
+    auto *swatches = new QWidget(&dialog);
+    auto *swatchLayout = new QHBoxLayout(swatches);
+    swatchLayout->setContentsMargins(0, 0, 0, 0);
+    swatchLayout->addWidget(new QLabel(tr("Dark"), swatches));
+    swatchLayout->addWidget(darkButton);
+    swatchLayout->addWidget(new QLabel(tr("Light"), swatches));
+    swatchLayout->addWidget(lightButton);
+    form->addRow(QString(), swatches);
+    track([colors] { return colors->currentIndex() == int(DitherColors::TwoColors); });
+
+    auto *shape = new QComboBox(&dialog);
+    shape->setObjectName(QStringLiteral("ditherPixelShape"));
+    shape->addItems({tr("Square"), tr("Dot")});
+    form->addRow(tr("Pixel Shape"), shape);
+    track([settings, style_] { return settings->pixelSize > 1 && DitherInfo::usesPixelSize(style_()); });
+    layout->addLayout(form);
+
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+    layout->addWidget(previewEnabled);
+
+    session_.beginEdit(QStringLiteral("Dither"));
+    const auto updateRows = [form, rows] {
+        for (const auto &[row, visible] : rows) form->setRowVisible(row, visible());
+    };
+    const auto preview = [this, target, original, settings, previewEnabled] {
+        restoreLayer(document_.get(), session_, target, original);
+        if (previewEnabled->isChecked()) session_.applyDither(*settings);
+        canvas_->invalidateDocument();
+    };
+    const auto refresh = [updateRows, preview] { updateRows(); preview(); };
+    for (auto *box : dialog.findChildren<QDoubleSpinBox *>()) connect(box, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, refresh);
+    connect(characters, &QLineEdit::textChanged, &dialog, refresh);
+    connect(lightOnDark, &QCheckBox::toggled, &dialog, refresh);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+    connect(style, &QComboBox::currentIndexChanged, &dialog, [style, settings, refresh] {
+        settings->style = DitherStyle(style->currentData().toInt());
+        refresh();
+    });
+    connect(colors, &QComboBox::currentIndexChanged, &dialog, [colors, settings, refresh] {
+        settings->colors = DitherColors(colors->currentIndex());
+        refresh();
+    });
+    connect(shape, &QComboBox::currentIndexChanged, &dialog, [shape, settings, refresh] {
+        settings->pixelShape = shape->currentIndex() == 1 ? DitherPixelShape::Dot : DitherPixelShape::Square;
+        refresh();
+    });
+    const auto pickColor = [&dialog, settings, toColor, swatchStyle, refresh](QPushButton *button, DitherColor DitherSettings::*field) {
+        QColorDialog picker(toColor((*settings).*field), &dialog);
+        picker.setWindowTitle(field == &DitherSettings::dark ? tr("Dither Dark Color") : tr("Dither Light Color"));
+        if (picker.exec() != QDialog::Accepted) return;
+        const QColor color = picker.selectedColor();
+        (*settings).*field = DitherColor{color.redF(), color.greenF(), color.blueF()};
+        swatchStyle(button, (*settings).*field);
+        refresh();
+    };
+    connect(darkButton, &QPushButton::clicked, &dialog, [=] { pickColor(darkButton, &DitherSettings::dark); });
+    connect(lightButton, &QPushButton::clicked, &dialog, [=] { pickColor(lightButton, &DitherSettings::light); });
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    settings->style = style_();
+    updateRows();
     preview();
 
     if (runFloatingDialog(dialog) == QDialog::Accepted) {

@@ -184,6 +184,7 @@ private:
     void cameraRawDialog();
     void vignetteDialog();
     void bloomGlowDialog();
+    void ditherDialog();
     void tonalContrastDialog();
     void removeBackgroundDialog();
     void keyboardShortcutsDialog();
