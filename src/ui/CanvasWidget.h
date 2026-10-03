@@ -217,7 +217,8 @@ private:
     [[nodiscard]] QRectF selectedLayersBounds() const;
     [[nodiscard]] QSet<QUuid> transformLayerIds() const;
     [[nodiscard]] bool transformsAsGroup() const;
-    [[nodiscard]] bool transformControlsVisible() const { return showTransformControls_ || persistentTransform_; }
+    // Only the Move tool shows (and grabs) the transform box, as mac TransformOverlay does; painting must never move a layer.
+    [[nodiscard]] bool transformControlsVisible() const { return tool_ == Tool::Move && (showTransformControls_ || persistentTransform_); }
     void drawCheckerboard(QPainter &painter, const QRectF &area) const;
     void startBackgroundRender();
     void zoomTo(double value, const QPointF &anchor);

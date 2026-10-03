@@ -1,5 +1,9 @@
 #pragma once
 
+#include "ui/SliderJumpStyle.h"
+
+#include <QApplication>
+#include <QPalette>
 #include <QString>
 
 namespace compositor {
@@ -254,5 +258,26 @@ inline QString editorStyleSheet()
         QPushButton#createCanvas:hover { background: #3886dc; }
         QToolTip { color: #ededed; background: #303033; border: 1px solid #555; padding: 5px; }
     )css");
+}
+
+// The application's look: Fusion with click-to-position sliders, the dark palette and the editor stylesheet. One place, so
+// the app and the UI snapshot tool cannot drift apart.
+inline void applyEditorTheme(QApplication &application)
+{
+    application.setStyle(new SliderJumpStyle(QStringLiteral("Fusion")));
+    QPalette palette;
+    palette.setColor(QPalette::Window, QColor(31, 31, 31));
+    palette.setColor(QPalette::WindowText, QColor(232, 232, 232));
+    palette.setColor(QPalette::Base, QColor(34, 34, 34));
+    palette.setColor(QPalette::AlternateBase, QColor(42, 42, 42));
+    palette.setColor(QPalette::Text, QColor(232, 232, 232));
+    palette.setColor(QPalette::Button, QColor(50, 50, 50));
+    palette.setColor(QPalette::ButtonText, QColor(234, 234, 234));
+    palette.setColor(QPalette::Highlight, QColor(45, 112, 202));
+    palette.setColor(QPalette::HighlightedText, Qt::white);
+    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(105, 105, 105));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(105, 105, 105));
+    application.setPalette(palette);
+    application.setStyleSheet(editorStyleSheet());
 }
 } // namespace compositor

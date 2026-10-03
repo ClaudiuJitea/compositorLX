@@ -133,6 +133,7 @@ public:
     void cycleSmearMode();
     void cycleToolMode();
     void updateSmearStatusHint();
+    void updateToolHint();
     void updateBlurRadiusVisibility();
 
     QFuture<ProjectWriter::SaveResult> saveProjectAsync(int tabIndex = -1, bool asNew = false, const QString &explicitDestination = QString(), bool isAutosave = false);

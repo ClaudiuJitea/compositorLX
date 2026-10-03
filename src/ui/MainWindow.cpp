@@ -792,8 +792,29 @@ public:
         } else if (clipped) { p->setPen(QColor(145, 190, 235)); p->drawText(QRect(r.left() + 27 + indent, r.top(), 18, r.height()), Qt::AlignCenter, QStringLiteral("↳")); }
         QRect thumb(thumbX, r.top() + 9, 36, 36);
         p->fillRect(thumb, QColor(54, 55, 57));
-        const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
-        if (!icon.isNull()) icon.paint(p, thumb.adjusted(1, 1, -1, -1), Qt::AlignCenter);
+        const bool adjustmentLayer = index.data(Qt::UserRole).toString().startsWith(QObject::tr("Adjustment"));
+        if (group || adjustmentLayer) {
+            // Drawn here, in the same line style as the tool icons: system icon themes are missing or foreign-looking.
+            p->setPen(QPen(QColor(176, 180, 187), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p->setBrush(Qt::NoBrush);
+            const QRectF box = QRectF(thumb).adjusted(8, 9, -8, -9);
+            if (group) {
+                QPainterPath folder;
+                folder.moveTo(box.left(), box.top() + 3); folder.lineTo(box.left(), box.bottom()); folder.lineTo(box.right(), box.bottom());
+                folder.lineTo(box.right(), box.top() + 3); folder.lineTo(box.left() + 6, box.top() + 3); folder.lineTo(box.left() + 4, box.top());
+                folder.lineTo(box.left(), box.top()); folder.closeSubpath();
+                p->drawPath(folder);
+            } else {
+                const QPointF c = QRectF(thumb).center(); const double radius = 7.5;
+                p->drawEllipse(c, radius, radius);
+                QPainterPath half; half.moveTo(c.x(), c.y() - radius); half.arcTo(QRectF(c.x() - radius, c.y() - radius, radius * 2, radius * 2), 90, -180); half.closeSubpath();
+                p->setBrush(QColor(176, 180, 187)); p->drawPath(half);
+            }
+        } else {
+            const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+            if (!icon.isNull()) icon.paint(p, thumb.adjusted(1, 1, -1, -1), Qt::AlignCenter);
+        }
+        // The eye above leaves a filled brush behind: the frames are outlines only, or they paint over the picture.
+        p->setBrush(Qt::NoBrush);
         p->setPen(QColor(92, 94, 98)); p->drawRect(thumb);
         if (index.data(Qt::UserRole + 20).toBool()) {   // editable text badge
             const QRect badge(thumb.right() - 11, thumb.bottom() - 11, 11, 11);
@@ -808,6 +829,7 @@ public:
             QRect maskRect(thumb.right() + 6, r.top() + 9, 36, 36);
             p->fillRect(maskRect, QColor(50, 50, 52));
             p->drawImage(maskRect, mask);
+            p->setBrush(Qt::NoBrush);
             p->setPen(QColor(92, 94, 98)); p->drawRect(maskRect);
             if (index.data(Qt::UserRole + 7).toBool()) { p->setPen(QPen(QColor(226, 80, 80), 2)); p->drawLine(maskRect.bottomLeft() + QPoint(2, -2), maskRect.topRight() + QPoint(-2, 2)); }
             if (index.data(Qt::UserRole + 8).toBool()) {
@@ -1285,13 +1307,40 @@ MainWindow::MainWindow(QWidget *parent)
         railLayout->addWidget(button, 0, Qt::AlignHCenter);
     }
     railLayout->addStretch();
-    auto *colors = new QWidget(rail); colors->setFixedSize(42, 43);
+    auto *colors = new QWidget(rail); colors->setFixedSize(42, 48);
     foregroundSwatch_ = new QLabel(colors); foregroundSwatch_->setGeometry(4, 3, 22, 22); foregroundSwatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid white;border-radius:4px;"));
     backgroundSwatch_ = new QLabel(colors); backgroundSwatch_->setGeometry(16, 17, 22, 22); backgroundSwatch_->setStyleSheet(QStringLiteral("background:#ffffff;border:1px solid white;border-radius:4px;"));
     foregroundSwatch_->setObjectName(QStringLiteral("foregroundSwatch"));
     backgroundSwatch_->setObjectName(QStringLiteral("backgroundSwatch"));
     foregroundSwatch_->installEventFilter(this); backgroundSwatch_->installEventFilter(this);
-    foregroundSwatch_->raise(); railLayout->addWidget(colors, 0, Qt::AlignHCenter);
+    foregroundSwatch_->raise();
+    {   // Swap (X) and default colors (D), as small glyphs at the swatches' corners, so the keys are discoverable.
+        // Drawn at 2x and sized to the 16 px buttons; strokes thick enough to read at 1x.
+        const auto glyph = [](bool swap) {
+            QPixmap pixmap(32, 32); pixmap.setDevicePixelRatio(2); pixmap.fill(Qt::transparent);
+            QPainter g(&pixmap); g.setRenderHint(QPainter::Antialiasing);
+            const QColor ink(190, 194, 201);
+            g.scale(1.12, 1.12);
+            g.setPen(QPen(ink, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); g.setBrush(Qt::NoBrush);
+            if (swap) {   // a bent two-headed arrow: down-left then up-right
+                QPainterPath path; path.moveTo(3.5, 4.5); path.lineTo(3.5, 12.5); path.lineTo(11.5, 12.5);
+                g.drawPath(path);
+                g.drawLine(QPointF(1.5, 6.5), QPointF(3.5, 4.5)); g.drawLine(QPointF(5.5, 6.5), QPointF(3.5, 4.5));
+                g.drawLine(QPointF(9.5, 10.5), QPointF(11.5, 12.5)); g.drawLine(QPointF(9.5, 14.5), QPointF(11.5, 12.5));
+            } else {      // the default pair: a dark square in front of a light one
+                g.setBrush(ink); g.drawRect(QRectF(6.5, 6.5, 7, 7));
+                g.setBrush(QColor(20, 20, 22)); g.drawRect(QRectF(2.5, 2.5, 7, 7));
+            }
+            return QIcon(pixmap);
+        };
+        auto *swap = new QToolButton(colors); swap->setObjectName(QStringLiteral("swapColorsButton")); swap->setAutoRaise(true); swap->setIcon(glyph(true));
+        swap->setIconSize(QSize(16, 16)); swap->setGeometry(26, 0, 16, 16); swap->setToolTip(tr("Swap foreground and background (X)")); swap->setCursor(Qt::PointingHandCursor);
+        auto *reset = new QToolButton(colors); reset->setObjectName(QStringLiteral("resetColorsButton")); reset->setAutoRaise(true); reset->setIcon(glyph(false));
+        reset->setIconSize(QSize(16, 16)); reset->setGeometry(0, 32, 16, 16); reset->setToolTip(tr("Default colors, black and white (D)")); reset->setCursor(Qt::PointingHandCursor);
+        connect(swap, &QToolButton::clicked, this, [this] { if (textEditorHasFocus() || session_.isPainting()) return; session_.swapPaletteColors(); refreshPaletteSwatches(); });
+        connect(reset, &QToolButton::clicked, this, [this] { if (textEditorHasFocus() || session_.isPainting()) return; session_.resetPaletteColors(); refreshPaletteSwatches(); });
+    }
+    railLayout->addWidget(colors, 0, Qt::AlignHCenter);
     workspaceLayout->addWidget(rail);
 
     canvas_ = new CanvasWidget(workspace);
@@ -1440,8 +1489,7 @@ MainWindow::MainWindow(QWidget *parent)
         textLeadingLabel_->setVisible(text); textLeading->setVisible(text);
         textStyleGroup->setVisible(text); textAlignment->setVisible(text);
         textCancel->setVisible(text); textDone->setVisible(text);
-        transformCancel_->setVisible(move || tool == CanvasWidget::Tool::Crop);
-        transformApply_->setVisible(move || tool == CanvasWidget::Tool::Crop);
+        updateTransformButtons();   // visible for Move and Crop, and only while an edit waits for them
         gradientShape->setVisible(tool == CanvasWidget::Tool::Gradient); gradientStyle->setVisible(tool == CanvasWidget::Tool::Gradient);
         gradientReverse->setVisible(tool == CanvasWidget::Tool::Gradient);
         gradientOpacityLabel_->setVisible(tool == CanvasWidget::Tool::Gradient);
@@ -1481,6 +1529,7 @@ MainWindow::MainWindow(QWidget *parent)
             : tool == CanvasWidget::Tool::Hand ? 13 : tool == CanvasWidget::Tool::Zoom ? 14 : -1;
         if (selected >= 0) toolButtons.at(selected)->setChecked(true);
     });
+    connect(canvas_, &CanvasWidget::toolChanged, this, [this](CanvasWidget::Tool) { updateToolHint(); });
     connect(canvas_, &CanvasWidget::toolChanged, this, [this](CanvasWidget::Tool tool) {
         refreshPaletteSwatches();
         // Clone Stamp and Smear each keep their own size, hardness and opacity (both starting soft); Brush, Eraser and
@@ -2420,8 +2469,11 @@ void MainWindow::finishPersistentTransform(bool apply)
 void MainWindow::updateTransformButtons()
 {
     const bool enabled = canvasPendingTransform_ || transformOriginalDocument_.has_value();
-    if (transformApply_) transformApply_->setEnabled(enabled);
-    if (transformCancel_) transformCancel_->setEnabled(enabled);
+    // Shown only while an edit waits for them (typed values, a distortion, a crop box), as mac does: ghosted buttons read
+    // as if something were pending.
+    const bool toolUsesThem = canvas_ && (canvas_->tool() == CanvasWidget::Tool::Move || canvas_->tool() == CanvasWidget::Tool::Crop);
+    if (transformApply_) { transformApply_->setEnabled(enabled); transformApply_->setVisible(enabled && toolUsesThem); }
+    if (transformCancel_) { transformCancel_->setEnabled(enabled); transformCancel_->setVisible(enabled && toolUsesThem); }
 }
 
 void MainWindow::previewGradient(const QPointF &start, const QPointF &end, bool radial,
@@ -2502,6 +2554,33 @@ void MainWindow::updateBlurRadiusVisibility()
     // Blur has a Radius of its own, apart from Strength; Liquify and Smudge have none.
     const bool visible = canvas_ && smearMode_ && canvas_->tool() == CanvasWidget::Tool::Blur && smearMode_->currentIndex() == 1;
     blurRadiusLabel_->setVisible(visible); blurRadiusField_->setVisible(visible);
+}
+
+// What the active tool does, in the status bar: the gestures and keys that are not visible anywhere else.
+void MainWindow::updateToolHint()
+{
+    if (!statusHint_ || !canvas_) return;
+    QString hint;
+    switch (canvas_->tool()) {
+    case CanvasWidget::Tool::Move: hint = tr("Drag to move · Handles to resize · Circle to rotate · Ctrl-drag a handle to distort · 1–0 layer opacity"); break;
+    case CanvasWidget::Tool::Marquee: hint = tr("Drag a box · Shift adds · Alt subtracts · Shift squares it · Move inside to reposition"); break;
+    case CanvasWidget::Tool::Lasso: hint = tr("Drag to draw freehand · Shift adds · Alt subtracts · Esc clears the outline"); break;
+    case CanvasWidget::Tool::Wand: hint = tr("Click to select by color · Shift adds · Alt subtracts · Tab switches Wand and Object"); break;
+    case CanvasWidget::Tool::Crop: hint = tr("Drag a crop box · Alt crops from the center · Enter applies · Esc cancels"); break;
+    case CanvasWidget::Tool::Brush: case CanvasWidget::Tool::Eraser:
+        hint = tr("Drag to paint · [ ] size · Shift-[ ] hardness · 1–0 opacity · Shift-click draws a line · Alt-click picks a color"); break;
+    case CanvasWidget::Tool::Healing: hint = tr("Drag over a blemish to heal it · [ ] size · Shift-click joins strokes"); break;
+    case CanvasWidget::Tool::Clone: hint = tr("Alt-click to set the source, then paint · [ ] size · Aligned keeps the offset"); break;
+    case CanvasWidget::Tool::Blur: updateSmearStatusHint(); return;
+    case CanvasWidget::Tool::Gradient: hint = tr("Drag to draw a gradient · Drag its ends to adjust · Enter applies · Esc cancels"); break;
+    case CanvasWidget::Tool::Shape: hint = tr("Drag to draw a shape · Shift constrains · Shift-U changes the shape · Alt draws from the center"); break;
+    case CanvasWidget::Tool::Text: hint = tr("Click for point text, drag for a paragraph box · Alt-Up/Down changes leading · Esc finishes"); break;
+    case CanvasWidget::Tool::Eyedropper: hint = tr("Click to pick a color · Alt-click in a painting tool does the same"); break;
+    case CanvasWidget::Tool::Hand: hint = tr("Drag to pan · Space pans from any tool"); break;
+    case CanvasWidget::Tool::Zoom: hint = tr("Click to zoom in · Alt-click to zoom out · Drag to zoom continuously"); break;
+    default: return;
+    }
+    statusHint_->setText(hint);
 }
 
 void MainWindow::updateSmearStatusHint()
@@ -6974,11 +7053,7 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
     layerCount_->setText(document_ ? QString::number(document_->layers.size()) : QStringLiteral("0"));
     if (document_) {
         statusDimensions_->setText(QStringLiteral("%1 × %2 px").arg(document_->canvasSize.width()).arg(document_->canvasSize.height()));
-        if (canvas_ && canvas_->tool() == CanvasWidget::Tool::Blur) {
-            updateSmearStatusHint();
-        } else {
-            statusHint_->setText(tr("Drag to move · Handles to resize · Circle to rotate · 1–0 layer opacity · Space to pan"));
-        }
+        updateToolHint();
     }
     updateInspector();
     updateRulerVisibility();

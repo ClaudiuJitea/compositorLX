@@ -19,21 +19,7 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName(QStringLiteral("Compositor"));
     QApplication::setDesktopFileName(QStringLiteral("compositor-lx"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/compositor-lx.png")));
-    application.setStyle(new compositor::SliderJumpStyle(QStringLiteral("Fusion")));
-    QPalette palette;
-    palette.setColor(QPalette::Window, QColor(31, 31, 31));
-    palette.setColor(QPalette::WindowText, QColor(232, 232, 232));
-    palette.setColor(QPalette::Base, QColor(34, 34, 34));
-    palette.setColor(QPalette::AlternateBase, QColor(42, 42, 42));
-    palette.setColor(QPalette::Text, QColor(232, 232, 232));
-    palette.setColor(QPalette::Button, QColor(50, 50, 50));
-    palette.setColor(QPalette::ButtonText, QColor(234, 234, 234));
-    palette.setColor(QPalette::Highlight, QColor(45, 112, 202));
-    palette.setColor(QPalette::HighlightedText, Qt::white);
-    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(105, 105, 105));
-    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(105, 105, 105));
-    application.setPalette(palette);
-    application.setStyleSheet(compositor::editorStyleSheet());
+    compositor::applyEditorTheme(application);
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Compositor image editor for Linux"));
