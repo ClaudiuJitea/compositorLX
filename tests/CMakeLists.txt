@@ -84,3 +84,16 @@ add_executable(canvas_ops_tests
 target_include_directories(canvas_ops_tests PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(canvas_ops_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME canvas_ops_tests COMMAND canvas_ops_tests -platform offscreen)
+add_executable(selection_tests
+    TestSelection.cpp
+)
+target_include_directories(selection_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(selection_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME selection_tests COMMAND selection_tests -platform offscreen)
+
+add_executable(selection_canvas_tests
+    TestSelectionCanvas.cpp
+)
+target_include_directories(selection_canvas_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(selection_canvas_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME selection_canvas_tests COMMAND selection_canvas_tests -platform offscreen)

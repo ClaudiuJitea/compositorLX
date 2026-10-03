@@ -1,4 +1,5 @@
 #include "ui/CanvasWidget.h"
+#include "core/SelectionOps.h"
 
 #include "core/EditorSession.h"
 #include "rendering/LayerRenderer.h"
@@ -78,7 +79,46 @@ static bool transformContains(const LayerTransform &placement, const QPointF &po
 
 static int effectiveSelectionMode(Qt::KeyboardModifiers modifiers, int chosen)
 {
-    return modifiers.testFlag(Qt::AltModifier) ? 2 : modifiers.testFlag(Qt::ShiftModifier) ? 1 : chosen;
+    return SelectionOps::modeForModifiers(modifiers.testFlag(Qt::ShiftModifier), modifiers.testFlag(Qt::AltModifier), chosen);
+}
+
+static QCursor selectionCursor(int mode)
+{
+    static QCursor cursors[3];
+    static bool made = false;
+    if (!made) {
+        for (int m = 0; m < 3; ++m) {
+            QPixmap pixmap(32, 32); pixmap.fill(Qt::transparent);
+            QPainter p(&pixmap);
+            for (const QColor &color : {QColor(Qt::white), QColor(Qt::black)}) {
+                p.setPen(QPen(color, color == Qt::white ? 3 : 1));
+                p.drawLine(4, 12, 20, 12); p.drawLine(12, 4, 12, 20);
+                if (m > 0) { p.drawLine(22, 24, 30, 24); if (m == 1) p.drawLine(26, 20, 26, 28); }
+            }
+            p.end();
+            cursors[m] = QCursor(pixmap, 12, 12);
+        }
+        made = true;
+    }
+    return cursors[std::clamp(mode, 0, 2)];
+}
+
+void CanvasWidget::refreshSelectionCursor()
+{
+    if (tool_ != Tool::Marquee && tool_ != Tool::Lasso && tool_ != Tool::Wand) return;
+    const Qt::KeyboardModifiers held = QGuiApplication::queryKeyboardModifiers();
+    if (cursorDocument_ && document_ && document_->selection && held.testFlag(Qt::ControlModifier)) return;
+    const int mode = selectionDragging_ || !lassoPoints_.isEmpty() ? (tool_ == Tool::Lasso ? lassoMode_ : selectionDragMode_)
+                                                                    : effectiveSelectionMode(held, selectionMode_);
+    setCursor(selectionCursor(mode));
+}
+
+// The Marquee's box: whole pixels, exclusive of the far edge; Shift (pressed afresh) squares it.
+QRect CanvasWidget::marqueeRect(Qt::KeyboardModifiers modifiers) const
+{
+    const QRectF box = SelectionOps::dragBox(QPointF(selectionAnchor_), QPointF(selectionCurrent_),
+                                             marqueeConstrainArmed_ && modifiers.testFlag(Qt::ShiftModifier), false);
+    return QRect(QPoint(qRound(box.left()), qRound(box.top())), QSize(qRound(box.width()), qRound(box.height())));
 }
 
 struct SnapResult { QPointF offset; std::optional<double> x; std::optional<double> y; };
@@ -204,6 +244,7 @@ void CanvasWidget::setTool(Tool tool)
     if (pendingGradient_ && tool != Tool::Gradient) resolvePendingGradient(true);
     if (pendingDistortion_ && tool != Tool::Move) resolvePendingDistortion(true);
     if (tool_ == Tool::Crop && tool != Tool::Crop) resolvePendingCrop(false);
+    if (tool != tool_) { lassoPoints_.clear(); selectionDragging_ = false; }
     tool_ = tool;
     if (tool_ == Tool::Crop && !cropRect_ && document_) {
         std::optional<QRect> selBounds;
@@ -727,7 +768,7 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
         }
     }
     if (selectionDragging_) {
-        const QRect selection = QRect(selectionAnchor_, selectionCurrent_).normalized();
+        const QRect selection = marqueeRect(QGuiApplication::keyboardModifiers());
         const QRectF shown(target.topLeft() + QPointF(selection.topLeft()) * zoom_, QSizeF(selection.size()) * zoom_);
         painter.setBrush(QColor(30, 130, 230, 35));
         painter.setPen(QPen(QColor(235, 242, 250), 1, Qt::DashLine));
@@ -918,6 +959,8 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
             }
         } else {
             selectionDragging_ = true;
+            selectionDragMode_ = effectiveSelectionMode(event->modifiers(), selectionMode_);
+            marqueeConstrainArmed_ = !event->modifiers().testFlag(Qt::ShiftModifier);
             if (tool_ == Tool::Marquee) { const QPointF snapped = snapDragPoint(QPointF(point), event->modifiers()); selectionAnchor_ = selectionCurrent_ = snapped.toPoint(); }
             else { selectionAnchor_ = point; selectionCurrent_ = point; }
             update();
@@ -1388,7 +1431,13 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         return;
     }
     if (movingSelection_) {
-        selectionCurrent_ = snapSelectionMoveEnd(((event->position() - canvasRect().topLeft()) / zoom_).toPoint(), event->modifiers());
+        QPoint end = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
+        // Shift keeps the move on one axis: whichever way the drag has gone further.
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            const QPoint delta = end - selectionAnchor_;
+            if (std::abs(delta.x()) >= std::abs(delta.y())) end.setY(selectionAnchor_.y()); else end.setX(selectionAnchor_.x());
+        }
+        selectionCurrent_ = snapSelectionMoveEnd(end, event->modifiers());
         update(); event->accept(); return;
     }
     if (selectionDragging_) {
@@ -1399,6 +1448,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         }
         selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
         if (tool_ == Tool::Marquee) selectionCurrent_ = snapDragPoint(QPointF(selectionCurrent_), event->modifiers()).toPoint();
+        if (!event->modifiers().testFlag(Qt::ShiftModifier)) marqueeConstrainArmed_ = true;
         update(); event->accept(); return;
     }
     if (brushDrawing_) {
@@ -1428,7 +1478,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
             && document_->selection->convertToFormat(QImage::Format_Grayscale8).constScanLine(point.y())[point.x()] > 0;
         if (insideSelection && event->modifiers().testFlag(Qt::ControlModifier))
             setCursor(event->modifiers().testFlag(Qt::AltModifier) ? Qt::DragCopyCursor : Qt::SizeAllCursor);
-        else setCursor(Qt::CrossCursor);
+        else refreshSelectionCursor();
     } else if (tool_ == Tool::Gradient || tool_ == Tool::Shape || tool_ == Tool::Clone) setCursor(Qt::CrossCursor);
     else if (tool_ == Tool::Crop && document_) {
         const QRectF crop = cropRect_.value_or(QRectF(QPointF(), QSizeF(document_->canvasSize))).normalized();
@@ -1533,14 +1583,23 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
     }
     if (movingSelection_ && event->button() == Qt::LeftButton) {
         movingSelection_ = false;
-        selectionCurrent_ = snapSelectionMoveEnd(((event->position() - canvasRect().topLeft()) / zoom_).toPoint(), event->modifiers());
+        QPoint end = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            const QPoint delta = end - selectionAnchor_;
+            if (std::abs(delta.x()) >= std::abs(delta.y())) end.setY(selectionAnchor_.y()); else end.setX(selectionAnchor_.x());
+        }
+        selectionCurrent_ = snapSelectionMoveEnd(end, event->modifiers());
         snapGuideX_.reset(); snapGuideY_.reset();
-        const QPoint offset = selectionCurrent_ - selectionAnchor_; if (!offset.isNull()) emit selectionMoveRequested(offset);
+        const QPoint offset = selectionCurrent_ - selectionAnchor_;
+        if (!offset.isNull()) emit selectionMoveRequested(offset);
+        // A click inside the selection without a drag selects afresh from that pixel with the Wand and deselects otherwise (mac).
+        else if (tool_ == Tool::Wand) { if (wandMode_ == WandMode::Object) emit objectSelectionRequested(selectionAnchor_, 0); else emit magicWandRequested(selectionAnchor_, 0); }
+        else emit rectangularSelectionRequested(QRect(), 0);
         update(); event->accept(); return;
     }
     if (selectionDragging_ && event->button() == Qt::LeftButton) {
         selectionDragging_ = false;
-        const int mode = effectiveSelectionMode(event->modifiers(), selectionMode_);
+        const int mode = selectionDragMode_;
         if (tool_ == Tool::Lasso && !polygonalLasso_) {
             const QPolygonF points = lassoPoints_; lassoPoints_.clear();
             emit polygonSelectionRequested(points, lassoMode_, selectionAntialiased_); update(); event->accept(); return;
@@ -1548,7 +1607,8 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
         selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
         if (tool_ == Tool::Marquee) selectionCurrent_ = snapDragPoint(QPointF(selectionCurrent_), event->modifiers()).toPoint();
         snapGuideX_.reset(); snapGuideY_.reset();
-        const QRect rect = QRect(selectionAnchor_, selectionCurrent_).normalized();
+        if (!event->modifiers().testFlag(Qt::ShiftModifier)) marqueeConstrainArmed_ = true;
+        const QRect rect = tool_ == Tool::Crop ? QRect(selectionAnchor_, selectionCurrent_).normalized() : marqueeRect(event->modifiers());
         if (tool_ == Tool::Crop) emit cropRequested(rect);
         else if (ellipticalMarquee_) emit ellipticalSelectionRequested(rect, mode, selectionAntialiased_);
         else emit rectangularSelectionRequested(rect, mode);
@@ -1712,7 +1772,7 @@ void CanvasWidget::keyPressEvent(QKeyEvent *event)
                 renderDirty_ = true; update(); emit layerTransformChanged(); emit layerTransformFinished(); event->accept(); return;
             }
         }
-        if (document_ && document_->selection && selectionMode_ == 0
+        if (document_ && document_->selection
             && !(effectiveModifiers & (Qt::ControlModifier | Qt::AltModifier))
             && (tool_ == Tool::Marquee || tool_ == Tool::Lasso || tool_ == Tool::Wand)) {
             emit selectionMoveRequested(delta.toPoint()); event->accept(); return;

@@ -1,5 +1,6 @@
 #include "ui/MainWindow.h"
 #include "core/ToolDefaults.h"
+#include "core/SelectionOps.h"
 #include "io/ImageExporter.h"
 
 #include "io/ProjectReader.h"
@@ -1972,7 +1973,8 @@ MainWindow::MainWindow(QWidget *parent)
         session_.setEllipticalSelection(rect, SelectionMode(mode), antialiased); syncDocumentViews(false);
     });
     connect(canvas_, &CanvasWidget::polygonSelectionRequested, this, [this](const QPolygonF &points, int mode, bool antialiased) {
-        session_.setPolygonSelection(points, SelectionMode(mode), antialiased); syncDocumentViews(false);
+        session_.setPolygonSelection(points, SelectionMode(mode), antialiased,
+                                     canvas_->isPolygonalLasso() ? QStringLiteral("Polygonal Lasso") : QStringLiteral("Lasso")); syncDocumentViews(false);
     });
     connect(canvas_, &CanvasWidget::selectionMoveRequested, this, [this](const QPoint &offset) {
         if (session_.moveSelection(offset)) syncDocumentViews(false);
@@ -1981,7 +1983,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (session_.nudgeSelectedPixels(offset)) syncDocumentViews();
     });
     connect(canvas_, &CanvasWidget::selectedPixelsDragStarted, this, [this](bool duplicate) {
-        if (session_.beginSelectionTransform(duplicate)) syncDocumentViews();
+        if (session_.beginSelectionTransform(duplicate, duplicate ? tr("Duplicate Pixels") : tr("Move Pixels"))) syncDocumentViews();
     });
     connect(canvas_, &CanvasWidget::magicWandRequested, this, [this, wandTolerance, wandSampleSize, wandSample, wandContiguous, selectionAntialias](const QPoint &point, int mode) {
         session_.magicWand(point, wandTolerance->value(), wandSampleSize->currentIndex(), wandContiguous->isChecked(),
@@ -2579,8 +2581,8 @@ void MainWindow::createActions()
     });
     auto *fillForeground = new QAction(tr("Fill with Foreground Color"), this); fillForeground->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Backspace));
     auto *fillBackground = new QAction(tr("Fill with Background Color"), this); fillBackground->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Backspace));
-    connect(fillForeground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteWordBackward)) return; if (session_.fillSelection(foregroundColor_)) syncDocumentViews(); });
-    connect(fillBackground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteToBeginning)) return; if (session_.fillSelection(backgroundColor_)) syncDocumentViews(); });
+    connect(fillForeground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteWordBackward)) return; if (session_.fillSelection(session_.isMaskSelected() ? QColor(Qt::black) : foregroundColor_)) syncDocumentViews(); });
+    connect(fillBackground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteToBeginning)) return; if (session_.fillSelection(session_.isMaskSelected() ? QColor(Qt::white) : backgroundColor_)) syncDocumentViews(); });
     edit->addAction(fillForeground);
     edit->addAction(fillBackground);
     auto *clearPixels = edit->addAction(tr("Clear Selection Pixels"));
@@ -2827,6 +2829,7 @@ void MainWindow::createActions()
     auto *removeBackground = filterMenu->addAction(tr("Remove Background…"));
     auto *contentFill = filterMenu->addAction(tr("Content-Aware Fill"));
     contentFill->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_Delete));
+    contentFill->setObjectName(QStringLiteral("commandContentAwareFill"));
     connect(gaussianBlur, &QAction::triggered, this, &MainWindow::gaussianBlurDialog);
     connect(motionBlur, &QAction::triggered, this, &MainWindow::motionBlurDialog);
     connect(vignetteAction, &QAction::triggered, this, &MainWindow::vignetteDialog);
@@ -3242,10 +3245,21 @@ void MainWindow::createActions()
 void MainWindow::copyPixels(bool merged)
 {
     const auto copied = session_.copiedPixels(merged);
-    if (!copied) return;
-    clipboardImage_ = copied->first; clipboardOrigin_ = copied->second;
-    QGuiApplication::clipboard()->setImage(clipboardImage_);
-    statusHint_->setText(merged ? tr("Copied merged pixels") : tr("Copied pixels"));
+    const Layer *active = session_.activeLayer();
+    // With no selection Copy takes the layer itself (folders and adjustments included), pixels or not.
+    const bool wholeLayer = !merged && document_ && !document_->selection && !session_.isMaskSelected() && active;
+    if (!copied && !wholeLayer) return;
+    copiedLayerIds_.clear();
+    if (copied) {
+        clipboardImage_ = copied->first; clipboardOrigin_ = copied->second;
+        QGuiApplication::clipboard()->setImage(clipboardImage_);
+    } else {
+        clipboardImage_ = QImage(1, 1, QImage::Format_ARGB32); clipboardImage_.fill(Qt::transparent);
+        clipboardOrigin_ = {};
+        QGuiApplication::clipboard()->setImage(clipboardImage_);
+    }
+    if (wholeLayer) copiedLayerIds_ = session_.copyableLayerIds();
+    statusHint_->setText(merged ? tr("Copied merged pixels") : wholeLayer ? tr("Copied layer") : tr("Copied pixels"));
 }
 
 void MainWindow::cutPixels()
@@ -3260,19 +3274,26 @@ void MainWindow::pastePixels()
     if (!document_) return;
     const QImage image = QGuiApplication::clipboard()->image();
     if (image.isNull()) return;
+    const bool ours = !clipboardImage_.isNull() && image == clipboardImage_;
+    if (ours && !copiedLayerIds_.isEmpty()) {
+        const bool here = std::any_of(document_->layers.cbegin(), document_->layers.cend(), [&](const Layer &l) { return copiedLayerIds_.contains(l.id); });
+        if (here) { if (session_.duplicateLayers(copiedLayerIds_, tr("Paste"))) syncDocumentViews(); return; }
+        if (copyLayersToTab(copiedLayerIds_, currentTab_, false)) return;
+        return;
+    }
     QPointF origin;
-    if (!clipboardImage_.isNull() && image == clipboardImage_) origin = clipboardOrigin_;
+    if (ours) origin = clipboardOrigin_;
     else origin = QPointF(std::floor((document_->canvasSize.width() - image.width()) / 2.0),
                           std::floor((document_->canvasSize.height() - image.height()) / 2.0));
-    if (session_.insertPixelLayer(image, origin, QStringLiteral("Pasted Layer"), QStringLiteral("Paste"))) syncDocumentViews();
+    if (session_.insertPixelLayer(image, origin, QString(), QStringLiteral("Paste"))) syncDocumentViews();
 }
 
 void MainWindow::layerViaCopy()
 {
     if (!document_) return;
-    if (!document_->selection) { session_.duplicateActiveLayer(); syncDocumentViews(); return; }
+    if (!document_->selection) { if (!session_.duplicateLayers(session_.copyableLayerIds())) session_.duplicateActiveLayer(); syncDocumentViews(); return; }
     const auto copied = session_.copiedPixels(false);
-    if (copied && session_.insertPixelLayer(copied->first, copied->second, QStringLiteral("Layer via Copy"),
+    if (copied && session_.insertPixelLayer(copied->first, copied->second, QString(),
                                             QStringLiteral("Layer via Copy"))) syncDocumentViews();
 }
 
@@ -6486,7 +6507,7 @@ void MainWindow::updateCommandStates()
         for (QAction *item : menu->actions()) if (item->property("needsCommittedText").toBool()) item->setEnabled(!editingText);
     enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument);
     enabled("imageTrimAction", hasDocument); enabled("imageCropAction", hasDocument);
-    enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy); enabled("commandCopyMerged", hasDocument && hasSelection);
+    enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy || (hasActive && !hasSelection && !session_.isMaskSelected())); enabled("commandCopyMerged", hasDocument && hasSelection);
     enabled("commandPaste", text || !clipboardImage_.isNull() || !QGuiApplication::clipboard()->image().isNull());
     enabled("commandDuplicate", hasActive && (hasSelection ? canCopy : !active->group)); enabled("commandDelete", text || hasActive || selectedEffect_.has_value());
     enabled("commandTransform", hasSelection ? canCopy : canTransformLayer);
@@ -6495,6 +6516,7 @@ void MainWindow::updateCommandStates()
     enabled("commandMerge", session_.canMergeLayers()); enabled("commandMoveUp", session_.canMoveActiveLayer(1)); enabled("commandMoveDown", session_.canMoveActiveLayer(-1));
     enabled("commandNewAdjustment", hasDocument && !editingText); enabled("commandEditAdjustment", !editingText && active && !active->adjustment.isEmpty() && active->adjustment.value(QStringLiteral("kind")).toString() != QStringLiteral("Invert"));
     enabled("commandLayerEffects", session_.canEditEffects());
+    enabled("commandContentAwareFill", hasSelection && active && !active->group && !active->image.isNull() && !session_.isMaskSelected());
     enabled("commandSelectAll", text || hasDocument); enabled("commandDeselect", hasSelection); enabled("commandInverseSelection", hasSelection);
 
     if (QAction *item = action("commandTransform")) item->setText(hasSelection ? tr("Transform Selection") : tr("Transform Layer"));
@@ -6780,6 +6802,15 @@ void MainWindow::syncHeldModifiers()
 {
     auto *autoSelect = findChild<QCheckBox *>(QStringLiteral("transformAutoSelect"));
     auto *lock = findChild<QToolButton *>(QStringLiteral("transformRatioLock"));
+    // Held Shift (add) and Option (subtract) show on the Marquee/Lasso/Magic mode control and cursor as they are held.
+    if (auto *modeControl = findChild<SegmentedControl *>(QStringLiteral("selectionMode")); modeControl && canvas_) {
+        const QWidget *editing = QApplication::focusWidget();
+        const bool field = editing && (qobject_cast<const QLineEdit *>(editing) || qobject_cast<const QAbstractSpinBox *>(editing));
+        const Qt::KeyboardModifiers keys = field ? Qt::KeyboardModifiers() : QApplication::queryKeyboardModifiers();
+        const int shown = SelectionOps::modeForModifiers(keys.testFlag(Qt::ShiftModifier), keys.testFlag(Qt::AltModifier), canvas_->chosenSelectionMode());
+        if (modeControl->currentIndex() != shown) { const QSignalBlocker blocker(modeControl); modeControl->setCurrentIndex(shown); }
+        canvas_->refreshSelectionCursor();
+    }
     if (!autoSelect || !lock) return;
     const QWidget *focus = QApplication::focusWidget();
     const bool typing = focus && (qobject_cast<const QLineEdit *>(focus) || qobject_cast<const QAbstractSpinBox *>(focus) || qobject_cast<const QTextEdit *>(focus) || qobject_cast<const QPlainTextEdit *>(focus));
