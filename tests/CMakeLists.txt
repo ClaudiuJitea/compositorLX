@@ -54,3 +54,10 @@ target_compile_definitions(sync_rendering_tests PRIVATE
     FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
 add_test(NAME sync_rendering_tests COMMAND sync_rendering_tests -platform offscreen)
+
+add_executable(dither_tests
+    TestDither.cpp
+)
+target_include_directories(dither_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(dither_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME dither_tests COMMAND dither_tests -platform offscreen)

@@ -1510,6 +1510,19 @@ bool EditorSession::applyVignette(double amount, const QColor &color, double mid
     return true;
 }
 
+bool EditorSession::applyDither(const DitherSettings &settings)
+{
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || layer->image.isNull()) return false;
+    const int index = indexOf(layer->id);
+    if (index < 0) return false;
+    const QImage dithered = settings.apply(layer->image);
+    if (dithered.isNull()) return false;
+    const QImage result = clippedPixels(layer->image, dithered, *layer, document_->selection);
+    if (result == layer->image) return false;
+    beginEdit(QStringLiteral("Dither")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
+}
+
 bool EditorSession::applyBloomGlow(double amount, double radius)
 {
     const Layer *layer = activeLayer();
