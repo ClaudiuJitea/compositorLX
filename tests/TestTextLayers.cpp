@@ -10,6 +10,8 @@
 #include "rendering/LayerRenderer.h"
 #include "rendering/TextFaces.h"
 #include "rendering/TextLayout.h"
+#include "ui/CanvasWidget.h"
+#include "ui/InlineTextEditor.h"
 
 #include <QFontMetricsF>
 #include <QTemporaryDir>
@@ -270,6 +272,11 @@ private slots:
     void nonFiniteOriginationSizeIsIgnored();
     void hugeStrokeWidthIsRejectedWithoutTrapping();
     void liveShapeImportSavesAndReloads();
+    // Type tool on the canvas
+    void textHitTestFollowsRotationVisibilityAndFolders();
+    void eightHandlesResizeTheBoxAndReflow();
+    void overflowMarkerShowsWhenTextDoesNotFit();
+    void mixedFacesShareOneBaseline();
 };
 
 // ---- TypeToolTests ---------------------------------------------------------------------------------------------
@@ -959,6 +966,130 @@ void TestTextLayers::liveShapeImportSavesAndReloads()
     QVERIFY(loaded.layers.first().shapeStyle.has_value());
     QCOMPARE(loaded.layers.first().transform.origin, QPointF(20, 30));
     QCOMPARE(loaded.layers.first().image.size(), QSize(100, 50));
+}
+
+void TestTextLayers::textHitTestFollowsRotationVisibilityAndFolders()
+{
+    EditorSession session;
+    session.createDocument(800, 600);
+    TextStyle big = style(QStringLiteral("WWWWWWWWWW"), QStringLiteral("DejaVu Sans"), 60);
+    QVERIFY(session.addText(big, QRectF(100, 250, 0, 0), false, false, false, false));
+    auto document = std::make_shared<Document>(*session.document());
+    Layer &text = document->layers.last();
+    const QUuid id = text.id;
+    text.transform.rotation = 90;   // a wide strip turned upright about its center
+    const QPointF center = text.transform.center();
+    CanvasWidget canvas;
+    canvas.resize(900, 700);
+    canvas.setDocument(document);
+    canvas.setZoom(1.0);
+    canvas.setTool(CanvasWidget::Tool::Text);
+    canvas.show();
+    QSignalSpy spy(&canvas, &CanvasWidget::textLayerEditRequested);
+    const auto doubleClickAt = [&](const QPointF &documentPoint) {
+        const QPoint at = canvas.widgetRectForDocumentRect(QRectF(documentPoint, QSizeF(0, 0))).topLeft().toPoint();
+        QTest::mouseDClick(&canvas, Qt::LeftButton, Qt::NoModifier, at);
+    };
+    // Inside the turned rectangle but outside the unturned one: hit. Inside the unturned one only: miss.
+    doubleClickAt(center + QPointF(0, text.transform.size.width() / 2 - 5));
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.last().first().toUuid(), id);
+    doubleClickAt(center + QPointF(text.transform.size.width() / 2 - 5, 0));
+    QCOMPARE(spy.count(), 1);
+    // A hidden layer, and one inside a hidden folder, are not picked.
+    Layer folder; folder.id = QUuid::createUuid(); folder.name = QStringLiteral("F"); folder.group = true; folder.visible = false;
+    document->layers.insert(document->layers.size() - 1, folder);
+    document->layers.last().parentId = folder.id;
+    doubleClickAt(center);
+    QCOMPARE(spy.count(), 1);
+    document->layers[document->layers.size() - 2].visible = true;
+    document->layers.last().parentId.reset();
+    document->layers.last().visible = false;
+    doubleClickAt(center);
+    QCOMPARE(spy.count(), 1);
+}
+
+void TestTextLayers::eightHandlesResizeTheBoxAndReflow()
+{
+    InlineTextEditor editor;
+    editor.canvasBox = QRectF(50, 50, 200, 100);
+    editor.areaText = true;
+    editor.syncCanvasGeometry();
+    editor.show();
+    QCOMPARE(editor.handleAt(QPoint(0, 0)), 0);
+    QCOMPARE(editor.handleAt(QPoint(100, 0)), 1);
+    QCOMPARE(editor.handleAt(QPoint(199, 0)), 2);
+    QCOMPARE(editor.handleAt(QPoint(199, 50)), 3);
+    QCOMPARE(editor.handleAt(QPoint(199, 99)), 4);
+    QCOMPARE(editor.handleAt(QPoint(100, 99)), 5);
+    QCOMPARE(editor.handleAt(QPoint(0, 99)), 6);
+    QCOMPARE(editor.handleAt(QPoint(0, 50)), 7);
+    QCOMPARE(editor.handleAt(QPoint(100, 50)), -1);
+    // Dragging the top-left corner moves the origin and grows the box; the bottom-right changes only the size.
+    QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(1, 1));
+    QMouseEvent move(QEvent::MouseMove, QPointF(-29, -19), editor.mapToGlobal(QPointF(-29, -19)), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(&editor, &move);
+    QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier, QPoint(-29, -19));
+    QCOMPARE(editor.canvasBox.left(), 20.0);
+    QCOMPARE(editor.canvasBox.top(), 30.0);
+    QCOMPARE(editor.canvasBox.right(), 250.0);
+    QCOMPARE(editor.canvasBox.bottom(), 150.0);
+    QVERIFY(editor.areaText);
+    QVERIFY(editor.wasResized());
+}
+
+void TestTextLayers::overflowMarkerShowsWhenTextDoesNotFit()
+{
+    const auto markerPixel = [](InlineTextEditor &editor) {
+        const QImage image = editor.grab().toImage();
+        return image.pixelColor(image.width() - 1, image.height() - 1 - 2);
+    };
+    InlineTextEditor fits;
+    fits.canvasBox = QRectF(0, 0, 220, 120);
+    fits.areaText = true;
+    TextStyle s = style(QStringLiteral("short"), QStringLiteral("DejaVu Sans"), 20);
+    s.boxSize = QSizeF(220, 120);
+    fits.fontSize = 20;
+    fits.loadStyle(s);
+    fits.setLineWrapMode(QTextEdit::FixedPixelWidth);
+    fits.syncCanvasGeometry();
+    fits.applySpacing();
+    fits.show();
+    QVERIFY(markerPixel(fits).lightness() > 200);
+    InlineTextEditor over;
+    over.canvasBox = QRectF(0, 0, 220, 60);
+    over.areaText = true;
+    s.content = QStringLiteral("one two three four five six seven eight nine ten eleven twelve thirteen");
+    s.boxSize = QSizeF(220, 60);
+    over.fontSize = 20;
+    over.loadStyle(s);
+    over.setLineWrapMode(QTextEdit::FixedPixelWidth);
+    over.syncCanvasGeometry();
+    over.applySpacing();
+    over.show();
+    QVERIFY(markerPixel(over).lightness() < 80);
+}
+
+void TestTextLayers::mixedFacesShareOneBaseline()
+{
+    // A larger-descent face on the same line must not move the baseline: the line is a fixed height whatever it holds.
+    TextStyle plain = style(QStringLiteral("HHHH"), QStringLiteral("DejaVu Sans"), 40);
+    TextStyle mixed = plain;
+    mixed.setFont(QStringLiteral("Courier New"), 2, 2);
+    const auto baseline = [](const QImage &image) {
+        int bottom = -1;
+        for (int y = 0; y < image.height(); ++y) for (int x = 12; x < 20; ++x) if (image.pixelColor(x, y).alpha() > 128) bottom = y;
+        return bottom + 1;
+    };
+    QCOMPARE(baseline(renderStyledText(mixed)), baseline(renderStyledText(plain)));
+    // The baseline of the later letters is the same as the first's.
+    const QImage image = renderStyledText(mixed);
+    int firstBottom = -1, lastBottom = -1;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 12; x < 40; ++x) if (image.pixelColor(x, y).alpha() > 128) firstBottom = y;
+        for (int x = image.width() - 40; x < image.width() - 12; ++x) if (image.pixelColor(x, y).alpha() > 128) lastBottom = y;
+    }
+    QVERIFY2(std::abs(firstBottom - lastBottom) <= 1, qPrintable(QString("%1 %2").arg(firstBottom).arg(lastBottom)));
 }
 
 QTEST_MAIN(TestTextLayers)
