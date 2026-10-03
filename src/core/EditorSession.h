@@ -299,6 +299,10 @@ public:
     void setLocksGuides(bool locks) { locksGuides_ = locks; }
     [[nodiscard]] bool showsRulers() const { return showsRulers_; }
     void setShowsRulers(bool shows) { showsRulers_ = shows; }
+    [[nodiscard]] const LayoutGrid &layoutGrid() const { return layoutGrid_; }
+    void setLayoutGrid(const LayoutGrid &grid) { layoutGrid_ = grid; }
+    [[nodiscard]] const GridAppearance &gridAppearance() const { return gridAppearance_; }
+    void setGridAppearance(const GridAppearance &appearance) { gridAppearance_ = appearance; }
     [[nodiscard]] bool showsGrid() const { return showsGrid_; }
     void setShowsGrid(bool shows) { showsGrid_ = shows; }
     [[nodiscard]] bool snapEnabled() const { return snapEnabled_; }
@@ -440,6 +444,8 @@ private:
     bool locksGuides_ = false;
     bool showsRulers_ = false;
     bool showsGrid_ = false;
+    LayoutGrid layoutGrid_;
+    GridAppearance gridAppearance_;
     bool snapEnabled_ = true;
     bool snapToGuides_ = true;
     bool snapToGrid_ = true;

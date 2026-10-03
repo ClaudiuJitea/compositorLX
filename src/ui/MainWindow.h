@@ -171,6 +171,7 @@ private:
     void exposureDialog();
     void hueSaturationDialog();
     void colorRangeDialog();
+    void gridSettingsDialog();
     void curvesDialog();
     void gradientMapDialog();
     void grainDialog();

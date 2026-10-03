@@ -40,6 +40,11 @@ private slots:
     // c3e360a: Select > Color Range
     void colorRangeSelectsNearColorsAndTakesAwayExcluded();
     void colorRangeCommitsAsOneUndoStep();
+    // 1c819d0: GuideTests grid settings
+    void layoutGridTakesItsSpacingAndSubdivisions();
+    void layoutGridKeepsToItsLimits();
+    void gridAppearanceColorsAndStyles();
+    void gridSnapFollowsTheGridSettings();
     // 1318f1e: GroupTests.ungroup*
     void ungroupRestoresChildrenAtTheFoldersSpotAndUndoes();
     void ungroupPreservesClippingBetweenTwoOfAFoldersOwnChildren();
@@ -521,6 +526,64 @@ void TestSyncRendering::colorRangeCommitsAsOneUndoStep()
     empty.fill(0);
     QVERIFY(!session.replaceSelection(empty, QStringLiteral("Color Range")));   // nothing matched: deselects
     QVERIFY(!session.document()->selection.has_value());
+}
+
+void TestSyncRendering::layoutGridTakesItsSpacingAndSubdivisions()
+{
+    const LayoutGrid grid(100, 4);
+    QCOMPARE(grid.lines(200), (QVector<double>{0, 25, 50, 75, 100, 125, 150, 175, 200}));
+    QVERIFY(grid.isMajor(100) && !grid.isMajor(50));
+    const LayoutGrid thirds(100, 3);   // an uneven step still lands on every major line
+    QVector<double> majors;
+    for (const double v : thirds.lines(300)) if (thirds.isMajor(v)) majors << v;
+    QCOMPARE(majors, (QVector<double>{0, 100, 200, 300}));
+    QCOMPARE(LayoutGrid(50, 1).lines(120), (QVector<double>{0, 50, 100}));
+}
+
+void TestSyncRendering::layoutGridKeepsToItsLimits()
+{
+    QCOMPARE(LayoutGrid(0, 0), LayoutGrid(2, 1));
+    QCOMPARE(LayoutGrid(10, 40).subdivisions, 10);   // no finer than a pixel
+    QCOMPARE(LayoutGrid(1000000, 1000).spacing, LayoutGrid::maxSpacing);
+    QCOMPARE(LayoutGrid(1000000, 1000).subdivisions, LayoutGrid::maxSubdivisions);
+}
+
+void TestSyncRendering::gridAppearanceColorsAndStyles()
+{
+    GridAppearance standard;
+    QVERIFY(standard.preset == GridAppearance::Preset::LightGray && standard.style == GridAppearance::Style::Lines);
+    QCOMPARE(standard.color(), QColor::fromRgbF(0.7, 0.7, 0.7));   // the grid looks as it did before it had settings
+    GridAppearance dashed = standard; dashed.style = GridAppearance::Style::DashedLines;
+    QVERIFY(standard.dashes().isEmpty() && !dashed.dashes().isEmpty());
+    GridAppearance appearance; appearance.preset = GridAppearance::Preset::Cyan; appearance.customColor = Qt::black; appearance.style = GridAppearance::Style::Dots;
+    QCOMPARE(appearance.color(), QColor::fromRgbF(0, 1, 1));
+    appearance.preset = GridAppearance::Preset::Custom;
+    QCOMPARE(appearance.color(), QColor(Qt::black));
+    QVERIFY(std::abs(standard.majorAlpha() - 0.45) < 0.001 && std::abs(standard.subdivisionAlpha() - 0.28) < 0.001);
+    appearance.opacity = 100;
+    QVERIFY(appearance.majorAlpha() == 1.0 && appearance.subdivisionAlpha() < 1.0);
+    appearance.opacity = 0;
+    QCOMPARE(appearance.majorAlpha(), 0.01);   // a grid that's on never disappears
+}
+
+void TestSyncRendering::gridSnapFollowsTheGridSettings()
+{
+    EditorSession session;
+    session.createDocument(400, 300);
+    session.setSnapToLayers(false);
+    session.setSnapToDocumentBounds(false);
+    session.setShowsGrid(true);
+    session.setSnapToGrid(true);
+    session.setLayoutGrid(LayoutGrid(100, 2));
+    const auto xs = session.cropSnapTargets().xs;
+    QCOMPARE(QSet<double>(xs.begin(), xs.end()), (QSet<double>{0, 50, 100, 150, 200, 250, 300, 350, 400}));
+    QCOMPARE(session.snappedGuidePosition(52, CanvasGuide::Axis::Vertical), 50.0);
+    session.setLayoutGrid(LayoutGrid());
+    session.setSnapToDocumentBounds(true);
+    std::optional<double> gx, gy;
+    QCOMPARE(session.snappedPoint(QPointF(62, 20), 3.0), QPointF(64, 20));
+    QCOMPARE(session.snappedPoint(QPointF(397.5, 9), 3.0, &gx, &gy), QPointF(400, 8));
+    QVERIFY(gx && *gx == 400 && gy && *gy == 8);   // the lines met are shown
 }
 
 QTEST_MAIN(TestSyncRendering)

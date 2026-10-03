@@ -2825,6 +2825,18 @@ void MainWindow::createActions()
         session_.setLocksGuides(locked);
     });
 
+    {   // The grid's spacing and look are remembered between sessions.
+        QSettings settings;
+        session_.setLayoutGrid(LayoutGrid(settings.value(QStringLiteral("grid/spacing"), 64).toInt(), settings.value(QStringLiteral("grid/subdivisions"), 8).toInt()));
+        GridAppearance look;
+        look.preset = GridAppearance::Preset(std::clamp(settings.value(QStringLiteral("grid/preset"), 0).toInt(), 0, int(GridAppearance::Preset::Custom)));
+        look.customColor = QColor(settings.value(QStringLiteral("grid/customColor"), QStringLiteral("#b3b3b3")).toString());
+        look.style = GridAppearance::Style(std::clamp(settings.value(QStringLiteral("grid/style"), 0).toInt(), 0, int(GridAppearance::Style::Dots)));
+        look.opacity = std::clamp(settings.value(QStringLiteral("grid/opacity"), 45).toInt(), GridAppearance::minOpacity, GridAppearance::maxOpacity);
+        session_.setGridAppearance(look);
+    }
+    auto *gridSettings = view->addAction(tr("Grid Settings…")); gridSettings->setObjectName(QStringLiteral("commandGridSettings"));
+    connect(gridSettings, &QAction::triggered, this, [this] { gridSettingsDialog(); });
     actionClearGuides_ = view->addAction(tr("Clear Guides"));
     actionClearGuides_->setObjectName(QStringLiteral("commandClearGuides"));
     actionClearGuides_->setEnabled(session_.canClearGuides());
@@ -3118,6 +3130,63 @@ void MainWindow::exposureDialog()
 
 // Select > Color Range (mac c3e360a): every pixel near the colors clicked on the canvas, anywhere in the image. The
 // dialog shows the selection live; OK keeps it as one undo step, Cancel puts back the one there was.
+// View > Grid Settings... (mac 1c819d0): the grid's spacing and subdivisions, and how it is drawn. Changes show as
+// they are made; Cancel puts back what was there.
+void MainWindow::gridSettingsDialog()
+{
+    const LayoutGrid originalGrid = session_.layoutGrid();
+    const GridAppearance originalLook = session_.gridAppearance();
+    QDialog dialog(this); dialog.setWindowTitle(tr("Grid Settings")); dialog.setObjectName(QStringLiteral("gridSettingsDialog"));
+    auto *form = new QFormLayout(&dialog);
+    auto *preset = new QComboBox(&dialog); preset->setObjectName(QStringLiteral("gridColorPreset"));
+    for (int i = 0; i <= int(GridAppearance::Preset::Custom); ++i) preset->addItem(GridAppearance::presetName(GridAppearance::Preset(i)));
+    auto *color = new QPushButton(&dialog); color->setObjectName(QStringLiteral("gridCustomColor")); color->setFixedWidth(60);
+    auto *colorRow = new QHBoxLayout; colorRow->addWidget(preset, 1); colorRow->addWidget(color);
+    auto *style = new QComboBox(&dialog); style->setObjectName(QStringLiteral("gridStyle"));
+    for (int i = 0; i <= int(GridAppearance::Style::Dots); ++i) style->addItem(GridAppearance::styleName(GridAppearance::Style(i)));
+    auto *opacity = new QSpinBox(&dialog); opacity->setRange(GridAppearance::minOpacity, GridAppearance::maxOpacity); opacity->setSuffix(QStringLiteral("%")); opacity->setObjectName(QStringLiteral("gridOpacity"));
+    auto *spacing = new QSpinBox(&dialog); spacing->setRange(LayoutGrid::minSpacing, LayoutGrid::maxSpacing); spacing->setSuffix(tr(" px")); spacing->setObjectName(QStringLiteral("gridSpacing"));
+    auto *subdivisions = new QSpinBox(&dialog); subdivisions->setRange(LayoutGrid::minSubdivisions, LayoutGrid::maxSubdivisions); subdivisions->setObjectName(QStringLiteral("gridSubdivisions"));
+    form->addRow(tr("Color"), colorRow); form->addRow(tr("Style"), style); form->addRow(tr("Opacity"), opacity);
+    form->addRow(tr("Gridline every"), spacing); form->addRow(tr("Subdivisions"), subdivisions);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::RestoreDefaults | QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+
+    GridAppearance look = originalLook;
+    const auto showFields = [&](const LayoutGrid &grid, const GridAppearance &appearance) {
+        const QSignalBlocker b1(preset), b2(style), b3(opacity), b4(spacing), b5(subdivisions);
+        preset->setCurrentIndex(int(appearance.preset)); style->setCurrentIndex(int(appearance.style)); opacity->setValue(appearance.opacity);
+        spacing->setValue(grid.spacing); subdivisions->setValue(grid.subdivisions);
+        color->setStyleSheet(QStringLiteral("background:%1;").arg(appearance.customColor.name())); color->setEnabled(appearance.preset == GridAppearance::Preset::Custom);
+    };
+    const auto apply = [&] {
+        look.preset = GridAppearance::Preset(preset->currentIndex()); look.style = GridAppearance::Style(style->currentIndex()); look.opacity = opacity->value();
+        // Subdivisions are never finer than a pixel: the field follows the spacing.
+        subdivisions->setMaximum(std::min(LayoutGrid::maxSubdivisions, spacing->value()));
+        session_.setLayoutGrid(LayoutGrid(spacing->value(), subdivisions->value())); session_.setGridAppearance(look);
+        color->setEnabled(look.preset == GridAppearance::Preset::Custom); canvas_->update();
+    };
+    for (QComboBox *box : {preset, style}) connect(box, &QComboBox::currentIndexChanged, &dialog, [&](int) { apply(); });
+    for (QSpinBox *box : {opacity, spacing, subdivisions}) connect(box, &QSpinBox::valueChanged, &dialog, [&](int) { apply(); });
+    connect(color, &QPushButton::clicked, &dialog, [&] {
+        const QColor chosen = QColorDialog::getColor(look.customColor, &dialog, tr("Grid Color"));
+        if (!chosen.isValid()) return;
+        look.customColor = chosen; color->setStyleSheet(QStringLiteral("background:%1;").arg(chosen.name())); apply();
+    });
+    connect(buttons->button(QDialogButtonBox::RestoreDefaults), &QPushButton::clicked, &dialog, [&] {
+        look = GridAppearance(); showFields(LayoutGrid(), look); apply();
+    });
+    showFields(originalGrid, originalLook);
+    if (dialog.exec() == QDialog::Accepted) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("grid/spacing"), session_.layoutGrid().spacing); settings.setValue(QStringLiteral("grid/subdivisions"), session_.layoutGrid().subdivisions);
+        settings.setValue(QStringLiteral("grid/preset"), int(look.preset)); settings.setValue(QStringLiteral("grid/customColor"), look.customColor.name());
+        settings.setValue(QStringLiteral("grid/style"), int(look.style)); settings.setValue(QStringLiteral("grid/opacity"), look.opacity);
+    } else { session_.setLayoutGrid(originalGrid); session_.setGridAppearance(originalLook); }
+    canvas_->update();
+}
+
 void MainWindow::colorRangeDialog()
 {
     if (!document_) return;

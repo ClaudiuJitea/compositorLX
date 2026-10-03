@@ -82,25 +82,86 @@ struct CanvasGuide {
     }
 };
 
+// Non-printing layout grid: a major line every `spacing` px, split into `subdivisions` (64 px and eight, every 8 px,
+// until changed in View > Grid Settings...). Mac 1c819d0.
 struct LayoutGrid {
-    static constexpr double spacing = 64.0;
-    static constexpr int subdivisions = 8;
-    static constexpr double step = spacing / double(subdivisions);
+    static constexpr int minSpacing = 2, maxSpacing = 4096, minSubdivisions = 1, maxSubdivisions = 64;
+    int spacing = 64;
+    int subdivisions = 8;
 
-    static QVector<double> lines(double length) {
-        if (length < 0.0 || step <= 0.0) return {0.0};
+    LayoutGrid() = default;
+    LayoutGrid(int spacingValue, int subdivisionsValue)
+        : spacing(std::clamp(spacingValue, minSpacing, maxSpacing)),
+          subdivisions(std::clamp(subdivisionsValue, minSubdivisions, std::min(maxSubdivisions, std::clamp(spacingValue, minSpacing, maxSpacing)))) {}
+
+    [[nodiscard]] double step() const { return double(spacing) / double(subdivisions); }
+
+    // Every grid line along a document edge, including subdivisions, in whole pixels. Counted from the origin rather
+    // than added up, so an uneven step doesn't drift off the majors.
+    [[nodiscard]] QVector<double> lines(double length) const {
+        if (length < 0.0) return {0.0};
         QVector<double> result;
-        double value = 0.0;
-        while (value <= length + 0.001) {
-            result.push_back(std::round(value));
-            value += step;
-        }
+        const int count = int(std::floor(length / step() + 0.001));
+        result.reserve(count + 1);
+        for (int i = 0; i <= count; ++i) result.push_back(std::round(i * step()));
         return result;
     }
 
-    static bool isMajor(double value) {
-        return std::abs(std::fmod(std::round(value), spacing)) < 0.001;
+    [[nodiscard]] bool isMajor(double value) const {
+        return std::abs(std::fmod(std::round(value), double(spacing))) < 0.001;
     }
+    bool operator==(const LayoutGrid &) const = default;
+};
+
+// How the layout grid is drawn (View > Grid Settings...), after Photoshop's Guides, Grid & Slices settings. Lines are
+// drawn at the chosen opacity; subdivisions are dotted and fainter still.
+struct GridAppearance {
+    enum class Preset { LightGray, LightBlue, LightRed, Green, MediumBlue, Yellow, Magenta, Cyan, Black, Custom };
+    enum class Style { Lines, DashedLines, Dots };
+    static constexpr int minOpacity = 1, maxOpacity = 100;
+
+    Preset preset = Preset::LightGray;
+    // Used while `preset` is Custom; kept when another preset is chosen, so switching back finds it.
+    QColor customColor = QColor::fromRgbF(0.7, 0.7, 0.7);
+    Style style = Style::Lines;
+    int opacity = 45;   // percent, of the major lines
+
+    [[nodiscard]] static QString presetName(Preset p) {
+        static const char *names[] = {"Light Gray", "Light Blue", "Light Red", "Green", "Medium Blue", "Yellow", "Magenta", "Cyan", "Black", "Custom"};
+        return QString::fromLatin1(names[int(p)]);
+    }
+    [[nodiscard]] static QString styleName(Style st) {
+        static const char *names[] = {"Lines", "Dashed Lines", "Dots"};
+        return QString::fromLatin1(names[int(st)]);
+    }
+    [[nodiscard]] QColor color() const {
+        switch (preset) {
+        case Preset::LightGray: return QColor::fromRgbF(0.7, 0.7, 0.7);
+        case Preset::LightBlue: return QColor::fromRgbF(0.29, 0.78, 1.0);
+        case Preset::LightRed: return QColor::fromRgbF(1.0, 0.4, 0.4);
+        case Preset::Green: return QColor::fromRgbF(0.25, 0.8, 0.25);
+        case Preset::MediumBlue: return QColor::fromRgbF(0.2, 0.4, 1.0);
+        case Preset::Yellow: return QColor::fromRgbF(1.0, 1.0, 0.0);
+        case Preset::Magenta: return QColor::fromRgbF(1.0, 0.0, 1.0);
+        case Preset::Cyan: return QColor::fromRgbF(0.0, 1.0, 1.0);
+        case Preset::Black: return QColor::fromRgbF(0.0, 0.0, 0.0);
+        case Preset::Custom: return customColor;
+        }
+        return customColor;
+    }
+    // On and off lengths in screen points; empty for a solid line.
+    [[nodiscard]] QVector<qreal> dashes() const {
+        switch (style) {
+        case Style::Lines: return {};
+        case Style::DashedLines: return {4.0, 3.0};
+        case Style::Dots: return {1.0, 2.0};
+        }
+        return {};
+    }
+    [[nodiscard]] double majorAlpha() const { return double(std::clamp(opacity, minOpacity, maxOpacity)) / 100.0; }
+    // Subdivisions at a little over half the majors' opacity: 28% beside the default 45%.
+    [[nodiscard]] double subdivisionAlpha() const { return majorAlpha() * 28.0 / 45.0; }
+    bool operator==(const GridAppearance &) const = default;
 };
 
 enum class LayerEffectKind {

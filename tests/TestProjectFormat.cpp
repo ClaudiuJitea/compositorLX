@@ -4073,12 +4073,12 @@ void TestProjectFormat::testPersistentGuidesAndRulersEndToEnd()
 
     // Part 7: layoutGridLinesIncludeMajorsAndSubdivisions (matches GuideTests.swift)
     {
-        const QVector<double> lines = LayoutGrid::lines(64.0);
+        const QVector<double> lines = LayoutGrid().lines(64.0);
         QVERIFY(!lines.isEmpty());
         QCOMPARE(lines.first(), 0.0);
         QCOMPARE(lines.last(), 64.0);
         QVERIFY(lines.contains(8.0) && lines.contains(64.0));
-        QVERIFY(LayoutGrid::isMajor(0.0) && LayoutGrid::isMajor(64.0) && !LayoutGrid::isMajor(8.0));
+        QVERIFY(LayoutGrid().isMajor(0.0) && LayoutGrid().isMajor(64.0) && !LayoutGrid().isMajor(8.0));
     }
 
     // Part 8: rulerStepUsesNicePixelIntervals (matches GuideTests.swift)

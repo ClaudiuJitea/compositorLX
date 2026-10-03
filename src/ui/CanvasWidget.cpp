@@ -490,33 +490,40 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
     if (session_ && session_->showsGrid()) {
         painter.save();
         painter.setClipRect(target);
-        const double subdivisionGap = LayoutGrid::step * zoom_;
+        const LayoutGrid &grid = session_->layoutGrid();
+        const GridAppearance &look = session_->gridAppearance();
+        QColor base = look.color();
+        const double subdivisionGap = grid.step() * zoom_;
         if (subdivisionGap >= 4.0) {
-            QPen subPen(QColor(140, 140, 140, 71), 1.0);
+            QColor sub = base; sub.setAlphaF(look.subdivisionAlpha());
+            QPen subPen(sub, 1.0);
             subPen.setDashPattern({1.0, 2.0});
             painter.setPen(subPen);
-            for (double x : LayoutGrid::lines(document_->canvasSize.width())) {
-                if (!LayoutGrid::isMajor(x)) {
+            for (double x : grid.lines(document_->canvasSize.width())) {
+                if (!grid.isMajor(x)) {
                     const double vx = target.left() + x * zoom_;
                     painter.drawLine(QPointF(vx, target.top()), QPointF(vx, target.bottom()));
                 }
             }
-            for (double y : LayoutGrid::lines(document_->canvasSize.height())) {
-                if (!LayoutGrid::isMajor(y)) {
+            for (double y : grid.lines(document_->canvasSize.height())) {
+                if (!grid.isMajor(y)) {
                     const double vy = target.top() + y * zoom_;
                     painter.drawLine(QPointF(target.left(), vy), QPointF(target.right(), vy));
                 }
             }
         }
-        painter.setPen(QPen(QColor(178, 178, 178, 115), 1.0));
-        for (double x : LayoutGrid::lines(document_->canvasSize.width())) {
-            if (LayoutGrid::isMajor(x)) {
+        QColor major = base; major.setAlphaF(look.majorAlpha());
+        QPen majorPen(major, 1.0);
+        if (!look.dashes().isEmpty()) majorPen.setDashPattern(look.dashes());
+        painter.setPen(majorPen);
+        for (double x : grid.lines(document_->canvasSize.width())) {
+            if (grid.isMajor(x)) {
                 const double vx = target.left() + x * zoom_;
                 painter.drawLine(QPointF(vx, target.top()), QPointF(vx, target.bottom()));
             }
         }
-        for (double y : LayoutGrid::lines(document_->canvasSize.height())) {
-            if (LayoutGrid::isMajor(y)) {
+        for (double y : grid.lines(document_->canvasSize.height())) {
+            if (grid.isMajor(y)) {
                 const double vy = target.top() + y * zoom_;
                 painter.drawLine(QPointF(target.left(), vy), QPointF(target.right(), vy));
             }

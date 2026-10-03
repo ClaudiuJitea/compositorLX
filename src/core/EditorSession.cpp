@@ -3799,7 +3799,7 @@ double EditorSession::snappedGuidePosition(double position, CanvasGuide::Axis ax
         : double(document_->canvasSize.height());
 
     if (snapToGrid_ && showsGrid_) {
-        targets += LayoutGrid::lines(length);
+        targets += layoutGrid_.lines(length);
     }
     if (snapToGuides_ && showsGuides_) {
         for (const CanvasGuide &g : displayedGuides()) {
@@ -3972,8 +3972,8 @@ EditorSession::SnapTargets EditorSession::alignmentSnapTargets(const QSet<QUuid>
 
     // Hidden extras do not snap, matching Photoshop.
     if (snapToGrid_ && showsGrid_) {
-        xs += LayoutGrid::lines(document_->canvasSize.width());
-        ys += LayoutGrid::lines(document_->canvasSize.height());
+        xs += layoutGrid_.lines(document_->canvasSize.width());
+        ys += layoutGrid_.lines(document_->canvasSize.height());
     }
 
     if (snapToGuides_ && showsGuides_) {
