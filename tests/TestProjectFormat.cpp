@@ -4860,10 +4860,10 @@ void TestProjectFormat::testSection6SelectionAndSubjectTools()
     std::atomic<bool> cancelToken{true};
     QVERIFY(!subjSession.selectSubject(true, SelectionMode::Replace, nullptr, &cancelToken));
 
-    // Memory limit safety: canvas > 100,000,000 pixels
+    // Memory limit safety: canvas > 200,000,000 pixels (DocumentLimits::maxSurfacePixels)
     auto hugeDoc = std::make_shared<Document>();
     hugeDoc->id = QUuid::createUuid();
-    hugeDoc->canvasSize = QSize(20000, 6000); // 120,000,000 pixels
+    hugeDoc->canvasSize = QSize(30000, 8000); // 240,000,000 pixels
     EditorSession hugeSession;
     hugeSession.setDocument(hugeDoc);
     QString memErr;

@@ -2,7 +2,10 @@
 #include "core/CameraRaw.h"
 #include "core/Document.h"
 #include "io/PSDReader.h"
+#include "io/ProjectReader.h"
 #include "io/ProjectWriter.h"
+#include <QDir>
+#include <QTemporaryDir>
 #include "core/EditorSession.h"
 #include "rendering/LayerRenderer.h"
 #include "rendering/RasterOperations.h"
@@ -48,6 +51,7 @@ private slots:
     void gridSnapFollowsTheGridSettings();
     // b3419ab: MaskAloneTests
     void maskAloneFollowsTheTargetAndTheActiveLayer();
+    void editsRaiseTheProjectFormatAndUndoRestoresIt();
     // Review findings
     void psdLevelsAreNormalizedLikeMac();
     void minimumRequiredVersionCoversPastedContent();
@@ -657,6 +661,22 @@ void TestSyncRendering::textRunValidationMatchesMacNewlines()
     }
     t.fontRuns = QVector<TextFontRun>{{0, 2, QStringLiteral("Courier")}};
     QVERIFY(t.isValid());
+}
+
+void TestSyncRendering::editsRaiseTheProjectFormatAndUndoRestoresIt()
+{
+    EditorSession session;
+    QVERIFY(session.openProject(QDir(QStringLiteral(FIXTURES_DIR)).filePath(QStringLiteral("valid/v1_basic.comp"))));
+    QCOMPARE(session.document()->formatVersion, 1);
+    QVERIFY(session.addLayerMask(true, false));                 // masks need format 4
+    QVERIFY(session.document()->formatVersion >= 4);
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    ProjectWriter::save(*session.document(), dir.filePath(QStringLiteral("masked.comp")));   // used to throw: "masks require format version 4"
+    QCOMPARE(ProjectReader::load(dir.filePath(QStringLiteral("masked.comp"))).layers.size(), session.document()->layers.size());
+    session.undo();
+    QCOMPARE(session.document()->formatVersion, 1);              // an untouched project stays as old as it was
+    session.redo();
+    QVERIFY(session.document()->formatVersion >= 4);
 }
 
 QTEST_MAIN(TestSyncRendering)

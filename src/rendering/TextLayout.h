@@ -169,7 +169,7 @@ inline QSize pointTextBoxSize(QTextDocument &document, double fontSize, double l
 inline QImage drawTextBox(QTextDocument &document, const QSize &size, double lineHeight)
 {
     if (size.width() < 1 || size.height() < 1 || size.width() > 30000 || size.height() > 30000
-        || qint64(size.width()) * size.height() > 100000000LL) return {};
+        || qint64(size.width()) * size.height() > DocumentLimits::maxSurfacePixels) return {};
     document.setTextWidth(std::max(1.0, size.width() - 2 * kTextPadding));
     const double shift = baselineShift(document, lineHeight);
     QImage image(size, QImage::Format_RGBA8888_Premultiplied); image.fill(Qt::transparent);

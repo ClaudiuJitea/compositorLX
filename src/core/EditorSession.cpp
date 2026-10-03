@@ -266,7 +266,7 @@ bool EditorSession::insertPixelLayer(const QImage &image, const QPointF &origin,
                                      const QString &historyName, bool dropsSelection)
 {
     if (!document_ || image.isNull() || image.width() > 30000 || image.height() > 30000
-        || qint64(image.width()) * image.height() > 100000000LL) return false;
+        || qint64(image.width()) * image.height() > DocumentLimits::maxSurfacePixels) return false;
     Layer layer; layer.id = QUuid::createUuid(); layer.name = name.trimmed().isEmpty() ? nextName(QStringLiteral("Layer")) : name.trimmed();
     layer.image = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied); layer.transform.origin = origin; layer.transform.size = image.size();
     const Layer *active = activeLayer(); layer.parentId = active && active->group ? document_->activeLayerId : active ? active->parentId : std::nullopt;
@@ -552,7 +552,7 @@ EditorSession::SelectionSnapshot EditorSession::createSelectionSnapshot(bool sam
         snapshot.error = error ? *error : QObject::tr("No document is open.");
         return snapshot;
     }
-    if (qint64(document_->canvasSize.width()) * document_->canvasSize.height() > 100000000LL ||
+    if (qint64(document_->canvasSize.width()) * document_->canvasSize.height() > DocumentLimits::maxSurfacePixels ||
         document_->canvasSize.width() > 30000 || document_->canvasSize.height() > 30000) {
         if (error) *error = QObject::tr("Image dimensions exceed memory limits.");
         snapshot.error = error ? *error : QObject::tr("Image dimensions exceed memory limits.");
@@ -853,7 +853,7 @@ bool EditorSession::fillSelection(const QColor &color)
     QImage original = layer->image;
     if (original.isNull()) {
         const QSize size = layer->transform.size.toSize().expandedTo(QSize(1, 1));
-        if (qint64(size.width()) * size.height() > 100000000LL) return false;
+        if (qint64(size.width()) * size.height() > DocumentLimits::maxSurfacePixels) return false;
         original = QImage(size, QImage::Format_RGBA8888_Premultiplied); original.fill(Qt::transparent);
     }
     QImage painted(original.size(), QImage::Format_RGBA8888_Premultiplied); painted.fill(color);
@@ -943,7 +943,7 @@ bool EditorSession::commitSelectionTransform()
     const QRectF originalBounds(QPointF(), source.image.size());
     const QRect extent = originalBounds.united(movedBounds).toAlignedRect();
     if (extent.width() < 1 || extent.height() < 1 || extent.width() > 30000 || extent.height() > 30000
-        || qint64(extent.width()) * extent.height() > 100000000LL) { cancelSelectionTransform(); return false; }
+        || qint64(extent.width()) * extent.height() > DocumentLimits::maxSurfacePixels) { cancelSelectionTransform(); return false; }
     QImage merged(extent.size(), QImage::Format_RGBA8888_Premultiplied); merged.fill(Qt::transparent);
     QPainter painter(&merged);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, floating.transform.sampling != Sampling::Nearest);
@@ -1011,7 +1011,7 @@ bool EditorSession::applyGradient(const QPointF &start, const QPointF &end, cons
     QImage original = maskTarget ? expandedMaskImage(*layer) : layer->image;
     if (!maskTarget && original.isNull()) {
         const QSize size = layer->transform.size.toSize().expandedTo(QSize(1, 1));
-        if (qint64(size.width()) * size.height() > 100000000LL) return false;
+        if (qint64(size.width()) * size.height() > DocumentLimits::maxSurfacePixels) return false;
         original = QImage(size, QImage::Format_RGBA8888_Premultiplied); original.fill(Qt::transparent);
     }
     Layer target = *layer;
@@ -1097,7 +1097,7 @@ bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &
         origin = QPointF(std::floor(rect.left()) - margin, std::floor(rect.top()) - margin);
     }
 
-    if (qint64(size.width()) * size.height() > 100000000LL) return false;
+    if (qint64(size.width()) * size.height() > DocumentLimits::maxSurfacePixels) return false;
     QImage image(size, QImage::Format_RGBA8888_Premultiplied);
     image.fill(Qt::transparent);
     QPainter painter(&image);
@@ -1368,7 +1368,7 @@ void EditorSession::redrawSelectedShapes()
         const int width = std::max(1, qRound(layer.transform.size.width()));
         const int height = std::max(1, qRound(layer.transform.size.height()));
         if (width == layer.image.width() && height == layer.image.height()) continue;
-        if (qint64(width) * height > 100000000LL) continue;
+        if (qint64(width) * height > DocumentLimits::maxSurfacePixels) continue;
         const LayerTransform oldPlacement = layer.transform;
 
         if (layer.text) {
@@ -1674,7 +1674,7 @@ bool EditorSession::applySpreadingFilter(const QString &historyName, double marg
     const int grownWidth = qRound(extent.width());
     const int grownHeight = qRound(extent.height());
 
-    if (grownWidth > 30000 || grownHeight > 30000 || qint64(grownWidth) * grownHeight > 100000000) {
+    if (grownWidth > 30000 || grownHeight > 30000 || qint64(grownWidth) * grownHeight > DocumentLimits::maxSurfacePixels) {
         return false;
     }
 
@@ -1811,7 +1811,7 @@ bool EditorSession::contentAwareFill()
     const QRect bounds(QPoint(), image.size());
     const QRect extent = QRectF(bounds).united(wanted).toAlignedRect();
     if (extent != bounds) {
-        if (extent.width() > 30000 || extent.height() > 30000 || qint64(extent.width()) * extent.height() > 100000000LL) return false;
+        if (extent.width() > 30000 || extent.height() > 30000 || qint64(extent.width()) * extent.height() > DocumentLimits::maxSurfacePixels) return false;
         QImage grown(extent.size(), QImage::Format_RGBA8888_Premultiplied); grown.fill(Qt::transparent);
         QPainter painter(&grown); painter.drawImage(-extent.topLeft(), image); painter.end();
         image = grown;
@@ -1956,6 +1956,13 @@ std::optional<QColor> EditorSession::levelsSampleAt(const QPointF &documentPoint
 
 static QImage selectionCoverageForLayer(const Layer &layer, const QSize &size, const std::optional<QImage> &selection);
 
+void EditorSession::raiseFormatVersion()
+{
+    // 0 means "work it out from the content when saving"; only an explicit version needs raising.
+    if (!document_ || document_->formatVersion < 1 || document_->formatVersion >= 11) return;
+    document_->formatVersion = std::max(document_->formatVersion, ProjectWriter::minimumRequiredVersion(*document_));
+}
+
 QString EditorSession::paintRefusal() const
 {
     if (!document_) return {};
@@ -2003,7 +2010,7 @@ static std::optional<QPoint> growLayerOverCanvas(Layer &layer, const QSize &canv
     if (!invertible) return std::nullopt;
     const QRect extent = QRect(QPoint(), size).united(inverse.mapRect(QRectF(QPointF(), QSizeF(canvas))).toAlignedRect());
     if (extent == QRect(QPoint(), size)) return std::nullopt;
-    if (qint64(extent.width()) * extent.height() > 100000000LL || extent.width() > 200000 || extent.height() > 200000) return std::nullopt;
+    if (qint64(extent.width()) * extent.height() > DocumentLimits::maxSurfacePixels || extent.width() > 200000 || extent.height() > 200000) return std::nullopt;
     const QPoint offset = -extent.topLeft();
     QImage grown(extent.size(), QImage::Format_RGBA8888_Premultiplied);
     grown.fill(Qt::transparent);
@@ -2092,7 +2099,7 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
         blank = target.image.isNull();
         if (blank) {
             const QSize size(std::max(1, qRound(layer->transform.size.width())), std::max(1, qRound(layer->transform.size.height())));
-            if (qint64(size.width()) * size.height() > 100000000LL) { endEdit(); return false; }
+            if (qint64(size.width()) * size.height() > DocumentLimits::maxSurfacePixels) { endEdit(); return false; }
             target.image = QImage(size, QImage::Format_RGBA8888_Premultiplied);
             target.image.fill(Qt::transparent);
         }
@@ -2648,7 +2655,7 @@ bool EditorSession::addLayerMask(bool revealing, bool useSelection)
     if (fromSelection) {
         const int width = layer->image.isNull() ? std::max(1, qRound(layer->transform.size.width())) : layer->image.width();
         const int height = layer->image.isNull() ? std::max(1, qRound(layer->transform.size.height())) : layer->image.height();
-        if (qint64(width) * height > 100000000LL) return false;
+        if (qint64(width) * height > DocumentLimits::maxSurfacePixels) return false;
         mask = QImage(width, height, QImage::Format_Grayscale8);
         const QImage selection = document_->selection->convertToFormat(QImage::Format_Grayscale8);
         QTransform toDocument;
@@ -2916,7 +2923,7 @@ bool EditorSession::resizeCanvas(const QSize &size, int anchor, const std::optio
         // The colored extension is real pixels: refuse what the document's pixel budget cannot hold (mac CanvasResizer).
         qint64 used = 0;
         for (const Layer &layer : document_->layers) used += qint64(layer.image.width()) * layer.image.height();
-        if (qint64(size.width()) * size.height() > 100000000LL - used) return false;
+        if (qint64(size.width()) * size.height() > DocumentLimits::documentPixelBudget() - used) return false;
     }
     beginEdit(QStringLiteral("Canvas Size"));
     translateCanvas(size, offset);
@@ -2966,7 +2973,11 @@ bool EditorSession::trim(const TrimOptions &options)
 std::optional<QRect> EditorSession::selectionBounds() const
 {
     if (!document_ || !document_->selection) return std::nullopt;
-    const QImage mask = document_->selection->convertToFormat(QImage::Format_Grayscale8);
+    // Asked on every command-state refresh: remembered for as long as the selection image is the same one.
+    const qint64 key = document_->selection->cacheKey();
+    if (key == selectionBoundsKey_) return selectionBoundsCache_;
+    const QImage mask = document_->selection->format() == QImage::Format_Grayscale8 ? *document_->selection
+                                                                                   : document_->selection->convertToFormat(QImage::Format_Grayscale8);
     int left = mask.width(), top = mask.height(), right = -1, bottom = -1;
     for (int y = 0; y < mask.height(); ++y) {
         const uchar *row = mask.constScanLine(y);
@@ -2979,8 +2990,9 @@ std::optional<QRect> EditorSession::selectionBounds() const
             }
         }
     }
-    if (right < left) return std::nullopt;
-    return QRect(left, top, right - left + 1, bottom - top + 1);
+    selectionBoundsKey_ = key;
+    selectionBoundsCache_ = right < left ? std::nullopt : std::optional<QRect>(QRect(left, top, right - left + 1, bottom - top + 1));
+    return selectionBoundsCache_;
 }
 
 static std::array<QPointF, 4> layerCorners(const LayerTransform &value)
@@ -3120,7 +3132,7 @@ static std::optional<WarpedRaster> warpRaster(const QImage &source, const LayerT
     const QPointF origin(std::floor(left), std::floor(top));
     const QSize size(qCeil(right) - int(origin.x()), qCeil(bottom) - int(origin.y()));
     if (size.width() < 1 || size.height() < 1 || size.width() > 30000 || size.height() > 30000
-        || qint64(size.width()) * size.height() > 100000000LL) return std::nullopt;
+        || qint64(size.width()) * size.height() > DocumentLimits::maxSurfacePixels) return std::nullopt;
     const int order[4] = {0, 1, 3, 2};
     QPolygonF target;
     for (int y = 0; y < 2; ++y) for (int x = 0; x < 2; ++x) {

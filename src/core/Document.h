@@ -624,7 +624,7 @@ struct TextStyle {
             const double w = boxSize->width();
             const double h = boxSize->height();
             if (!std::isfinite(w) || !std::isfinite(h) || w < 16.0 || w > 30000.0 || h < 16.0 || h > 30000.0) return false;
-            if (w * h > 100000000.0) return false;
+            if (w * h > double(DocumentLimits::maxSurfacePixels)) return false;
         }
         return true;
     }

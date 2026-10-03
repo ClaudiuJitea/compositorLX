@@ -423,11 +423,18 @@ public:
     void markSaved(const QUuid &revision) { history_.markSaved(revision); }
     void beginEdit(const QString &name) { history_.begin(name, document_); }
     void endEdit() {
+        raiseFormatVersion();
         history_.end(document_);
         advanceRevision();
     }
 
 private:
+    // Whatever an edit just put into the document (a mask, a blend mode, an adjustment...) may need a newer project
+    // format than the one it was opened as; the version is raised with the edit, inside its undo step, so Undo restores
+    // the older one and saving never refuses a document the user could edit.
+    void raiseFormatVersion();
+    mutable qint64 selectionBoundsKey_ = 0;
+    mutable std::optional<QRect> selectionBoundsCache_;
     // A filter that reaches past the layer's edge (blur, bloom): runs on the layer padded by `margin` pixels on every
     // side, then trims the empty padding again (mac PixelFilter.trimmed / FilterEdit.growForBlur).
     bool applySpreadingFilter(const QString &historyName, double margin, const std::function<QImage(const QImage &)> &filter);

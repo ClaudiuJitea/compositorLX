@@ -6759,21 +6759,12 @@ void MainWindow::updateCommandStates()
     // The editor draws the text being edited, not its layer, so a filter's preview of it would be wrong: commit first.
     if (menuBar()) for (QAction *menuAction : menuBar()->actions()) if (QMenu *menu = menuAction->menu())
         for (QAction *item : menu->actions()) if (item->property("needsCommittedText").toBool()) item->setEnabled(!editingText);
-    {
-        const bool oneLayer = session_.selectedLayerIds().size() <= 1;
-        const bool selectionUsable = !hasSelection || session_.selectionBounds().has_value();
-        const bool visible = active && document_ && LayerRenderer::effectivelyVisible(*document_, *active);
-        const bool base = hasDocument && active && !active->group && active->adjustment.isEmpty() && !session_.isMaskSelected()
-                          && oneLayer && selectionUsable && visible && !editingText;
-        if (menuBar()) for (QAction *menuAction : menuBar()->actions()) if (QMenu *menu = menuAction->menu())
-            for (QAction *item : menu->actions()) if (item->property("needsPixelLayer").toBool())
-                item->setEnabled(base && (!active->image.isNull() || item->property("allowsEmptyLayer").toBool()));
-        if (QAction *item = action("cmdInvert")) item->setText(session_.isMaskSelected() ? tr("Invert Mask") : tr("&Invert"));   // enabled state below
-    }
+    // (Which filters and adjustments are enabled is decided once, in the named block below.)
+    if (QAction *item = action("cmdInvert")) item->setText(session_.isMaskSelected() ? tr("Invert Mask") : tr("&Invert"));   // enabled state below
     enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument);
     enabled("imageTrimAction", hasDocument); enabled("imageCropAction", hasDocument);
     enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy || (hasActive && !hasSelection && !session_.isMaskSelected())); enabled("commandCopyMerged", hasDocument && hasSelection);
-    enabled("commandPaste", text || !clipboardImage_.isNull() || (QGuiApplication::clipboard()->mimeData() && QGuiApplication::clipboard()->mimeData()->hasFormat(QStringLiteral("application/x-compositor-copied-layer"))) || !QGuiApplication::clipboard()->image().isNull());
+    enabled("commandPaste", text || !clipboardImage_.isNull() || (QGuiApplication::clipboard()->mimeData() && QGuiApplication::clipboard()->mimeData()->hasFormat(QStringLiteral("application/x-compositor-copied-layer"))) || (QGuiApplication::clipboard()->mimeData() && QGuiApplication::clipboard()->mimeData()->hasImage()));
     enabled("commandDuplicate", hasActive && (hasSelection ? canCopy : true)); enabled("commandDelete", text || hasActive || selectedEffect_.has_value());
     enabled("commandTransform", hasSelection ? canCopy : canTransformLayer);
     enabled("commandNewLayer", hasDocument); enabled("commandNewFolder", hasDocument); enabled("commandGroupLayers", hasDocument); enabled("commandUngroupLayers", hasDocument && session_.canUngroupLayers());
@@ -6801,10 +6792,12 @@ void MainWindow::updateCommandStates()
         const bool maskTarget = session_.isMaskSelected();
         const bool single = session_.selectedLayerIds().size() <= 1;
         const bool visible = active && effectivelyVisible(active);
-        const bool adjustable = hasDocument && active && !editingText && !active->group && !maskTarget && !active->image.isNull() && single && visible;
+        // A selection that is empty (nothing selected inside it) leaves nothing to adjust, as mac canAdjustColors.
+        const bool selectionUsable = !hasSelection || session_.selectionBounds().has_value();
+        const bool adjustable = hasDocument && active && !editingText && !active->group && !maskTarget && !active->image.isNull() && single && visible && selectionUsable;
         const bool adjustableOrLive = adjustable || (hasDocument && active && !editingText && !active->adjustment.isEmpty());
         const bool vignetteOk = adjustable || (hasDocument && active && !editingText && !active->group && active->adjustment.isEmpty() && active->image.isNull() && !maskTarget && single && visible);
-        const bool invertOk = hasDocument && active && !editingText && single && visible && (!active->group || maskTarget)
+        const bool invertOk = hasDocument && active && !editingText && single && visible && selectionUsable && (!active->group || maskTarget)
             && (maskTarget ? (!active->mask.isNull() && active->maskEnabled) : !active->image.isNull());
         const bool paintOk = hasDocument && active && !active->group && active->adjustment.isEmpty() && visible && !editingText;
         const bool anyPixels = hasDocument && std::any_of(document_->layers.cbegin(), document_->layers.cend(), [](const Layer &l) { return l.visible && !l.group && !l.image.isNull(); });
@@ -6930,7 +6923,7 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
         suggestClipboardOnEmpty_ = false;
         const QImage clipboard = QGuiApplication::clipboard()->image();
         if (!clipboard.isNull() && clipboard.width() <= 30000 && clipboard.height() <= 30000
-            && qint64(clipboard.width()) * clipboard.height() <= 100000000LL) {
+            && qint64(clipboard.width()) * clipboard.height() <= DocumentLimits::maxSurfacePixels) {
             newCanvasWidth_->setValue(clipboard.width()); newCanvasHeight_->setValue(clipboard.height());
         } else { newCanvasWidth_->setValue(1920); newCanvasHeight_->setValue(1080); }
         newCanvasWidth_->setFocus(); newCanvasWidth_->selectAll();
