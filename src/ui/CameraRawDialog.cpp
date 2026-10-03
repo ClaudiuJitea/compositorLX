@@ -7,6 +7,8 @@
 #include <QFormLayout>
 #include <QMenu>
 #include <QKeyEvent>
+#include <QMouseEvent>
+#include <QStyleOptionSlider>
 #include <QDialogButtonBox>
 #include <QPainter>
 #include <QPainterPath>
@@ -206,6 +208,28 @@ void CameraRawDialog::setupUi()
     mainLayout->addLayout(bottomLayout);
 }
 
+namespace {
+// mac CameraRawSliderView: a double-click on the knob puts the slider back to its default.
+class DoubleClickReset final : public QObject {
+public:
+    DoubleClickReset(QSlider *slider, QDoubleSpinBox *spin, double value) : QObject(slider), slider_(slider), spin_(spin), value_(value) {}
+    bool eventFilter(QObject *, QEvent *event) override
+    {
+        if (event->type() != QEvent::MouseButtonDblClick) return false;
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        QStyleOptionSlider option; option.initFrom(slider_); option.orientation = slider_->orientation();
+        option.minimum = slider_->minimum(); option.maximum = slider_->maximum(); option.sliderPosition = option.sliderValue = slider_->value();
+        option.subControls = QStyle::SC_SliderHandle;
+        const QRect handle = slider_->style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, slider_);
+        if (!handle.contains(mouse->position().toPoint())) return false;
+        spin_->setValue(value_);
+        return true;
+    }
+private:
+    QSlider *slider_; QDoubleSpinBox *spin_; double value_;
+};
+}
+
 static QHBoxLayout *makeSliderRow(QWidget *parent, double minVal, double maxVal, double curVal, int decimals,
                                   QDoubleSpinBox *&spin, std::function<void()> onChange)
 {
@@ -223,6 +247,7 @@ static QHBoxLayout *makeSliderRow(QWidget *parent, double minVal, double maxVal,
 
     row->addWidget(slider, 1);
     row->addWidget(spin);
+    slider->installEventFilter(new DoubleClickReset(slider, spin, curVal));
 
     QObject::connect(slider, &QSlider::valueChanged, parent, [spin, mult, onChange](int val) {
         if (spin->value() != double(val) / mult) {

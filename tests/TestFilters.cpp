@@ -4,6 +4,10 @@
 #include "core/Document.h"
 #include "core/EditorSession.h"
 #include "io/AdjustmentJson.h"
+#include "ui/CameraRawDialog.h"
+#include <QSlider>
+#include <QMouseEvent>
+#include <QStyleOptionSlider>
 #include "io/ProjectReader.h"
 #include "io/ProjectWriter.h"
 #include "rendering/LayerRenderer.h"
@@ -130,6 +134,7 @@ private slots:
     void everyAdjustmentKindRendersAndRoundTripsAllParameters();
     void savedAdjustmentsCarryEveryKeyMacRequires();
     void folderScopedAdjustmentOnlyTouchesItsFolder();
+    void cameraRawSliderDoubleClickOnTheKnobRestoresTheDefault();
 };
 
 // ---------------------------------------------------------------------------------------------------- FilterTests
@@ -954,6 +959,25 @@ void TestFilters::folderScopedAdjustmentOnlyTouchesItsFolder()
     QVERIFY(adjustment && adjustment->parentId == std::optional<QUuid>(folder));
     // The folder holds the only layer, and it is inverted inside the folder.
     QCOMPARE(px(canvasOf(s), 0, 0), (std::array<int, 4>{0, 255, 255, 255}));
+}
+
+void TestFilters::cameraRawSliderDoubleClickOnTheKnobRestoresTheDefault()
+{
+    EditorSession session = sessionWith(solid(16, 16, .5, .5, .5));
+    CameraRawDialog dialog(nullptr, session, *session.document()->activeLayerId);
+    dialog.show();
+    auto *spin = dialog.findChild<QDoubleSpinBox *>(QStringLiteral("exposureSpin"));
+    QVERIFY(spin);
+    spin->setValue(2.0);
+    QSlider *slider = nullptr;
+    for (QSlider *candidate : dialog.findChildren<QSlider *>()) if (candidate->value() == 200 && candidate->maximum() == 500) slider = candidate;
+    QVERIFY(slider);
+    QStyleOptionSlider option; option.initFrom(slider); option.minimum = slider->minimum(); option.maximum = slider->maximum();
+    option.sliderPosition = option.sliderValue = slider->value();
+    const QRect handle = slider->style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, slider);
+    QMouseEvent on(QEvent::MouseButtonDblClick, QPointF(handle.center()), QPointF(handle.center()), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(slider, &on);
+    QCOMPARE(spin->value(), 0.0);
 }
 
 QTEST_MAIN(TestFilters)
