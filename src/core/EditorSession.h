@@ -156,6 +156,9 @@ public:
     bool updateText(const QUuid &id, const QString &text, const QRectF &box, const QString &fontFamily,
                     int pixelSize, bool bold, bool italic, bool underline, int alignment, const QColor &color, bool areaText,
                     double tracking = 0.0, double leading = 0.0);
+    // Style-centric variants: the style carries content, base face and color, per-letter runs, tracking and leading.
+    bool addText(const TextStyle &style, const QRectF &box, bool bold, bool italic, bool underline, bool areaText);
+    bool updateText(const QUuid &id, const TextStyle &style, const QRectF &box, bool bold, bool italic, bool underline, bool areaText);
     void redrawSelectedShapes();
     bool addNoiseToActiveLayer(float amount, bool gaussian, bool monochromatic, quint32 seed);
     bool distortActiveLayer(double amount);
