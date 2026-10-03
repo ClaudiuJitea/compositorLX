@@ -45,6 +45,16 @@ target_compile_definitions(text_runs_tests PRIVATE
 )
 add_test(NAME text_runs_tests COMMAND text_runs_tests -platform offscreen)
 
+add_executable(text_editing_tests
+    TestTextEditing.cpp
+)
+target_include_directories(text_editing_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(text_editing_tests PRIVATE compositor_ui Qt6::Test)
+target_compile_definitions(text_editing_tests PRIVATE
+    FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+add_test(NAME text_editing_tests COMMAND text_editing_tests -platform offscreen)
+
 add_executable(sync_rendering_tests
     TestSyncRendering.cpp
 )
