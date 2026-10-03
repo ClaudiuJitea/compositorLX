@@ -872,7 +872,7 @@ bool EditorSession::beginSelectionTransform(bool duplicate, const QString &histo
     const std::optional<QUuid> beforeActive = document_->activeLayerId;
     const QUuid sourceId = source->id;
     beginEdit(!historyName.isEmpty() ? historyName : duplicate ? QStringLiteral("Duplicate Pixels") : QStringLiteral("Transform Selection"));
-    QImage cleared(source->image.size(), QImage::Format_RGBA8888_Premultiplied);
+    QImage cleared(source->image.size(), QImage::Format_RGBA8888_Premultiplied); cleared.fill(Qt::transparent);
     document_->layers[sourceIndex].image = clippedPixels(source->image, cleared, *source, document_->selection);
     if (!duplicate) rasterizeLayer(document_->layers[sourceIndex]);
     if (duplicate) document_->layers[sourceIndex].image = before.layers.at(sourceIndex).image;
