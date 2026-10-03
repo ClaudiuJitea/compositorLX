@@ -229,6 +229,21 @@ public:
     [[nodiscard]] std::optional<QPointF> brushPointer() const { return brushPointer_; }
     [[nodiscard]] bool brushSmoothingEnabled() const { return brushSmoothingEnabled_; }
     [[nodiscard]] bool isPainting() const { return brush_.has_value() || warp_.has_value(); }
+    // The palette (mac ColorPalette.swift). On a mask the swatches are black and white: the foreground one is the
+    // colour the brush paints (maskPaintWhite), X flips it and D puts it back to black (hide).
+    [[nodiscard]] QColor foregroundColor() const { return foreground_; }
+    [[nodiscard]] QColor backgroundColor() const { return background_; }
+    void setForegroundColor(const QColor &color) { if (color.isValid()) foreground_ = color.toRgb(); }
+    void setBackgroundColor(const QColor &color) { if (color.isValid()) background_ = color.toRgb(); }
+    [[nodiscard]] bool maskPaintWhite() const { return maskPaintWhite_; }
+    void setMaskPaintWhite(bool white) { maskPaintWhite_ = white; }
+    [[nodiscard]] QColor paletteColor(bool background) const;
+    void setPaletteColor(const QColor &color, bool background);
+    void swapPaletteColors();
+    void resetPaletteColors();
+    // Composited sRGB colour of the visible layers at one document pixel, as shown on the canvas; none outside the
+    // canvas or over fully transparent pixels.
+    [[nodiscard]] std::optional<QColor> sampleCompositeColor(const QPointF &documentPoint) const;
     bool addLayerMask(bool revealing = true, bool useSelection = true);
     bool toggleLayerMask();
     bool toggleMaskLink();
@@ -444,6 +459,13 @@ private:
         QRect dirtyPixels;
         bool changed = false;
         double blurRadius = 5;
+        double settledCarry = 0;   // distance to the next soft dab along the settled path
+        // A stroke on a blank layer fills one in, and one past a layer's edge grows it: the layer as it was, to put back
+        // when nothing was painted, and where its own pixels sit in the grown grid (empty for a blank layer).
+        struct Restore { bool valid = false; QImage image; LayerTransform transform; QImage mask; };
+        Restore restore;
+        bool blank = false, grown = false;
+        QRect sourceRect;
     };
     std::optional<BrushState> brush_;
     struct WarpState {
@@ -464,6 +486,9 @@ private:
     std::optional<WarpState> warp_;
     std::optional<QPointF> cloneSource_;
     std::optional<QPointF> cloneOffset_;
+    QColor foreground_ = Qt::black;
+    QColor background_ = Qt::white;
+    bool maskPaintWhite_ = false;
     bool maskSelected_ = false;
     std::optional<QUuid> maskAlone_;
     struct FloatingSelectionState {

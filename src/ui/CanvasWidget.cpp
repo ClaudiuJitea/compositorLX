@@ -824,11 +824,31 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
     if (cursorDocument_ && (tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Clone || tool_ == Tool::Blur)) {
         const QPointF center = target.topLeft() + *cursorDocument_ * zoom_;
         const qreal diameter = brushDiameter_ * zoom_;
+        if (tool_ == Tool::Clone && cloneSource_ && !renderedDocument_.isNull() && diameter >= 2 && diameter <= 1200) {
+            // What one click would stamp: the pixels at the source, through the tip.
+            const QPointF source = (cloneOffset_ && cloneAligned_) ? *cursorDocument_ + *cloneOffset_ : (brushDrawing_ && cloneOffset_ ? *cursorDocument_ + *cloneOffset_ : *cloneSource_);
+            const int side = qMax(2, qRound(diameter));
+            QImage preview(side, side, QImage::Format_ARGB32_Premultiplied); preview.fill(Qt::transparent);
+            { QPainter p(&preview); p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+              const double span = side / zoom_;
+              p.drawImage(QRectF(0, 0, side, side), renderedDocument_, QRectF(source.x() - span / 2, source.y() - span / 2, span, span));
+              QRadialGradient tip(side / 2.0, side / 2.0, side / 2.0);
+              const double h = std::clamp(brushHardness_, 0.0, 0.999);
+              tip.setColorAt(0, Qt::white); tip.setColorAt(h, Qt::white); tip.setColorAt(1, QColor(255, 255, 255, 0));
+              p.setCompositionMode(QPainter::CompositionMode_DestinationIn); p.fillRect(preview.rect(), tip); }
+            painter.save(); painter.setOpacity(std::clamp(brushOpacity_, 0.0, 1.0));
+            painter.drawImage(QPointF(center.x() - side / 2.0, center.y() - side / 2.0), preview); painter.restore();
+        }
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(QColor(245, 245, 245, 210), 1));
         painter.drawEllipse(center, diameter / 2, diameter / 2);
         painter.setPen(QPen(QColor(20, 20, 20, 190), 1));
         painter.drawEllipse(center, diameter / 2 + 1, diameter / 2 + 1);
+        if (hardnessRing_ && *hardnessRing_ > 0 && *hardnessRing_ < 1) {
+            const qreal inner = diameter / 2 * *hardnessRing_;
+            QPen dashed(QColor(245, 245, 245, 230), 1, Qt::DashLine); painter.setPen(dashed); painter.drawEllipse(center, inner, inner);
+            dashed.setColor(QColor(20, 20, 20, 200)); dashed.setDashOffset(3); painter.setPen(dashed); painter.drawEllipse(center, inner, inner);
+        }
     }
     if (session_ && session_->maskAloneLayerId()) {
         painter.save();
@@ -918,7 +938,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
         emit hueTargetStarted(QPoint(qFloor(position.x()), qFloor(position.y())));
         setCursor(Qt::SizeHorCursor); event->accept(); return;
     }
-    if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Eyedropper) {
+    // Option temporarily turns Brush, Eraser, Spot Healing and Gradient into the Eyedropper (mac palettePicking).
+    const bool optionPick = event->modifiers().testFlag(Qt::AltModifier) && !brushDrawing_ && !creationDragging_
+        && (tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Gradient);
+    if (event->button() == Qt::LeftButton && document_ && (tool_ == Tool::Eyedropper || optionPick)) {
         const QPointF position = (event->position() - canvasRect().topLeft()) / zoom_;
         samplingColor_ = true; sampleOriginal_ = paletteForeground_;
         const QPoint pixel(qFloor(position.x()), qFloor(position.y())); if (QRect(QPoint(), renderedDocument_.size()).contains(pixel)) sampleCurrent_ = renderedDocument_.pixelColor(pixel);
@@ -1223,7 +1246,7 @@ QPoint CanvasWidget::snapSelectionMoveEnd(const QPoint &current, Qt::KeyboardMod
 void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 {
     if (document_) cursorDocument_ = (event->position() - canvasRect().topLeft()) / zoom_;
-    if (samplingColor_ && tool_ == Tool::Eyedropper && cursorDocument_) {
+    if (samplingColor_ && cursorDocument_) {
         const QPoint pixel(qFloor(cursorDocument_->x()), qFloor(cursorDocument_->y()));
         if (QRect(QPoint(), renderedDocument_.size()).contains(pixel)) { sampleCurrent_ = renderedDocument_.pixelColor(pixel); emit colorSampleRequested(pixel); }
         update(); event->accept(); return;

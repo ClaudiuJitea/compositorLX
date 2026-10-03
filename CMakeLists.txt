@@ -83,6 +83,9 @@ add_library(compositor_core
     src/core/SelectionOps.h
     src/io/AdjustmentJson.cpp
     src/io/AdjustmentJson.h
+    src/core/ColorPalette.cpp
+    src/core/ColorPalette.h
+    src/core/EditorSessionPaint.cpp
     src/io/ProjectReader.cpp
     src/io/ProjectReader.h
     src/io/ProjectWriter.cpp
@@ -163,6 +166,8 @@ add_library(compositor_ui STATIC
     src/ui/CanvasRulerWidget.cpp
     src/ui/CanvasRulerWidget.h
     src/ui/CanvasWidget.cpp
+    src/ui/ColorPickerDialog.cpp
+    src/ui/ColorPickerDialog.h
     src/ui/CanvasWidget.h
     src/ui/EffectsDialog.cpp
     src/ui/EffectsDialog.h

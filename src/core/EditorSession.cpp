@@ -1803,30 +1803,34 @@ bool EditorSession::contentAwareFill()
     return true;
 }
 
-static std::optional<QPointF> documentToPixel(const Layer &layer, const QPointF &point, const QSize &size)
+static std::optional<QPointF> documentToPixel(const LayerTransform &placement, const QPointF &point, const QSize &size)
 {
     const int width = size.width(), height = size.height();
-    if (width < 1 || height < 1 || layer.transform.size.width() <= 0 || layer.transform.size.height() <= 0) return std::nullopt;
+    if (width < 1 || height < 1 || placement.size.width() <= 0 || placement.size.height() <= 0) return std::nullopt;
     QTransform transform;
-    transform.translate(layer.transform.center().x(), layer.transform.center().y());
-    transform.rotate(layer.transform.rotation);
-    transform.scale((layer.transform.flipX ? -1 : 1) * layer.transform.size.width() / width,
-                    (layer.transform.flipY ? -1 : 1) * layer.transform.size.height() / height);
+    transform.translate(placement.center().x(), placement.center().y());
+    transform.rotate(placement.rotation);
+    transform.scale((placement.flipX ? -1 : 1) * placement.size.width() / width,
+                    (placement.flipY ? -1 : 1) * placement.size.height() / height);
     transform.translate(-width / 2.0, -height / 2.0);
     bool invertible = false;
     const QTransform inverse = transform.inverted(&invertible);
     return invertible ? std::optional<QPointF>(inverse.map(point)) : std::nullopt;
 }
+static std::optional<QPointF> documentToPixel(const Layer &layer, const QPointF &point, const QSize &size)
+{
+    return documentToPixel(layer.transform, point, size);
+}
 
-static QImage selectionCoverageForLayer(const Layer &layer, const QSize &size, const std::optional<QImage> &selection)
+static QImage selectionCoverageForPlacement(const LayerTransform &placement, const QSize &size, const std::optional<QImage> &selection)
 {
     QImage local(size, QImage::Format_Grayscale8); local.fill(selection ? 0 : 255);
     if (!selection) return local;
     QTransform toDocument;
-    toDocument.translate(layer.transform.center().x(), layer.transform.center().y());
-    toDocument.rotate(layer.transform.rotation);
-    toDocument.scale((layer.transform.flipX ? -1 : 1) * layer.transform.size.width() / size.width(),
-                     (layer.transform.flipY ? -1 : 1) * layer.transform.size.height() / size.height());
+    toDocument.translate(placement.center().x(), placement.center().y());
+    toDocument.rotate(placement.rotation);
+    toDocument.scale((placement.flipX ? -1 : 1) * placement.size.width() / size.width(),
+                     (placement.flipY ? -1 : 1) * placement.size.height() / size.height());
     toDocument.translate(-size.width() / 2.0, -size.height() / 2.0);
     const QImage mask = selection->convertToFormat(QImage::Format_Grayscale8);
     for (int y = 0; y < size.height(); ++y) { uchar *out = local.scanLine(y); for (int x = 0; x < size.width(); ++x) {
@@ -1834,6 +1838,10 @@ static QImage selectionCoverageForLayer(const Layer &layer, const QSize &size, c
         out[x] = QRect(QPoint(), mask.size()).contains(point) ? mask.constScanLine(point.y())[point.x()] : 0;
     } }
     return local;
+}
+static QImage selectionCoverageForLayer(const Layer &layer, const QSize &size, const std::optional<QImage> &selection)
+{
+    return selectionCoverageForPlacement(layer.transform, size, selection);
 }
 
 bool EditorSession::removeBackground(const SubjectRemovalSettings &settings, const QImage &preparedMask, QString *error)
@@ -1932,6 +1940,90 @@ QString EditorSession::paintRefusal() const
     return {};
 }
 
+// Grows a layer's pixels to take in the whole canvas, keeping every pixel exactly where it is on the document (mac
+// BrushStroke.init: extent = the layer's pixels united with the canvas, seen in the layer's own grid). A mask that
+// follows the layer's grid grows with it, white where it is new. Returns where the old pixels now start, or none when
+// the layer already reaches the canvas (or the grown layer would be past the pixel budget).
+static std::optional<QPoint> growLayerOverCanvas(Layer &layer, const QSize &canvas)
+{
+    if (layer.image.isNull() || canvas.isEmpty()) return std::nullopt;
+    const QSize size = layer.image.size();
+    const LayerTransform &base = layer.transform;
+    if (size.width() < 1 || size.height() < 1 || base.size.width() <= 0 || base.size.height() <= 0) return std::nullopt;
+    QTransform mapping;
+    mapping.translate(base.center().x(), base.center().y());
+    mapping.rotate(base.rotation);
+    mapping.scale((base.flipX ? -1 : 1) * base.size.width() / size.width(), (base.flipY ? -1 : 1) * base.size.height() / size.height());
+    mapping.translate(-size.width() / 2.0, -size.height() / 2.0);
+    bool invertible = false;
+    const QTransform inverse = mapping.inverted(&invertible);
+    if (!invertible) return std::nullopt;
+    const QRect extent = QRect(QPoint(), size).united(inverse.mapRect(QRectF(QPointF(), QSizeF(canvas))).toAlignedRect());
+    if (extent == QRect(QPoint(), size)) return std::nullopt;
+    if (qint64(extent.width()) * extent.height() > 100000000LL || extent.width() > 200000 || extent.height() > 200000) return std::nullopt;
+    const QPoint offset = -extent.topLeft();
+    QImage grown(extent.size(), QImage::Format_RGBA8888_Premultiplied);
+    grown.fill(Qt::transparent);
+    const QImage source = layer.image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    for (int y = 0; y < size.height(); ++y) std::copy_n(source.constScanLine(y), size.width() * 4, grown.scanLine(y + offset.y()) + offset.x() * 4);
+    if (!layer.mask.isNull() && !layer.maskPlacement) {
+        QImage mask = layer.mask.convertToFormat(QImage::Format_Grayscale8);
+        // A solid mask is one pixel stretched over the layer, and a coarser one is stretched to its pixels: give it the
+        // layer's grid so the two grow together.
+        if (mask.size() != size) mask = mask.size() == QSize(1, 1) ? [&] { QImage full(size, QImage::Format_Grayscale8); full.fill(mask.constScanLine(0)[0]); return full; }()
+                                                                   : mask.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        QImage widened(extent.size(), QImage::Format_Grayscale8);
+        widened.fill(255);
+        for (int y = 0; y < size.height(); ++y) std::copy_n(mask.constScanLine(y), size.width(), widened.scanLine(y + offset.y()) + offset.x());
+        layer.mask = widened;
+    }
+    LayerTransform placed = base;
+    placed.size = QSizeF(extent.width() * base.size.width() / size.width(), extent.height() * base.size.height() / size.height());
+    const QPointF center = mapping.map(QPointF(extent.x() + extent.width() / 2.0, extent.y() + extent.height() / 2.0));
+    placed.origin = QPointF(center.x() - placed.size.width() / 2, center.y() - placed.size.height() / 2);
+    layer.image = grown;
+    layer.transform = placed;
+    return offset;
+}
+
+// After a stroke on a blank or grown layer: the layer keeps its own pixels and what was painted, and no more (mac
+// BrushStroke.paintSnapshot, painting only adds alpha). Returns false when nothing at all was painted.
+static bool trimPaintedLayer(Layer &layer, const QRect &sourceRect)
+{
+    if (layer.image.isNull()) return false;
+    const QImage &image = layer.image;
+    int left = image.width(), top = image.height(), right = -1, bottom = -1;
+    for (int y = 0; y < image.height(); ++y) {
+        const uchar *row = image.constScanLine(y);
+        int first = 0;
+        while (first < image.width() && row[first * 4 + 3] == 0) ++first;
+        if (first == image.width()) continue;
+        int last = image.width() - 1;
+        while (last > first && row[last * 4 + 3] == 0) --last;
+        left = std::min(left, first); right = std::max(right, last); top = std::min(top, y); bottom = y;
+    }
+    QRect bounds = right >= left ? QRect(QPoint(left, top), QPoint(right, bottom)) : QRect();
+    if (!sourceRect.isEmpty()) bounds = bounds.isEmpty() ? sourceRect : bounds.united(sourceRect);
+    if (bounds.isEmpty()) return false;
+    if (bounds == QRect(QPoint(), image.size())) return true;
+    // The same part of the document, in the cropped grid.
+    const QSize size = image.size();
+    const LayerTransform &base = layer.transform;
+    QTransform mapping;
+    mapping.translate(base.center().x(), base.center().y());
+    mapping.rotate(base.rotation);
+    mapping.scale((base.flipX ? -1 : 1) * base.size.width() / size.width(), (base.flipY ? -1 : 1) * base.size.height() / size.height());
+    mapping.translate(-size.width() / 2.0, -size.height() / 2.0);
+    LayerTransform placed = base;
+    placed.size = QSizeF(bounds.width() * base.size.width() / size.width(), bounds.height() * base.size.height() / size.height());
+    const QPointF center = mapping.map(QPointF(bounds.x() + bounds.width() / 2.0, bounds.y() + bounds.height() / 2.0));
+    placed.origin = QPointF(center.x() - placed.size.width() / 2, center.y() - placed.size.height() / 2);
+    if (!layer.mask.isNull() && !layer.maskPlacement && layer.mask.size() == size) layer.mask = layer.mask.copy(bounds);
+    layer.image = image.copy(bounds);
+    layer.transform = placed;
+    return true;
+}
+
 bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor &color, double diameter,
                                      double hardness, double opacity, bool erasing, const std::optional<QPointF> &cloneSource,
                                      int healMode, quint32 effectSeed)
@@ -1947,27 +2039,52 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
     beginEdit(paintingMask ? QStringLiteral("Paint Mask") : cloneSource ? QStringLiteral("Clone Stamp") : healMode == 3 ? QStringLiteral("Blur")
                                                               : healMode >= 0 ? QStringLiteral("Spot Healing")
                                                               : erasing ? QStringLiteral("Erase") : QStringLiteral("Brush Stroke"));
-    if (paintingMask && document_->layers.at(index).mask.size() == QSize(1, 1)) {
+    // What the layer was before this stroke grew or filled it in, to put back if nothing ends up painted.
+    BrushState::Restore restore;
+    bool blank = false, grown = false;
+    QRect sourceRect;
+    if (!paintingMask) {
+        Layer &target = document_->layers[index];
+        restore = {true, target.image, target.transform, target.mask};
+        blank = target.image.isNull();
+        if (blank) {
+            const QSize size(std::max(1, qRound(layer->transform.size.width())), std::max(1, qRound(layer->transform.size.height())));
+            if (qint64(size.width()) * size.height() > 100000000LL) { endEdit(); return false; }
+            target.image = QImage(size, QImage::Format_RGBA8888_Premultiplied);
+            target.image.fill(Qt::transparent);
+        }
+        sourceRect = QRect(QPoint(), target.image.size());
+        // Painting past the layer's edge grows it over the canvas, without moving its pixels (or its mask).
+        // Blur softens the layer's own pixels (mac: the sample is the layer, so nothing is painted past it) and so does not grow it.
+        if (healMode != 3) {
+            if (const auto offset = growLayerOverCanvas(target, document_->canvasSize)) { grown = true; sourceRect.translate(*offset); }
+        }
+        if (blank) sourceRect = QRect();
+    } else if (document_->layers.at(index).mask.size() == QSize(1, 1)) {
         const QSize size = (layer->image.isNull() ? layer->transform.size.toSize() : layer->image.size()).expandedTo(QSize(1, 1));
         const int value = qGray(layer->mask.pixel(0, 0)); document_->layers[index].mask = QImage(size, QImage::Format_Grayscale8); document_->layers[index].mask.fill(value);
-    } else if (!paintingMask && document_->layers.at(index).image.isNull()) {
-        const QSize size(std::max(1, qRound(layer->transform.size.width())), std::max(1, qRound(layer->transform.size.height())));
-        if (qint64(size.width()) * size.height() > 100000000LL) { endEdit(); return false; }
-        document_->layers[index].image = QImage(size, QImage::Format_RGBA8888_Premultiplied);
-        document_->layers[index].image.fill(Qt::transparent);
     }
+    const auto abandon = [&] {
+        if (restore.valid) { Layer &target = document_->layers[index]; target.image = restore.image; target.transform = restore.transform; target.mask = restore.mask; }
+        endEdit();
+        return false;
+    };
     Layer &editable = document_->layers[index];
+    const LayerTransform placement = paintingMask ? editable.maskPlacement.value_or(editable.transform) : editable.transform;
     const QImage original = paintingMask ? editable.mask.convertToFormat(QImage::Format_Grayscale8)
                                          : editable.image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
-    const auto pixel = documentToPixel(editable, documentPoint, original.size());
-    if (!pixel) { endEdit(); return false; }
-    const auto clonePixel = cloneSource ? documentToPixel(editable, *cloneSource, original.size()) : std::optional<QPointF>();
-    if (cloneSource && !clonePixel) { endEdit(); return false; }
+    const auto pixel = documentToPixel(placement, documentPoint, original.size());
+    if (!pixel) return abandon();
+    const auto clonePixel = cloneSource ? documentToPixel(placement, *cloneSource, original.size()) : std::optional<QPointF>();
+    if (cloneSource && !clonePixel) return abandon();
     QImage coverage(original.size(), QImage::Format_Grayscale8); coverage.fill(0);
+    // On a mask the brush paints black (hide) or white (reveal), as the palette says; erasing means nothing there.
+    const int maskValue = paintingMask ? (qGray(color.rgb()) >= 128 && color.alpha() > 0 ? 255 : 0) : 0;
     brush_ = BrushState{id, *pixel, color, diameter, hardness, opacity, erasing, paintingMask, cloneSource.has_value(),
-                        paintingMask ? (erasing ? 255 : 0) : 0, clonePixel ? *clonePixel - *pixel : QPointF(),
+                        maskValue, clonePixel ? *clonePixel - *pixel : QPointF(),
                         healMode, effectSeed, original, original, coverage, coverage, {}, {}, {}, {}};
-    if (document_->selection) brush_->selectionCoverage = selectionCoverageForLayer(editable, original.size(), document_->selection);
+    brush_->restore = restore; brush_->blank = blank; brush_->grown = grown; brush_->sourceRect = sourceRect;
+    if (document_->selection) brush_->selectionCoverage = selectionCoverageForPlacement(placement, original.size(), document_->selection);
 
     // Audit against macOS EditorSession+Brush.swift:
     // Smoothing is enabled only for tool == .brush (which includes Paint and Erase).
@@ -2036,6 +2153,9 @@ bool EditorSession::beginWarpStroke(const QPointF &documentPoint, int mode, doub
     return true;
 }
 
+// One dab of the tip. Hard tips keep their anti-aliased silhouette (the strongest edge wins), soft tips pile up
+// like paint (a screen of the dabs), so a stroke builds up along its length while keeping its feathered rim
+// (mac BrushStroke.dab: .lighten for hardness 1, .screen below).
 static void stampBrushCoverage(QImage &coverage, const QPointF &center, double radius, double hardness)
 {
     constexpr int lookupSize = 4096;
@@ -2059,20 +2179,51 @@ static void stampBrushCoverage(QImage &coverage, const QPointF &center, double r
     const int top = std::max(0, qFloor(center.y() - radius)), bottom = std::min(coverage.height() - 1, qCeil(center.y() + radius));
     if (left > right || top > bottom) return;
     const double lookupScale = lookupSize / (radius * radius);
+    const bool accumulate = hardness < 1;
     for (int y = top; y <= bottom; ++y) { uchar *row = coverage.scanLine(y); for (int x = left; x <= right; ++x) {
         const double dx = x + .5 - center.x(), dy = y + .5 - center.y();
         const int sample = int((dx * dx + dy * dy) * lookupScale);
         if (sample >= lookupSize) continue;
-        row[x] = std::max(row[x], lookup.values[size_t(std::max(0, sample))]);
+        const int value = lookup.values[size_t(std::max(0, sample))];
+        if (accumulate) { const int old = row[x]; row[x] = uchar(old + value - (old * value + 127) / 255); }
+        else row[x] = std::max(row[x], uchar(value));
     } }
 }
 
-static void stampCoverageLine(QImage &coverage, const QPointF &from, const QPointF &to, double radius, double hardness)
+// Dabs laid evenly along a straight run, the leftover distance carried into the next run so the spacing holds across
+// the pieces of a curve: how much paint piles up depends on how far the brush travelled, not on how many mouse events
+// described the way (mac BrushStroke.walk).
+static QVector<QPointF> dabsAlong(const QPointF &from, const QPointF &to, double spacing, double &distanceToNext)
 {
+    QVector<QPointF> dabs;
+    const double length = QLineF(from, to).length();
+    if (length <= 0) return dabs;
+    double distance = distanceToNext;
+    while (distance <= length) { dabs.push_back(from + (to - from) * (distance / length)); distance += spacing; }
+    distanceToNext = distance - length;
+    return dabs;
+}
+
+static double softDabSpacing(double radius, double scale) { return std::max(0.25 / std::max(1e-9, scale), radius * 2 * 0.025); }
+
+// A run of the stroke on the settled coverage and (when given) the coverage that also shows the provisional tail.
+static void stampCoverageLine(QImage &coverage, const QPointF &from, const QPointF &to, double radius, double hardness,
+                              double spacing = 0, double *carry = nullptr, QImage *twin = nullptr)
+{
+    if (hardness < 1 && carry) {
+        for (const QPointF &dab : dabsAlong(from, to, spacing, *carry)) {
+            stampBrushCoverage(coverage, dab, radius, hardness);
+            if (twin) stampBrushCoverage(*twin, dab, radius, hardness);
+        }
+        return;
+    }
     const double length = QLineF(from, to).length();
     const int steps = std::max(1, qCeil(length / std::max(1.0, radius * .12)));
-    for (int step = 0; step <= steps; ++step)
-        stampBrushCoverage(coverage, from + (to - from) * (double(step) / steps), radius, hardness);
+    for (int step = 0; step <= steps; ++step) {
+        const QPointF point = from + (to - from) * (double(step) / steps);
+        stampBrushCoverage(coverage, point, radius, hardness);
+        if (twin) stampBrushCoverage(*twin, point, radius, hardness);
+    }
 }
 
 static QVector<QPointF> smoothBrushCurve(const QPointF &before, const QPointF &start,
@@ -2247,17 +2398,21 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
     const int index = indexOf(brush_->layerId);
     if (index < 0) return;
     Layer &layer = document_->layers[index];
-    const auto current = documentToPixel(layer, documentPoint, brush_->original.size());
+    // A mask placed apart from its layer is painted in its own grid.
+    const LayerTransform placement = brush_->mask ? layer.maskPlacement.value_or(layer.transform) : layer.transform;
+    const auto current = documentToPixel(placement, documentPoint, brush_->original.size());
     if (!current) return;
-    const double scale = std::max(1e-9, (layer.transform.size.width() / brush_->original.width()
-                                      + layer.transform.size.height() / brush_->original.height()) / 2.0);
+    const double scale = std::max(1e-9, (placement.size.width() / brush_->original.width()
+                                      + placement.size.height() / brush_->original.height()) / 2.0);
     const double radius = std::max(.5, brush_->diameter / scale / 2.0);
+    const double spacing = softDabSpacing(radius, 1.0);
     QRect dirty = brush_->dirtyPixels;
     brush_->dirtyPixels = {};
     if (brush_->samples.isEmpty()) {
         brush_->samples.push_back(*current);
         stampBrushCoverage(brush_->settledCoverage, *current, radius, brush_->hardness);
         stampBrushCoverage(brush_->coverage, *current, radius, brush_->hardness);
+        brush_->settledCarry = spacing;
         dirty |= brushPathBounds(*current, *current, radius, brush_->coverage.size());
     } else if (brush_->samples.constLast() != *current) {
         dirty |= brush_->tailBounds;
@@ -2270,13 +2425,13 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
             const QVector<QPointF> curve = smoothBrushCurve(before, brush_->samples.at(count - 3),
                                                             brush_->samples.at(count - 2), brush_->samples.at(count - 1));
             for (int i = 1; i < curve.size(); ++i) {
-                stampCoverageLine(brush_->settledCoverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness);
-                stampCoverageLine(brush_->coverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness);
+                stampCoverageLine(brush_->settledCoverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness, spacing, &brush_->settledCarry, &brush_->coverage);
                 dirty |= brushPathBounds(curve.at(i - 1), curve.at(i), radius, brush_->coverage.size());
             }
         }
         const QPointF tailStart = brush_->samples.at(count - 2), tailEnd = brush_->samples.at(count - 1);
-        stampCoverageLine(brush_->coverage, tailStart, tailEnd, radius, brush_->hardness);
+        double tailCarry = brush_->settledCarry;
+        stampCoverageLine(brush_->coverage, tailStart, tailEnd, radius, brush_->hardness, spacing, &tailCarry);
         brush_->tailBounds = brushPathBounds(tailStart, tailEnd, radius, brush_->coverage.size());
         dirty |= brush_->tailBounds;
         if (brush_->samples.size() > 5) brush_->samples.removeFirst();
@@ -2340,22 +2495,23 @@ bool EditorSession::endBrushStroke()
         const int index = indexOf(brush_->layerId);
         if (index >= 0) {
             const Layer &layer = document_->layers.at(index);
-            const double scale = std::max(1e-9, (layer.transform.size.width() / brush_->original.width()
-                                              + layer.transform.size.height() / brush_->original.height()) / 2.0);
+            const LayerTransform placement = brush_->mask ? layer.maskPlacement.value_or(layer.transform) : layer.transform;
+            const double scale = std::max(1e-9, (placement.size.width() / brush_->original.width()
+                                              + placement.size.height() / brush_->original.height()) / 2.0);
             const double radius = std::max(.5, brush_->diameter / scale / 2.0);
+            const double spacing = softDabSpacing(radius, 1.0);
             const int count = brush_->samples.size();
             QRect dirty = brush_->tailBounds;
             restoreCoverage(brush_->coverage, brush_->settledCoverage, brush_->tailBounds);
             const QVector<QPointF> curve = smoothBrushCurve(brush_->samples.at(std::max(0, count - 3)),
                 brush_->samples.at(count - 2), brush_->samples.at(count - 1), brush_->samples.at(count - 1));
             for (int i = 1; i < curve.size(); ++i) {
-                stampCoverageLine(brush_->settledCoverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness);
-                stampCoverageLine(brush_->coverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness);
+                stampCoverageLine(brush_->settledCoverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness, spacing, &brush_->settledCarry, &brush_->coverage);
                 dirty |= brushPathBounds(curve.at(i - 1), curve.at(i), radius, brush_->coverage.size());
             }
             brush_->tailBounds = {};
             brush_->dirtyPixels |= dirty;
-            const QPointF lastDocument = pixelToDocument(layer.transform, brush_->original.size()).map(brush_->samples.constLast());
+            const QPointF lastDocument = pixelToDocument(placement, brush_->original.size()).map(brush_->samples.constLast());
             continueBrushStrokeInternal(lastDocument);
         }
     }
@@ -2397,7 +2553,17 @@ bool EditorSession::endBrushStroke()
             }
         }
     }
-    const bool changed = brush_->changed;
+    bool changed = brush_->changed;
+    if (document_ && (brush_->blank || brush_->grown)) {
+        const int index = indexOf(brush_->layerId);
+        if (index >= 0) {
+            Layer &layer = document_->layers[index];
+            if (!changed || !trimPaintedLayer(layer, brush_->sourceRect)) {
+                changed = false;
+                if (brush_->restore.valid) { layer.image = brush_->restore.image; layer.transform = brush_->restore.transform; layer.mask = brush_->restore.mask; }
+            }
+        }
+    }
     brush_.reset();
     endEdit();
     return changed;
@@ -2413,7 +2579,10 @@ bool EditorSession::cancelBrushStroke()
         const int index = indexOf(brush_->layerId);
         if (index >= 0) {
             if (brush_->mask) document_->layers[index].mask = brush_->original;
-            else document_->layers[index].image = brush_->original;
+            else if (brush_->restore.valid) {
+                Layer &layer = document_->layers[index];
+                layer.image = brush_->restore.image; layer.transform = brush_->restore.transform; layer.mask = brush_->restore.mask;
+            } else document_->layers[index].image = brush_->original;
         }
         brush_.reset();
     }

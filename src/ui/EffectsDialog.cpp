@@ -3,6 +3,7 @@
 
 #include <QCheckBox>
 #include <QColorDialog>
+#include "ui/ColorPickerDialog.h"
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -513,7 +514,7 @@ void EffectsDialog::updateSwatch(QPushButton *button, const QColor &color)
 void EffectsDialog::pickColor(LayerEffectKind kind, QPushButton *button)
 {
     const QColor initial = currentEffects_.color(kind).value_or(Qt::black);
-    const QColor chosen = QColorDialog::getColor(initial, this, tr("Select Effect Color"));
+    const QColor chosen = ColorPickerDialog::getColor(initial, this, tr("Color Picker (Effect Color)"));
     if (chosen.isValid()) {
         currentEffects_.setColor(kind, chosen);
         updateSwatch(button, chosen);

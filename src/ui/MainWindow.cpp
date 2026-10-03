@@ -37,6 +37,7 @@
 #include <QAbstractItemDelegate>
 #include <QCheckBox>
 #include <QColorDialog>
+#include "ui/ColorPickerDialog.h"
 #include <QColorSpace>
 #include <QClipboard>
 #include <QCloseEvent>
@@ -1189,6 +1190,12 @@ MainWindow::MainWindow(QWidget *parent)
                                brushOpacityLabel_, brushOpacityField_, blurRadiusLabel_, blurRadiusField_, brushSmoothingLabel_, brushSmoothingField_});
     transformLayout->addGroup({cloneAligned});
     transformLayout->addGroup({cloneSample});
+    // On a layer mask the brush paints black (hide) or white (reveal): the foreground swatch's two choices.
+    auto *maskPaint = new SegmentedControl({tr("Black · Hide"), tr("White · Reveal")}, transformBar);
+    maskPaint->setObjectName(QStringLiteral("maskPaintControl")); maskPaint->setVisible(false);
+    maskPaint->setToolTip(tr("What the brush paints on a layer mask (X swaps)"));
+    connect(maskPaint, &SegmentedControl::currentIndexChanged, this, [this](int index) { session_.setMaskPaintWhite(index == 1); refreshPaletteSwatches(); });
+    transformLayout->addGroup({maskPaint});
     transformLayout->addGroup({textFont, textSizeLabel_, textSizeField_, textTrackingLabel_, textTrackingField_, textLeadingLabel_, textLeadingField_});
     textFont->setFixedWidth(210); textSize->setFixedWidth(70); textTracking->setFixedWidth(70); textLeading->setFixedWidth(70);
     transformLayout->addGroup({textStyleGroup});
@@ -1265,8 +1272,8 @@ MainWindow::MainWindow(QWidget *parent)
     }
     railLayout->addStretch();
     auto *colors = new QWidget(rail); colors->setFixedSize(42, 43);
-    foregroundSwatch_ = new QLabel(colors); foregroundSwatch_->setGeometry(4, 3, 22, 22); foregroundSwatch_->setStyleSheet(QStringLiteral("background:#1686e8;border:1px solid white;border-radius:4px;"));
-    backgroundSwatch_ = new QLabel(colors); backgroundSwatch_->setGeometry(16, 17, 22, 22); backgroundSwatch_->setStyleSheet(QStringLiteral("background:#1f0f0b;border:1px solid white;border-radius:4px;"));
+    foregroundSwatch_ = new QLabel(colors); foregroundSwatch_->setGeometry(4, 3, 22, 22); foregroundSwatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid white;border-radius:4px;"));
+    backgroundSwatch_ = new QLabel(colors); backgroundSwatch_->setGeometry(16, 17, 22, 22); backgroundSwatch_->setStyleSheet(QStringLiteral("background:#ffffff;border:1px solid white;border-radius:4px;"));
     foregroundSwatch_->setObjectName(QStringLiteral("foregroundSwatch"));
     backgroundSwatch_->setObjectName(QStringLiteral("backgroundSwatch"));
     foregroundSwatch_->installEventFilter(this); backgroundSwatch_->installEventFilter(this);
@@ -1296,8 +1303,13 @@ MainWindow::MainWindow(QWidget *parent)
     connect(shapeRadius, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeCornerRadius);
     connect(shapeLineWidth, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeLineWidth);
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
-    connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushHardness_ = value / 100.0; });
-    connect(brushOpacityField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushOpacity_ = value / 100.0; });
+    connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
+        brushHardness_ = value / 100.0;
+        canvas_->setBrushTip(brushHardness_, brushOpacity_);
+        canvas_->setHardnessRing(brushHardness_);
+        QTimer::singleShot(900, canvas_, [this] { canvas_->setHardnessRing(std::nullopt); });
+    });
+    connect(brushOpacityField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushOpacity_ = value / 100.0; canvas_->setBrushTip(brushHardness_, brushOpacity_); });
     connect(blurRadiusField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { blurRadius_ = value; });
     connect(brushSmoothingField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         brushSmoothing_ = value;
@@ -1454,6 +1466,23 @@ MainWindow::MainWindow(QWidget *parent)
             : tool == CanvasWidget::Tool::Gradient ? 9 : tool == CanvasWidget::Tool::Shape ? 10 : tool == CanvasWidget::Tool::Text ? 11 : tool == CanvasWidget::Tool::Eyedropper ? 12
             : tool == CanvasWidget::Tool::Hand ? 13 : tool == CanvasWidget::Tool::Zoom ? 14 : -1;
         if (selected >= 0) toolButtons.at(selected)->setChecked(true);
+    });
+    connect(canvas_, &CanvasWidget::toolChanged, this, [this](CanvasWidget::Tool tool) {
+        refreshPaletteSwatches();
+        // Clone Stamp and Smear each keep their own size, hardness and opacity (both starting soft); Brush, Eraser and
+        // Spot Healing share one (mac EditorSession.parkedBrushTips).
+        const int family = tool == CanvasWidget::Tool::Clone ? 1 : tool == CanvasWidget::Tool::Blur ? 2
+            : (tool == CanvasWidget::Tool::Brush || tool == CanvasWidget::Tool::Eraser || tool == CanvasWidget::Tool::Healing) ? 0 : -1;
+        if (family < 0) return;
+        const int current = property("brushTipFamily").isValid() ? property("brushTipFamily").toInt() : 0;
+        if (family == current) return;
+        QVariantList parked = property("parkedBrushTips").toList();
+        if (parked.isEmpty()) parked = {QVariantList{40.0, 1.0, 1.0}, QVariantList{40.0, 0.0, 1.0}, QVariantList{40.0, 0.0, 1.0}};
+        parked[current] = QVariantList{brushSizeField_->value(), brushHardnessField_->value() / 100.0, brushOpacityField_->value() / 100.0};
+        const QVariantList next = parked.at(family).toList();
+        brushSizeField_->setValue(next.at(0).toDouble()); brushHardnessField_->setValue(next.at(1).toDouble() * 100.0);
+        brushOpacityField_->setValue(next.at(2).toDouble() * 100.0);
+        setProperty("parkedBrushTips", parked); setProperty("brushTipFamily", family);
     });
     connect(marqueeKind, &SegmentedControl::currentIndexChanged, this, [this, selectionAntialias, marqueeKind](int) {
         selectionAntialias->setVisible(canvas_->tool() == CanvasWidget::Tool::Marquee && marqueeKind->currentIndex() == 1);
@@ -2061,7 +2090,7 @@ MainWindow::MainWindow(QWidget *parent)
         explainRefusal();
         session_.setViewportZoom(canvas_->zoom());
         session_.setBrushSmoothing(brushSmoothing_);
-        session_.beginBrushStroke(point, foregroundColor_, brushDiameter_, brushHardness_, brushOpacity_, erasing);
+        session_.beginBrushStroke(point, session_.paletteColor(false), brushDiameter_, brushHardness_, brushOpacity_, erasing);
         canvas_->invalidateDocument();
     });
     connect(canvas_, &CanvasWidget::brushStrokeContinued, this, [this](const QPointF &point) {
@@ -2116,7 +2145,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(gradientReverse, &QCheckBox::toggled, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(gradientOpacityField_, &QDoubleSpinBox::valueChanged, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(canvas_, &CanvasWidget::shapeCreated, this, [this](ShapeKind kind, const QRectF &rect, double strokeWidth, double cornerRadius, const std::optional<QPointF> &start, const std::optional<QPointF> &end) {
-        if (session_.addShape(kind, rect, foregroundColor_, foregroundColor_, strokeWidth, cornerRadius, start, end)) syncDocumentViews();
+        if (session_.addShape(kind, rect, session_.foregroundColor(), session_.foregroundColor(), strokeWidth, cornerRadius, start, end)) syncDocumentViews();
     });
     const auto applyInlineTextFormat = [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textUnderline, textAlignment] {
         auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly));
@@ -2202,9 +2231,8 @@ MainWindow::MainWindow(QWidget *parent)
         const auto syncLookControls = [this, editor, textFont] {
             const QColor color = editor->colorAtSelection();
             if (color.isValid()) {
-                foregroundColor_ = color;
-                canvas_->setPaletteForeground(color);
-                foregroundSwatch_->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(color.name(QColor::HexRgb)));
+                session_.setForegroundColor(color);
+                refreshPaletteSwatches();
             }
             if (textFont->view() && textFont->view()->isVisible()) return;
             const QString face = editor->faceAtSelection();
@@ -2234,7 +2262,7 @@ MainWindow::MainWindow(QWidget *parent)
         style.content.clear();
         style.fontName = textFont->currentFont().family();
         style.fontSize = textSize->value();
-        style.red = foregroundColor_.redF(); style.green = foregroundColor_.greenF(); style.blue = foregroundColor_.blueF();
+        style.red = session_.foregroundColor().redF(); style.green = session_.foregroundColor().greenF(); style.blue = session_.foregroundColor().blueF();
         style.alignment = textAlignment->currentIndex() == 1 ? TextAlignment::Center : textAlignment->currentIndex() == 2 ? TextAlignment::Right : TextAlignment::Left;
         beginInlineText(box, style, areaText, std::nullopt);
     });
@@ -2252,7 +2280,7 @@ MainWindow::MainWindow(QWidget *parent)
         bool italic = false;
         bool underline = false;
         int align = 0;
-        QColor color = foregroundColor_;
+        QColor color = session_.foregroundColor();
         bool areaText = false;
 
         if (it->text.has_value()) {
@@ -2291,9 +2319,8 @@ MainWindow::MainWindow(QWidget *parent)
         textBold->setChecked(bold); textItalic->setChecked(italic);
         textUnderline->setChecked(underline); textAlignment->setCurrentIndex(align);
         if (color.isValid()) {
-            foregroundColor_ = color;
-            canvas_->setPaletteForeground(color);
-            foregroundSwatch_->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(color.name(QColor::HexRgb)));
+            session_.setForegroundColor(color);
+            refreshPaletteSwatches();
         }
         const QRectF box(it->transform.origin, it->transform.size);
         session_.selectLayer(id); canvas_->setTextEditingLayer(id);
@@ -2304,13 +2331,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::colorSampleRequested, this, [this](const QPoint &point) {
         if (colorSampleOverride_) { colorSampleOverride_(point); return; }
         if (!document_ || !QRect(QPoint(), document_->canvasSize).contains(point)) return;
-        const QColor sampled = LayerRenderer::flattened(*document_).pixelColor(point);
-        if (!sampled.isValid() || sampled.alpha() == 0) return;
-        foregroundColor_ = sampled;
-        canvas_->setPaletteForeground(sampled);
-        foregroundSwatch_->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(sampled.name(QColor::HexRgb)));
+        // Not while a stroke or the palette is busy, as on the Mac (canEditPalette).
+        if (session_.isPainting()) return;
+        const auto sampled = session_.sampleCompositeColor(QPointF(point) + QPointF(.5, .5));
+        if (!sampled) return;
+        session_.setForegroundColor(*sampled);
+        refreshPaletteSwatches();
     });
-    canvas_->setPaletteForeground(foregroundColor_);
+    canvas_->setPaletteForeground(session_.foregroundColor());
     createActions();
     quickFileMenu_ = new QMenu(menuRestoreButton_);
     quickFileMenu_->setObjectName(QStringLiteral("quickFileMenu"));
@@ -2413,7 +2441,7 @@ void MainWindow::previewGradient(const QPointF &start, const QPointF &end, bool 
     if (it == document_->layers.end() || !gradientOriginal_) { finishGradient(false); return; }
     *it = *gradientOriginal_;
     document_->activeLayerId = it->id;
-    session_.applyGradient(start, end, foregroundColor_, backgroundColor_, radial,
+    session_.applyGradient(start, end, session_.paletteColor(false), session_.paletteColor(true), radial,
                            foregroundTransparent, reversed, opacity);
     syncDocumentViews();
 }
@@ -2484,26 +2512,63 @@ void MainWindow::updateSmearStatusHint()
     statusHint_->setText(tr("%1 · [ ] size · Shift-[ ] hardness · 1–0 strength · Space to pan").arg(actionHint));
 }
 
+void MainWindow::refreshPaletteSwatches()
+{
+    if (!foregroundSwatch_ || !backgroundSwatch_) return;
+    const QColor fg = session_.paletteColor(false), bg = session_.paletteColor(true);
+    const auto paint = [](QLabel *swatch, const QColor &color) {
+        swatch->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(color.name(QColor::HexRgb)));
+    };
+    // Only a change of colour redraws a pending gradient: syncing the document views calls this too.
+    const bool changed = foregroundSwatch_->property("shownColor").value<QColor>() != fg
+                      || backgroundSwatch_->property("shownColor").value<QColor>() != bg;
+    foregroundSwatch_->setProperty("shownColor", fg); backgroundSwatch_->setProperty("shownColor", bg);
+    if (changed) { paint(foregroundSwatch_, fg); paint(backgroundSwatch_, bg); }
+    if (canvas_) {
+        canvas_->setPaletteForeground(session_.foregroundColor());
+        if (changed) canvas_->refreshPendingGradient();
+    }
+    const bool onMask = session_.isMaskSelected() && canvas_
+        && (canvas_->tool() == CanvasWidget::Tool::Brush || canvas_->tool() == CanvasWidget::Tool::Eraser);
+    if (auto *control = findChild<SegmentedControl *>(QStringLiteral("maskPaintControl"))) {
+        control->setVisible(onMask);
+        const QSignalBlocker blocker(control);
+        control->setCurrentIndex(session_.maskPaintWhite() ? 1 : 0);
+    }
+}
+
 void MainWindow::openColorPicker(bool background)
 {
-    const QColor startingColor = background ? backgroundColor_ : foregroundColor_;
+    if (session_.isPainting()) return;
+    // A mask only has black and white: the swatches offer those (mac's Mask foreground/background popover).
+    if (session_.isMaskSelected()) {
+        QMenu menu(this);
+        menu.setObjectName(QStringLiteral("maskPaletteMenu"));
+        menu.addSection(background ? tr("Mask background") : tr("Mask foreground"));
+        QAction *black = menu.addAction(tr("Black · Hide")), *white = menu.addAction(tr("White · Reveal"));
+        QWidget *swatch = background ? static_cast<QWidget *>(backgroundSwatch_) : foregroundSwatch_;
+        const QAction *chosen = menu.exec(swatch->mapToGlobal(QPoint(0, swatch->height())));
+        if (chosen == black || chosen == white) {
+            session_.setPaletteColor(chosen == white ? QColor(Qt::white) : QColor(Qt::black), background);
+            refreshPaletteSwatches();
+        }
+        return;
+    }
+    const QColor startingColor = background ? session_.backgroundColor() : session_.foregroundColor();
     if (colorPicker_) {
         colorPickerBackground_ = background;
-        colorPicker_->setWindowTitle(background ? tr("Background Color") : tr("Foreground Color"));
+        colorPicker_->setWindowTitle(background ? tr("Color Picker (Background Color)") : tr("Color Picker (Foreground Color)"));
         colorPicker_->setCurrentColor(startingColor);
         colorPicker_->raise();
         colorPicker_->activateWindow();
         return;
     }
 
-    auto *picker = new QColorDialog(startingColor, this);
+    auto *picker = new ColorPickerDialog(startingColor, this);
     picker->setObjectName(QStringLiteral("paletteColorPicker"));
-    picker->setWindowTitle(background ? tr("Background Color") : tr("Foreground Color"));
-    picker->setOption(QColorDialog::ShowAlphaChannel, false);
-    picker->setOption(QColorDialog::DontUseNativeDialog, true);
+    picker->setWindowTitle(background ? tr("Color Picker (Background Color)") : tr("Color Picker (Foreground Color)"));
     picker->setAttribute(Qt::WA_DeleteOnClose);
     picker->setWindowModality(Qt::NonModal);
-    attachColorDialogScrubbing(picker);
     colorPicker_ = picker;
     colorPickerBackground_ = background;
     colorPickerPreviousTool_ = int(canvas_->tool());
@@ -2520,11 +2585,11 @@ void MainWindow::openColorPicker(bool background)
     // is selected): the picker previews on them, and Cancel takes the preview back.
     const QPointer<InlineTextEditor> textEditor = background ? nullptr : inlineTextEditor();
     if (textEditor) {
-        connect(picker, &QColorDialog::currentColorChanged, textEditor, [textEditor](const QColor &color) {
+        connect(picker, &ColorPickerDialog::currentColorChanged, textEditor, [textEditor](const QColor &color) {
             textEditor->previewLetterFormat([textEditor, color] { textEditor->applyColor(color.toRgb()); });
         });
     }
-    connect(picker, &QColorDialog::finished, this, [this, picker, textEditor](int result) {
+    connect(picker, &QDialog::finished, this, [this, picker, textEditor](int result) {
         colorPickerPosition_ = picker->pos();
         if (textEditor) {
             textEditor->endPreview(false);
@@ -2533,11 +2598,8 @@ void MainWindow::openColorPicker(bool background)
         }
         if (result == QDialog::Accepted) {
             const QColor color = picker->currentColor().toRgb();
-            QColor &target = colorPickerBackground_ ? backgroundColor_ : foregroundColor_;
-            QLabel *swatch = colorPickerBackground_ ? backgroundSwatch_ : foregroundSwatch_;
-            target = color;
-            swatch->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(color.name(QColor::HexRgb)));
-            canvas_->refreshPendingGradient();
+            if (colorPickerBackground_) session_.setBackgroundColor(color); else session_.setForegroundColor(color);
+            refreshPaletteSwatches();
         }
         colorSampleOverride_ = {};
         if (colorPickerPreviousTool_ >= 0) canvas_->setTool(CanvasWidget::Tool(colorPickerPreviousTool_));
@@ -2595,6 +2657,8 @@ void MainWindow::createActions()
         if (dispatchTextEditCommand(TextEditCommand::Undo)) return;
         // While text is open its own history answers, never the document's.
         if (auto *editor = inlineTextEditor()) { editor->undo(); return; }
+        // Like Photoshop, the first Undo discards a pending gradient (mac EditorSession.undo).
+        if (canvas_->hasPendingGradient()) { canvas_->resolvePendingGradient(false); return; }
         session_.undo(); syncDocumentViews();
     });
     connect(redo, &QAction::triggered, this, [this] {
@@ -2634,8 +2698,8 @@ void MainWindow::createActions()
     });
     auto *fillForeground = new QAction(tr("Fill with Foreground Color"), this); fillForeground->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Backspace));
     auto *fillBackground = new QAction(tr("Fill with Background Color"), this); fillBackground->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Backspace));
-    connect(fillForeground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteWordBackward)) return; if (session_.fillSelection(session_.isMaskSelected() ? QColor(Qt::black) : foregroundColor_)) syncDocumentViews(); });
-    connect(fillBackground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteToBeginning)) return; if (session_.fillSelection(session_.isMaskSelected() ? QColor(Qt::white) : backgroundColor_)) syncDocumentViews(); });
+    connect(fillForeground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteWordBackward)) return; if (session_.fillSelection(session_.isMaskSelected() ? QColor(Qt::black) : session_.foregroundColor())) syncDocumentViews(); });
+    connect(fillBackground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteToBeginning)) return; if (session_.fillSelection(session_.isMaskSelected() ? QColor(Qt::white) : session_.backgroundColor())) syncDocumentViews(); });
     edit->addAction(fillForeground);
     edit->addAction(fillBackground);
     auto *clearPixels = edit->addAction(tr("Clear Selection Pixels"));
@@ -2733,8 +2797,8 @@ void MainWindow::createActions()
                             {QStringLiteral("green"), value.greenF()}, {QStringLiteral("blue"), value.blueF()}};
                     };
                     settings.insert(QStringLiteral("gradientMapSettings"), QJsonObject{
-                        {QStringLiteral("shadows"), color(foregroundColor_)},
-                        {QStringLiteral("highlights"), color(backgroundColor_)},
+                        {QStringLiteral("shadows"), color(session_.foregroundColor())},
+                        {QStringLiteral("highlights"), color(session_.backgroundColor())},
                         {QStringLiteral("reversed"), false}
                     });
                 }
@@ -2997,18 +3061,14 @@ void MainWindow::createActions()
     connect(nextBlend, &QAction::triggered, this, [cycleBlend] { cycleBlend(true); });
     connect(previousBlend, &QAction::triggered, this, [cycleBlend] { cycleBlend(false); });
     connect(swapColors, &QAction::triggered, this, [this] {
-        if (textEditorHasFocus()) return;
-        std::swap(foregroundColor_, backgroundColor_);
-        foregroundSwatch_->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(foregroundColor_.name(QColor::HexArgb)));
-        backgroundSwatch_->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(backgroundColor_.name(QColor::HexArgb)));
-        canvas_->refreshPendingGradient();
+        if (textEditorHasFocus() || session_.isPainting()) return;
+        session_.swapPaletteColors();
+        refreshPaletteSwatches();
     });
     connect(resetColors, &QAction::triggered, this, [this] {
-        if (textEditorHasFocus()) return;
-        foregroundColor_ = Qt::black; backgroundColor_ = Qt::white; canvas_->setPaletteForeground(foregroundColor_);
-        foregroundSwatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid white;border-radius:4px;"));
-        backgroundSwatch_->setStyleSheet(QStringLiteral("background:#ffffff;border:1px solid white;border-radius:4px;"));
-        canvas_->refreshPendingGradient();
+        if (textEditorHasFocus() || session_.isPainting()) return;
+        session_.resetPaletteColors();
+        refreshPaletteSwatches();
     });
 
     auto *view = menuBar()->addMenu(tr("&View"));
@@ -3805,8 +3865,8 @@ void MainWindow::gradientMapDialog()
         shadowButton->setStyleSheet(QStringLiteral("text-align:left;padding-left:32px;background:%1;").arg(shadows.name())); highlightButton->setStyleSheet(QStringLiteral("text-align:left;padding-left:32px;background:%1;").arg(highlights.name()));
     };
     const auto pickColor = [&](QColor &color, const QString &title) {
-        const QColor original = color; QColorDialog picker(color, &dialog); picker.setWindowTitle(title); picker.setOption(QColorDialog::DontUseNativeDialog); picker.setWindowModality(Qt::NonModal);
-        connect(&picker, &QColorDialog::currentColorChanged, &dialog, [&](const QColor &next) { if (!next.isValid()) return; color = next.toRgb(); refreshGradient(); preview(); });
+        const QColor original = color; ColorPickerDialog picker(color, &dialog); picker.setWindowTitle(tr("Color Picker (%1)").arg(title)); picker.setCanvasSamplingHint(false); picker.setWindowModality(Qt::NonModal);
+        connect(&picker, &ColorPickerDialog::currentColorChanged, &dialog, [&](const QColor &next) { if (!next.isValid()) return; color = next.toRgb(); refreshGradient(); preview(); });
         if (runFloatingDialog(picker) != QDialog::Accepted) { color = original; refreshGradient(); preview(); }
     };
     connect(shadowButton, &QPushButton::clicked, &dialog, [&] { pickColor(shadows, tr("Shadow Color")); });
@@ -4364,11 +4424,11 @@ void MainWindow::vignetteDialog()
 
     connect(colorBtn, &QPushButton::clicked, &dialog, [&] {
         const QColor originalColor = edgeColor;
-        QColorDialog picker(edgeColor, &dialog);
-        picker.setWindowTitle(tr("Vignette Edge Color"));
-        picker.setOption(QColorDialog::DontUseNativeDialog);
+        ColorPickerDialog picker(edgeColor, &dialog);
+        picker.setWindowTitle(tr("Color Picker (Vignette Color)"));
+        picker.setCanvasSamplingHint(false);
         picker.setWindowModality(Qt::NonModal);
-        connect(&picker, &QColorDialog::currentColorChanged, &dialog, [&](const QColor &next) {
+        connect(&picker, &ColorPickerDialog::currentColorChanged, &dialog, [&](const QColor &next) {
             if (!next.isValid()) return;
             edgeColor = next.toRgb();
             updateSwatch();
@@ -4687,8 +4747,9 @@ void MainWindow::ditherDialog()
         refresh();
     });
     const auto pickColor = [&dialog, settings, toColor, swatchStyle, refresh](QPushButton *button, DitherColor DitherSettings::*field) {
-        QColorDialog picker(toColor((*settings).*field), &dialog);
-        picker.setWindowTitle(field == &DitherSettings::dark ? tr("Dither Dark Color") : tr("Dither Light Color"));
+        ColorPickerDialog picker(toColor((*settings).*field), &dialog);
+        picker.setCanvasSamplingHint(false);
+        picker.setWindowTitle(field == &DitherSettings::dark ? tr("Color Picker (Dither Dark Color)") : tr("Color Picker (Dither Light Color)"));
         if (picker.exec() != QDialog::Accepted) return;
         const QColor color = picker.selectedColor();
         (*settings).*field = DitherColor{color.redF(), color.greenF(), color.blueF()};
@@ -5155,8 +5216,8 @@ void MainWindow::resizeCanvasDialog()
     if (dialog.exec() != QDialog::Accepted) return;
     std::optional<QColor> background;
     switch (fill->currentIndex()) {
-    case 1: background = foregroundColor_; break;
-    case 2: background = backgroundColor_; break;
+    case 1: background = session_.foregroundColor(); break;
+    case 2: background = session_.backgroundColor(); break;
     case 3: background = QColor(Qt::black); break;
     case 4: background = QColor(Qt::white); break;
     case 5: background = extension; break;
@@ -6172,7 +6233,7 @@ void MainWindow::exportPng(bool jpegDefault)
         QTimer previewTimer(&dialog); previewTimer.setSingleShot(true); previewTimer.setInterval(200);
         connect(&previewTimer, &QTimer::timeout, &dialog, updatePreview);
         connect(qualityField, &QSlider::valueChanged, &dialog, [=, &previewTimer](int value) { qualityValue->setText(QStringLiteral("%1%").arg(value)); previewTimer.start(); });
-        connect(background, &QPushButton::clicked, &dialog, [this, &matte, &previewTimer] { const QColor chosen = QColorDialog::getColor(matte, this, tr("Background for Transparency")); if (chosen.isValid()) { matte = chosen; previewTimer.start(); } });
+        connect(background, &QPushButton::clicked, &dialog, [this, &matte, &previewTimer] { const QColor chosen = ColorPickerDialog::getColor(matte, this, tr("Color Picker (Background for Transparency)")); if (chosen.isValid()) { matte = chosen; previewTimer.start(); } });
         updatePreview();
         if (dialog.exec() != QDialog::Accepted || !encoded) return;
         settings.setValue(QStringLiteral("jpegExportQuality"), qualityField->value()); jpegData = std::move(encoded->data);
@@ -6736,6 +6797,7 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
     canvas_->setTransformMask(session_.isMaskSelected() && session_.activeLayer() && !session_.activeLayer()->maskLinked);
     canvas_->setMaskTarget(session_.isMaskSelected());
     canvas_->setFloatingTransform(session_.hasFloatingSelection());
+    refreshPaletteSwatches();
     layerModel_->setDocument(document_, compositeChanged);
     if (selectedEffect_) {
         bool stillExists = false;

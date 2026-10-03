@@ -106,3 +106,9 @@ target_compile_definitions(filters_tests PRIVATE
     FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
 add_test(NAME filters_tests COMMAND filters_tests -platform offscreen)
+add_executable(paint_audit_tests
+    TestPaintAudit.cpp
+)
+target_include_directories(paint_audit_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(paint_audit_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME paint_audit_tests COMMAND paint_audit_tests -platform offscreen)
