@@ -843,6 +843,7 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
         painter.drawText(QRectF(badge.right() - 58, badge.top() + 4, 50, badge.height() - 8), Qt::AlignCenter, tr("Back"));
         painter.restore();
     }
+    if (probeOverlay) { painter.save(); probeOverlay(painter, target, zoom_); painter.restore(); }
 }
 
 void CanvasWidget::resizeEvent(QResizeEvent *event)
@@ -904,6 +905,11 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
     if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Zoom) {
         // A click doubles (Alt halves); a drag zooms continuously, doubling for every 100 px dragged to the right.
         zoomDragging_ = true; zoomDragMoved_ = false; zoomDragStart_ = event->position(); zoomDragOrigin_ = zoom_;
+        event->accept(); return;
+    }
+    if (event->button() == Qt::LeftButton && document_ && probeMode_) {
+        probeDragging_ = true;
+        emit probePressed((event->position() - canvasRect().topLeft()) / zoom_);
         event->accept(); return;
     }
     if (event->button() == Qt::LeftButton && document_ && hueTargeting_) {
@@ -1230,6 +1236,10 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         event->accept();
         return;
     }
+    if ((probeMode_ || probeHover_) && document_) {
+        emit probeMoved((event->position() - canvasRect().topLeft()) / zoom_, probeDragging_);
+        if (probeDragging_) { event->accept(); return; }
+    }
     if (hueTargetDragging_) {
         emit hueTargetDragged(event->position().x() - hueTargetStart_.x(), event->modifiers().testFlag(Qt::ControlModifier));
         setCursor(Qt::SizeHorCursor); event->accept(); return;
@@ -1542,6 +1552,9 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
     if (samplingColor_ && event->button() == Qt::LeftButton) { samplingColor_ = false; update(); event->accept(); return; }
+    if (probeDragging_ && event->button() == Qt::LeftButton) {
+        probeDragging_ = false; emit probeReleased((event->position() - canvasRect().topLeft()) / zoom_); event->accept(); return;
+    }
     if (hueTargetDragging_ && event->button() == Qt::LeftButton) {
         hueTargetDragging_ = false; emit hueTargetFinished();
         setCursor(hueTargeting_ ? Qt::SizeHorCursor : Qt::ArrowCursor); event->accept(); return;

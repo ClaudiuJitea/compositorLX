@@ -10,6 +10,7 @@
 
 
 #include <QSet>
+#include <QVariantMap>
 
 #include <array>
 #include <atomic>
@@ -39,6 +40,10 @@ struct GuideDrag {
 class EditorSession final {
 public:
     EditorSession() = default;
+
+    // mac EditorSession.filterSettings: the last values each filter was committed with, which its panel reopens with.
+    CameraRawSettings lastCameraRaw;
+    QVariantMap filterMemory;
 
     [[nodiscard]] const std::shared_ptr<Document> &document() const { return document_; }
     [[nodiscard]] std::shared_ptr<Document> &document() { return document_; }
@@ -402,6 +407,9 @@ public:
     }
 
 private:
+    // A filter that reaches past the layer's edge (blur, bloom): runs on the layer padded by `margin` pixels on every
+    // side, then trims the empty padding again (mac PixelFilter.trimmed / FilterEdit.growForBlur).
+    bool applySpreadingFilter(const QString &historyName, double margin, const std::function<QImage(const QImage &)> &filter);
     [[nodiscard]] int indexOf(const QUuid &id) const;
     [[nodiscard]] QString nextName(const QString &base) const;
     [[nodiscard]] QSet<QUuid> selectedTransformLayerIds() const;

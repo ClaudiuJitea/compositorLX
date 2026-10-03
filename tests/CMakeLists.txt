@@ -97,3 +97,12 @@ add_executable(selection_canvas_tests
 target_include_directories(selection_canvas_tests PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(selection_canvas_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME selection_canvas_tests COMMAND selection_canvas_tests -platform offscreen)
+add_executable(filters_tests
+    TestFilters.cpp
+)
+target_include_directories(filters_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(filters_tests PRIVATE compositor_ui Qt6::Test)
+target_compile_definitions(filters_tests PRIVATE
+    FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+add_test(NAME filters_tests COMMAND filters_tests -platform offscreen)

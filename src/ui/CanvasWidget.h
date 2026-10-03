@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 #include "core/Document.h"
 #include "core/EditorSession.h"
@@ -75,6 +76,12 @@ public:
     void setMaskTarget(bool enabled) { maskTarget_ = enabled; }
     void setEditorInteractionBlocked(bool blocked);
     [[nodiscard]] bool editorInteractionBlocked() const { return editorInteractionBlocked_; }
+    // A dialog's pointer probe (Camera Raw: eyedroppers, targeted adjustment, guide lines, RGB readout). While on, the
+    // canvas reports the pointer in document pixels instead of using the current tool, and `probeOverlay` may paint.
+    void setProbeMode(bool enabled) { probeMode_ = enabled; probeDragging_ = false; setCursor(enabled ? Qt::CrossCursor : Qt::ArrowCursor); update(); }
+    [[nodiscard]] bool probeMode() const { return probeMode_; }
+    void setProbeHover(bool enabled) { probeHover_ = enabled; }
+    std::function<void(QPainter &, const QRectF &canvasRect, double zoom)> probeOverlay;
     void setHueTargeting(bool enabled) { hueTargeting_ = enabled; hueTargetDragging_ = false; update(); }
     void setFloatingTransform(bool enabled) { floatingTransform_ = enabled; if (!enabled) { pixelDragging_ = false; pixelDragOffset_ = {}; } update(); }
     void setPersistentTransform(bool enabled) { persistentTransform_ = enabled; update(); }
@@ -174,6 +181,9 @@ signals:
     void textBoxRequested(const QRectF &box, bool areaText);
     void textLayerEditRequested(const QUuid &id);
     void colorSampleRequested(const QPoint &point);
+    void probePressed(const QPointF &documentPoint);
+    void probeMoved(const QPointF &documentPoint, bool dragging);
+    void probeReleased(const QPointF &documentPoint);
     void hueTargetStarted(const QPoint &point);
     void hueTargetDragged(double viewDelta, bool adjustsHue);
     void hueTargetFinished();
@@ -238,6 +248,9 @@ private:
     bool transformMask_ = false;
     bool maskTarget_ = false;
     bool editorInteractionBlocked_ = false;
+    bool probeMode_ = false;
+    bool probeHover_ = false;
+    bool probeDragging_ = false;
     bool hueTargeting_ = false;
     bool hueTargetDragging_ = false;
     QPointF hueTargetStart_;

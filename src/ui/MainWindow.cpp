@@ -11,6 +11,7 @@
 #include "rendering/TextLayout.h"
 #include "rendering/RasterOperations.h"
 #include "rendering/Dither.h"
+#include "ui/SliderTracks.h"
 #include "rendering/SubjectRemoval.h"
 #include "ui/CanvasWidget.h"
 #include "ui/LayerListModel.h"
@@ -254,7 +255,17 @@ void installFontMenuPreviews(QFontComboBox *combo, const std::function<InlineTex
 class SnapSlider final : public QSlider {
 public:
     using QSlider::QSlider;
+    // mac CameraRawSliderView: a double-click on the knob restores the control's default.
+    std::function<void()> onReset;
 protected:
+    void mouseDoubleClickEvent(QMouseEvent *event) override
+    {
+        if (onReset && event->button() == Qt::LeftButton) {
+            QStyleOptionSlider option; initStyleOption(&option);
+            if (style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, this).contains(event->position().toPoint())) { onReset(); event->accept(); return; }
+        }
+        QSlider::mouseDoubleClickEvent(event);
+    }
     void mousePressEvent(QMouseEvent *event) override
     {
         if (event->button() == Qt::LeftButton && orientation() == Qt::Horizontal && isEnabled()) {
@@ -388,6 +399,39 @@ QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, c
     return QMessageBox::StandardButton(result);
 }
 
+// A named colored track (property "sliderTrack" on the field, e.g. "cyanRed", "spectrum:120") and the double-click reset
+// value (property "resetValue", else 0 when the range has a zero, else the value the control starts with).
+void decorateSlider(SnapSlider *slider, QDoubleSpinBox *field)
+{
+    const QVariant resetProperty = field->property("resetValue");
+    const double reset = resetProperty.isValid() ? resetProperty.toDouble()
+        : (field->minimum() <= 0 && field->maximum() >= 0 ? 0.0 : field->value());
+    slider->onReset = [field, reset] { field->setValue(reset); };
+    const QString track = field->property("sliderTrack").toString();
+    const QString name = track.section(QLatin1Char(':'), 0, 0);
+    const double degrees = track.section(QLatin1Char(':'), 1, 1).toDouble();
+    if (name == QLatin1String("cyanRed")) SliderTrack::apply(slider, SliderTrack::cyanRed());
+    else if (name == QLatin1String("magentaGreen")) SliderTrack::apply(slider, SliderTrack::magentaGreen());
+    else if (name == QLatin1String("yellowBlue")) SliderTrack::apply(slider, SliderTrack::yellowBlue());
+    else if (name == QLatin1String("chroma")) SliderTrack::apply(slider, SliderTrack::chroma());
+    else if (name == QLatin1String("spectrum")) SliderTrack::apply(slider, SliderTrack::spectrum(degrees));
+    else if (name == QLatin1String("saturation")) SliderTrack::apply(slider, SliderTrack::saturation(degrees));
+    else if (name == QLatin1String("blackWhite")) SliderTrack::apply(slider, {Qt::black, Qt::white});
+}
+
+// mac FilterSettings: a filter's panel reopens with the values it was last committed with in this document.
+struct RememberedValue { QString key; QDoubleSpinBox *spin; };
+void rememberFilter(EditorSession &session, QDialog &dialog, bool live, const QString &prefix, const QList<RememberedValue> &values)
+{
+    if (!live) for (const RememberedValue &value : values) {
+        const QString key = prefix + QLatin1Char('.') + value.key;
+        if (session.filterMemory.contains(key)) value.spin->setValue(session.filterMemory.value(key).toDouble());
+    }
+    QObject::connect(&dialog, &QDialog::accepted, &dialog, [&session, values, prefix] {
+        for (const RememberedValue &value : values) session.filterMemory.insert(prefix + QLatin1Char('.') + value.key, value.spin->value());
+    });
+}
+
 QWidget *sliderField(QDoubleSpinBox *field, bool logarithmic = false)
 {
     auto *container = new QWidget(field->parentWidget()); auto *layout = new QHBoxLayout(container); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(8);
@@ -403,9 +447,17 @@ QWidget *sliderField(QDoubleSpinBox *field, bool logarithmic = false)
         return logarithmic && minimum > 0 ? std::exp(std::log(minimum) + fraction * (std::log(maximum) - std::log(minimum))) : minimum + fraction * (maximum - minimum);
     };
     slider->setValue(positionFor(field->value()));
+    decorateSlider(slider, field);
     QObject::connect(slider, &QSlider::valueChanged, field, [field, valueFor](int position) { field->setValue(valueFor(position)); });
     QObject::connect(field, qOverload<double>(&QDoubleSpinBox::valueChanged), slider, [slider, positionFor](double value) { const QSignalBlocker blocker(slider); slider->setValue(positionFor(value)); });
     layout->addWidget(slider, 1); layout->addWidget(field); return container;
+}
+
+void decorateSlider(SnapSlider *slider, QSpinBox *field)
+{
+    const QVariant resetProperty = field->property("resetValue");
+    const int reset = resetProperty.isValid() ? resetProperty.toInt() : (field->minimum() <= 0 && field->maximum() >= 0 ? 0 : field->value());
+    slider->onReset = [field, reset] { field->setValue(reset); };
 }
 
 QWidget *sliderField(QSpinBox *field)
@@ -415,6 +467,7 @@ QWidget *sliderField(QSpinBox *field)
     if (!field->objectName().isEmpty()) slider->setObjectName(field->objectName() + QStringLiteral("Slider"));
     const auto positionFor = [field](int value) { return qRound((value - field->minimum()) / double(field->maximum() - field->minimum()) * 1000); };
     slider->setValue(positionFor(field->value()));
+    decorateSlider(slider, field);
     QObject::connect(slider, &QSlider::valueChanged, field, [field](int position) { field->setValue(qRound(field->minimum() + position / 1000.0 * (field->maximum() - field->minimum()))); });
     QObject::connect(field, &QSpinBox::valueChanged, slider, [slider, positionFor](int value) { const QSignalBlocker blocker(slider); slider->setValue(positionFor(value)); });
     layout->addWidget(slider, 1); layout->addWidget(field); return container;
@@ -2802,7 +2855,12 @@ void MainWindow::createActions()
     connect(flatten, &QAction::triggered, this, [this] { if (session_.flattenImage()) syncDocumentViews(); });
     image->addSeparator();
     auto *invert = image->addAction(tr("&Invert")); invert->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
-    connect(invert, &QAction::triggered, this, [this] { if (session_.invertActiveLayerPixels()) syncDocumentViews(); });
+    connect(invert, &QAction::triggered, this, [this] {
+        // With a mask targeted the command is "Invert Mask" (mac Image menu), limited to the selection like pixels are.
+        const bool changed = session_.isMaskSelected() ? session_.invertLayerMask() : session_.invertActiveLayerPixels();
+        if (changed) syncDocumentViews();
+    });
+    invert->setObjectName(QStringLiteral("commandInvert"));
     auto *blackWhite = image->addAction(tr("Black & White…"));
     auto *colorBalance = image->addAction(tr("Color Balance…"));
     connect(blackWhite, &QAction::triggered, this, &MainWindow::blackWhiteDialog);
@@ -2813,6 +2871,7 @@ void MainWindow::createActions()
     connect(lens, &QAction::triggered, this, [this] {
         Layer *active=session_.activeLayer();if(!active||active->image.isNull())return;const QUuid target=active->id;const Layer original=*active;
         QDialog dialog(this);dialog.setWindowTitle(tr("Lens Correction"));auto *layout=new QVBoxLayout(&dialog);auto *amount=new QDoubleSpinBox(&dialog);amount->setRange(-100,100);amount->setValue(0);amount->setDecimals(0);layout->addWidget(new ScrubLabel(tr("Remove Distortion"),amount,1.0,std::nullopt,&dialog));layout->addWidget(sliderField(amount));auto *hint=new QLabel(tr("Positive straightens barrel distortion; negative straightens pincushion distortion."),&dialog);hint->setWordWrap(true);layout->addWidget(hint);auto *previewEnabled=new QCheckBox(tr("Preview"),&dialog);previewEnabled->setChecked(true);previewEnabled->setObjectName(QStringLiteral("filterPreview"));layout->addWidget(previewEnabled);
+        rememberFilter(session_,dialog,false,QStringLiteral("lens"),{{QStringLiteral("distortion"),amount}});
         session_.beginEdit(QStringLiteral("Lens Correction"));const auto preview=[this,target,original,amount,previewEnabled]{restoreLayer(document_.get(),session_,target,original);if(previewEnabled->isChecked())session_.distortActiveLayer(amount->value());canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel|QDialogButtonBox::Ok,&dialog);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);layout->addWidget(buttons);if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else restoreLayer(document_.get(),session_,target,original);session_.endEdit();syncDocumentViews();
     });
 
@@ -2844,6 +2903,12 @@ void MainWindow::createActions()
     filterMenu->addAction(noise); filterMenu->addAction(lens);
     for (QAction *item : filterMenu->actions()) item->setProperty("needsCommittedText", true);
     for (QAction *item : {levels, exposure, hueSaturation, curves, gradientMap, grain, invert, blackWhite, colorBalance, noise, lens}) item->setProperty("needsCommittedText", true);
+    // mac canAdjustColors: an unhidden pixel layer, no mask targeted, one layer selected, a selection that isn't empty.
+    for (QAction *item : {levels, exposure, hueSaturation, curves, gradientMap, grain, blackWhite, colorBalance, noise, lens,
+                          cameraRaw, gaussianBlur, motionBlur, bloomGlowAction, ditherAction, tonalContrastAction})
+        item->setProperty("needsPixelLayer", true);
+    vignetteAction->setProperty("needsPixelLayer", true);
+    vignetteAction->setProperty("allowsEmptyLayer", true);   // mac canVignette: Vignette can also start an empty layer
 
     auto *brushTool = new QAction(this); brushTool->setShortcut(QKeySequence(Qt::Key_B));
     auto *moveTool = new QAction(this); moveTool->setShortcut(QKeySequence(Qt::Key_V));
@@ -3572,6 +3637,15 @@ void MainWindow::hueSaturationDialog()
         spectrum->setVisible(spectrumVisible); handleText->setVisible(spectrumVisible); invert->setVisible(spectrumVisible);
         for (QToolButton *button : {sample, addSample, removeSample}) button->setVisible(spectrumVisible);
         targeted->setEnabled(!settings.colorize); spectrum->update();
+        // mac HueSaturationSheet: the hue track is the spectrum around the range's own hue (180 when colorizing); the
+        // saturation track runs gray to that hue (neutral to red for Master).
+        const double center = settings.range == ColorRange::Master ? 0.0 : std::fmod(band.rangeStart + HueBand::forward(band.rangeStart, band.rangeEnd) / 2, 360.0);
+        if (auto *track = hue->parentWidget() ? hue->parentWidget()->findChild<QSlider *>() : nullptr)
+            SliderTrack::apply(track, SliderTrack::spectrum(settings.colorize ? 180 : center));
+        if (auto *track = saturation->parentWidget() ? saturation->parentWidget()->findChild<QSlider *>() : nullptr)
+            SliderTrack::apply(track, settings.colorize ? SliderTrack::saturation(hue->value()) : settings.range == ColorRange::Master ? SliderTrack::chroma() : SliderTrack::saturation(center));
+        if (auto *track = lightness->parentWidget() ? lightness->parentWidget()->findChild<QSlider *>() : nullptr)
+            SliderTrack::apply(track, {Qt::black, Qt::white});
     };
     connect(range, &QComboBox::currentIndexChanged, &dialog, [&, previous = range->currentIndex()](int current) mutable {
         settings.adjustments[size_t(previous)] = {double(hue->value()), double(saturation->value()), double(lightness->value())};
@@ -3972,6 +4046,7 @@ void MainWindow::colorBalanceDialog()
     auto createTab = [&](QDoubleSpinBox *cr, QDoubleSpinBox *mg, QDoubleSpinBox *yb) {
         auto *tab = new QWidget(&dialog);
         auto *tabForm = new QFormLayout(tab);
+        cr->setProperty("sliderTrack", QStringLiteral("cyanRed")); mg->setProperty("sliderTrack", QStringLiteral("magentaGreen")); yb->setProperty("sliderTrack", QStringLiteral("yellowBlue"));
         addScrubRow(tabForm, tr("Cyan / Red"), cr);
         addScrubRow(tabForm, tr("Magenta / Green"), mg);
         addScrubRow(tabForm, tr("Yellow / Blue"), yb);
@@ -4100,7 +4175,7 @@ void MainWindow::gaussianBlurDialog()
     radius->setObjectName(QStringLiteral("gaussianBlurRadius"));
     radius->setDecimals(1);
     radius->setRange(.1, 250);
-    radius->setValue(live ? originalAdjustment.value(QStringLiteral("blurRadius")).toDouble(10.0) : 3.0);
+    radius->setValue(live ? originalAdjustment.value(QStringLiteral("blurRadius")).toDouble(10.0) : 1.0);   // mac FilterSettings.radius
     radius->setSuffix(tr(" px"));
     addScrubRow(form, tr("Radius"), radius, true);
     layout->addLayout(form);
@@ -4109,6 +4184,7 @@ void MainWindow::gaussianBlurDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, live, QStringLiteral("gaussianBlur"), {{QStringLiteral("radius"), radius}});
     session_.beginEdit(live ? QStringLiteral("Edit Gaussian Blur") : QStringLiteral("Gaussian Blur"));
     const auto value = [&] {
         return QJsonObject{
@@ -4135,6 +4211,8 @@ void MainWindow::gaussianBlurDialog()
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
+
+    preview();   // the panel opens already showing its result, as mac beginFilter does
 
     if (runFloatingDialog(dialog) == QDialog::Accepted) {
         previewEnabled->setChecked(true);
@@ -4176,6 +4254,7 @@ void MainWindow::motionBlurDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, live, QStringLiteral("motionBlur"), {{QStringLiteral("angle"), angle}, {QStringLiteral("distance"), distance}});
     session_.beginEdit(live ? QStringLiteral("Edit Motion Blur") : QStringLiteral("Motion Blur"));
     const auto value = [&] {
         return QJsonObject{
@@ -4204,6 +4283,8 @@ void MainWindow::motionBlurDialog()
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
+
+    preview();   // the panel opens already showing its result, as mac beginFilter does
 
     if (runFloatingDialog(dialog) == QDialog::Accepted) {
         previewEnabled->setChecked(true);
@@ -4271,6 +4352,7 @@ void MainWindow::vignetteDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, false, QStringLiteral("vignette"), {{QStringLiteral("amount"), amount}, {QStringLiteral("midpoint"), midpoint}, {QStringLiteral("roundness"), roundness}, {QStringLiteral("feather"), feather}, {QStringLiteral("highlights"), highlights}});
     session_.beginEdit(QStringLiteral("Vignette"));
     const auto preview = [this, target, original, amount, &edgeColor, midpoint, roundness, feather, highlights, previewEnabled] {
         restoreLayer(document_.get(), session_, target, original);
@@ -4354,6 +4436,7 @@ void MainWindow::bloomGlowDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, false, QStringLiteral("bloomGlow"), {{QStringLiteral("amount"), amount}, {QStringLiteral("radius"), radius}});
     session_.beginEdit(QStringLiteral("Bloom / Glow"));
     const auto preview = [this, target, original, amount, radius, previewEnabled] {
         restoreLayer(document_.get(), session_, target, original);
@@ -4430,6 +4513,7 @@ void MainWindow::tonalContrastDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, false, QStringLiteral("tonalContrast"), {{QStringLiteral("amount"), amount}, {QStringLiteral("radius"), radius}, {QStringLiteral("shadows"), shadows}, {QStringLiteral("midtones"), midtones}, {QStringLiteral("highlights"), highlights}});
     session_.beginEdit(QStringLiteral("Tonal Contrast"));
     const auto preview = [this, target, original, amount, radius, shadows, midtones, highlights, previewEnabled] {
         restoreLayer(document_.get(), session_, target, original);
@@ -4671,6 +4755,7 @@ void MainWindow::addNoiseDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, live, QStringLiteral("addNoise"), {{QStringLiteral("amount"), amount}});
     session_.beginEdit(live ? QStringLiteral("Edit Add Noise") : QStringLiteral("Add Noise"));
     const auto value = [&] {
         return QJsonObject{
@@ -6505,6 +6590,22 @@ void MainWindow::updateCommandStates()
     // The editor draws the text being edited, not its layer, so a filter's preview of it would be wrong: commit first.
     if (menuBar()) for (QAction *menuAction : menuBar()->actions()) if (QMenu *menu = menuAction->menu())
         for (QAction *item : menu->actions()) if (item->property("needsCommittedText").toBool()) item->setEnabled(!editingText);
+    {
+        const bool oneLayer = session_.selectedLayerIds().size() <= 1;
+        const bool selectionUsable = !hasSelection || session_.selectionBounds().has_value();
+        const bool visible = active && document_ && LayerRenderer::effectivelyVisible(*document_, *active);
+        const bool base = hasDocument && active && !active->group && active->adjustment.isEmpty() && !session_.isMaskSelected()
+                          && oneLayer && selectionUsable && visible && !editingText;
+        if (menuBar()) for (QAction *menuAction : menuBar()->actions()) if (QMenu *menu = menuAction->menu())
+            for (QAction *item : menu->actions()) if (item->property("needsPixelLayer").toBool())
+                item->setEnabled(base && (!active->image.isNull() || item->property("allowsEmptyLayer").toBool()));
+        if (QAction *item = action("commandInvert")) {
+            const bool maskTarget = session_.isMaskSelected();
+            item->setText(maskTarget ? tr("Invert Mask") : tr("&Invert"));
+            item->setEnabled(hasDocument && active && !editingText && oneLayer && selectionUsable && visible
+                             && (maskTarget ? !active->mask.isNull() && active->maskEnabled : !active->group && !active->image.isNull()));
+        }
+    }
     enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument);
     enabled("imageTrimAction", hasDocument); enabled("imageCropAction", hasDocument);
     enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy || (hasActive && !hasSelection && !session_.isMaskSelected())); enabled("commandCopyMerged", hasDocument && hasSelection);

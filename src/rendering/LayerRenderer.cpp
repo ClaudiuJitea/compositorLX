@@ -231,7 +231,31 @@ static QImage adjustedComposite(const QImage &original, const Document &document
             blend.drawImage(0,0,adjusted);
             blend.end();
         }
-        adjusted = blended;
+        // mac AdjustmentLayerTests.adjustmentBlendAndSoftMaskPreserveCoverage: the blend mode mixes colors only; where
+        // the adjustment kept the backdrop's alpha, so does the result (QPainter would add the source's coverage).
+        const auto opaque = [](const QImage &image) {
+            QImage straight = image.convertToFormat(QImage::Format_ARGB32);
+            for (int y = 0; y < straight.height(); ++y) { QRgb *line = reinterpret_cast<QRgb *>(straight.scanLine(y)); for (int x = 0; x < straight.width(); ++x) line[x] |= 0xFF000000u; }
+            return straight.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        };
+        QImage mixed = opaque(original);
+        const QImage source = opaque(adjusted);
+        if (customMode(layer.blendMode)) customComposite(mixed, source, layer.blendMode);
+        else { QPainter blend(&mixed); blend.setCompositionMode(compositionMode(layer.blendMode)); blend.drawImage(0, 0, source); blend.end(); }
+        mixed = mixed.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        const QImage adjustedPlain = adjusted.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        const QImage originalPlain = original.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        QImage keep = blended.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        for (int y = 0; y < keep.height(); ++y) {
+            uchar *out = keep.scanLine(y); const uchar *m = mixed.constScanLine(y), *a = adjustedPlain.constScanLine(y), *o = originalPlain.constScanLine(y);
+            for (int x = 0; x < keep.width(); ++x) {
+                const int alpha = o[x * 4 + 3];
+                if (a[x * 4 + 3] != alpha) continue;
+                for (int c = 0; c < 3; ++c) out[x * 4 + c] = uchar((m[x * 4 + c] * alpha + 127) / 255);
+                out[x * 4 + 3] = uchar(alpha);
+            }
+        }
+        adjusted = keep;
     }
     for (int y = 0; y < result.height(); ++y) {
         uchar *out = result.scanLine(y);

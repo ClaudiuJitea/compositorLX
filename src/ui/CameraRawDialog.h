@@ -13,8 +13,13 @@
 #include <QPushButton>
 #include <QLabel>
 #include <functional>
+#include <QStackedWidget>
+#include <QToolButton>
+#include <optional>
 
 namespace compositor {
+
+class CanvasWidget;
 
 class ScopeWidget final : public QWidget {
     Q_OBJECT
@@ -48,12 +53,26 @@ public:
     explicit CameraRawDialog(QWidget *parent, EditorSession &session, const QUuid &layerId,
                              std::function<void()> onPreview = nullptr);
 
+    ~CameraRawDialog() override;
     void accept() override;
     void reject() override;
 
     [[nodiscard]] CameraRawSettings settings() const { return settings_; }
     [[nodiscard]] QPushButton *whiteBalanceEyedropper() const { return wbEyedropper_; }
     void sampleWhiteBalance(const QColor &color);
+    // Group eyes (mac showsCameraRawLight ...): Light, Color, Effects, Curve, Mixer, Grading, Detail, Optics, Geometry,
+    // Calibration. A hidden group is left out of the preview and of OK without clearing its sliders.
+    [[nodiscard]] QCheckBox *eyeBox(int group) const { return showBoxes_.at(size_t(group)); }
+    [[nodiscard]] CameraRawSettings renderSettings() const;
+    void setSettings(const CameraRawSettings &settings);   // loads every control, as Reset does
+    enum class Probe { None, PointColor, Defringe, CurveTarget, MixerTarget, Guide };
+    void setProbe(Probe probe);
+    [[nodiscard]] Probe probe() const { return probe_; }
+    // What the canvas reports while a probe is armed or the pointer hovers (public so tests can drive it).
+    void probePress(const QPointF &documentPoint);
+    void probeMove(const QPointF &documentPoint, bool dragging);
+    void probeRelease(const QPointF &documentPoint);
+    [[nodiscard]] QString readoutText() const { return readout_ ? readout_->text() : QString(); }
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -74,7 +93,15 @@ private:
     QWidget *createCalibrationTab();
 
     void syncToSettings();
+    void loadFromSettings();
     void updatePreview();
+    void refreshEyes();
+    void refreshMixerColorPage();
+    void refreshPointPage();
+    void releaseCanvas();
+    [[nodiscard]] std::optional<QPoint> layerPixel(const QPointF &documentPoint) const;
+    struct ToneSample { double tone, hue, saturation, luminance; };
+    [[nodiscard]] std::optional<ToneSample> sampleAt(const QPointF &documentPoint, bool fromPreview) const;
 
     EditorSession &session_;
     QUuid layerId_;
@@ -205,6 +232,56 @@ private:
     QDoubleSpinBox *calBlueSatSpin_ = nullptr;
 
     bool updating_ = false;
+
+    CanvasWidget *canvas_ = nullptr;
+    Probe probe_ = Probe::None;
+    QImage lastGraded_;
+    bool sharpenMaskPreview_ = false;
+    std::array<bool, 10> shows_{true, true, true, true, true, true, true, true, true, true};
+    std::array<QCheckBox *, 10> showBoxes_{};
+    QLabel *readout_ = nullptr;
+    QPushButton *resetButton_ = nullptr;
+    QPushButton *pointEyedropper_ = nullptr;
+    QPushButton *defringeEyedropper_ = nullptr;
+    QPushButton *curveTarget_ = nullptr;
+    QPushButton *mixerTarget_ = nullptr;
+    QPushButton *guideButton_ = nullptr;
+    QPushButton *clearGuidesButton_ = nullptr;
+    QComboBox *curvePageCombo_ = nullptr;
+    QWidget *curveParametricPage_ = nullptr;
+    QWidget *curvePointPage_ = nullptr;
+    QComboBox *curveChannelCombo_ = nullptr;
+    QComboBox *mixerPageCombo_ = nullptr;
+    QStackedWidget *mixerStack_ = nullptr;
+    QComboBox *mixerComponentCombo_ = nullptr;
+    int mixerSwatch_ = 0;
+    std::array<QToolButton *, 8> mixerSwatchButtons_{};
+    QDoubleSpinBox *mixerColorHueSpin_ = nullptr;
+    QDoubleSpinBox *mixerColorSatSpin_ = nullptr;
+    QDoubleSpinBox *mixerColorLumSpin_ = nullptr;
+    int pointIndex_ = 0;
+    QWidget *pointSwatchHost_ = nullptr;
+    QWidget *pointSliders_ = nullptr;
+    QDoubleSpinBox *pointHueShiftSpin_ = nullptr;
+    QDoubleSpinBox *pointSatShiftSpin_ = nullptr;
+    QDoubleSpinBox *pointLumShiftSpin_ = nullptr;
+    QDoubleSpinBox *pointHueRangeSpin_ = nullptr;
+    QDoubleSpinBox *pointSatRangeSpin_ = nullptr;
+    QDoubleSpinBox *pointLumRangeSpin_ = nullptr;
+    QCheckBox *pointVisualizeBox_ = nullptr;
+    QDoubleSpinBox *opticsPurpleLowSpin_ = nullptr;
+    QDoubleSpinBox *opticsPurpleHighSpin_ = nullptr;
+    QDoubleSpinBox *opticsGreenLowSpin_ = nullptr;
+    QDoubleSpinBox *opticsGreenHighSpin_ = nullptr;
+    QDoubleSpinBox *profileDistortionSpin_ = nullptr;
+    QDoubleSpinBox *profileVignettingSpin_ = nullptr;
+
+    // A drag started by a targeted adjustment or a guide line.
+    CameraRawSettings dragStart_;
+    double dragStartY_ = 0;
+    ToneSample dragSample_{};
+    bool dragging_ = false;
+    std::optional<CameraRawGeometryGuide> guideDraft_;
 };
 
 } // namespace compositor
