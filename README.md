@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.3.1-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.4.0-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -21,20 +21,24 @@
   <img src="docs/screenshots/editor.png" alt="CompositorLX editor with layered composition, tools, and layer stack" width="920">
 </p>
 
-CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v9), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
+CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v11), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
 
-## What's new in version 0.3.1
+## What's new in version 0.4.0
 
-- **Crash recovery & autosave fix**: Resolved an issue where background autosaves on untitled projects could trigger spurious "Save Conflict" dialogs, overwrite document paths, or fail on subsequent intervals.
-- **Unobtrusive background autosave**: Autosave operations run entirely in the background without modal dialog interruption.
-- **Camera RAW development**: Open and develop RAW camera files (`.raw`, `.dng`, `.cr2`, `.nef`, `.arw`) with non-destructive exposure, white balance, tint, highlights, shadows, and optics
-- **Layer effects & styles**: Live Stroke, Drop Shadow, Inner Shadow, Outer Glow, Inner Glow, and Color Overlay with real-time preview
-- **Vector shape layers**: Rectangle, Ellipse, and Line vector shapes with editable stroke and fill
-- **New import formats**: Import Adobe Photoshop `.psd` files and vector `.svg` / `.svgz` graphics
-- **Canvas rulers & guides**: Draggable horizontal and vertical guides with snapping and layout grid
-- **Inline WYSIWYG text**: On-canvas text editing with alignment (left/center/right) and bounding boxes
-- **Expanded adjustments & trim**: New adjustment layers, Image Trim, and customizable keyboard shortcuts
-- **Project format v9**: Support for project format v9 with backward compatibility (v1–v9) and atomic saving
+Brings CompositorLX up to date with the macOS app through Compositor 1.4.5.
+
+- **Opens current macOS projects**: project format v10 and v11 (per-letter text colors and fonts) read and write losslessly; older packages stay older until a newer feature is used.
+- **Per-letter text**: color and font apply to the selected letters; the font menu shows every face in its own face, previews it under the pointer, and says *(Multiple)* for mixed selections; Ctrl+Z while typing undoes typing inside the text box.
+- **Select › Color Range**: click colors on the canvas (Shift adds, Alt removes), Fuzziness and Invert, with a live selection and mask preview.
+- **Filter › Dither**: Atkinson, Floyd–Steinberg, Bayer 2/4/8, halftone dots/lines/diamonds, Mac patterns, ASCII and CRT scanlines.
+- **Grid Settings**: spacing, subdivisions, color, style and opacity (View › Grid Settings…).
+- **Layers**: Ungroup Layers (Ctrl+Shift+G); Option-click a mask thumbnail to view the mask alone; the mask button reveals the selection (Option hides it); scaled layers show their scale; Ctrl+A from the Layers panel selects the canvas.
+- **Snapping**: resize handles, marquee, shapes and selection moves snap like moved layers; Shift keeps moved pixels on a straight line; Ctrl flips Auto Select and Shift flips the aspect lock, shown live in the options bar.
+- **Painting tools**: Smudge without ghost trails, Liquify that keeps pixels sharp, a separate Radius for the Blur brush, and brushes that explain why they cannot paint.
+- **Photoshop-accurate rendering**: Hue/Saturation positive saturation, Soft Light, Camera Raw parametric and tone curves (with a draggable point-curve graph), and PSD import fixes for levels, hue/saturation and layer masks.
+- **Smaller things**: Move-bar values apply on their own as one undo step, "N more tabs" menu, New Canvas preset sizes, zoomable JPEG export preview.
+
+Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Sparkle updater.
 
 ## Features
 
@@ -90,14 +94,14 @@ CompositorLX is a full-featured raster editor for Linux: layered `.comp` project
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.3.1-x86_64.AppImage
-./CompositorLX-0.3.1-x86_64.AppImage
+chmod +x CompositorLX-0.4.0-x86_64.AppImage
+./CompositorLX-0.4.0-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.3.1_amd64.deb
+sudo apt install ./compositorlx_0.4.0_amd64.deb
 compositor-lx
 ```
 
@@ -148,6 +152,7 @@ The original macOS app remains the behavior and file-format reference. Linux-spe
 
 ## Version history
 
+- **v0.4.0**: Sync with macOS Compositor 1.4.5 (format v10/v11, per-letter text, Color Range, Dither, Grid Settings, painting tool fixes, Photoshop-accurate curves and saturation).
 - **v0.3.1**: Fix autosave conflict dialog and recovery path handling for untitled projects.
 - **v0.3.0**: Camera RAW development pipeline via LibRaw, layer effects & styles, vector shapes, PSD/SVG import, canvas rulers & guides, inline WYSIWYG text, project format v9, and automated test suite.
 - **v0.2.0**: Segmented toolbar controls, improved tool options layout.
