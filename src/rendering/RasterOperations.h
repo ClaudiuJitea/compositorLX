@@ -107,6 +107,13 @@ public:
                             CameraRawClipping clipping = static_cast<CameraRawClipping>(0),
                             double scale = 1.0, quint32 seed = 0,
                             int visualizePointColor = -1, bool sharpenMask = false);
+    // Select > Color Range (mac c3e360a): 255 where every color channel is within `fuzziness` of one of the `include`
+    // colors (straight sRGB, 3 bytes each) and of none in `exclude`; transparent pixels never match; `invert` selects
+    // what doesn't match. Same size as `image`, Grayscale8.
+    static QImage colorRangeMask(const QImage &image, const QVector<quint8> &include, const QVector<quint8> &exclude,
+                                 int fuzziness, bool invert);
+    // The straight color at `point`, averaged over the 3 x 3 pixels around it; nullopt for fully transparent ones.
+    static std::optional<std::array<quint8, 3>> colorRangeSample(const QImage &image, const QPoint &point);
     static QJsonObject levelsSettingsToJson(const LevelsSettings &settings);
     static QJsonObject curvesSettingsToJson(const CurvesSettings &settings);
     static QJsonObject hueSaturationSettingsToJson(const HueSaturationSettings &settings);

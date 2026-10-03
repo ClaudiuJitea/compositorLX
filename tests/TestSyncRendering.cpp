@@ -37,6 +37,9 @@ private slots:
     void aProportionalCornerSnapsItsNearerEdgeAndKeepsTheRatio();
     void aTurnedLayerDoesntSnap();
     void marqueePointsAndSelectionMovesSnap();
+    // c3e360a: Select > Color Range
+    void colorRangeSelectsNearColorsAndTakesAwayExcluded();
+    void colorRangeCommitsAsOneUndoStep();
     // 1318f1e: GroupTests.ungroup*
     void ungroupRestoresChildrenAtTheFoldersSpotAndUndoes();
     void ungroupPreservesClippingBetweenTwoOfAFoldersOwnChildren();
@@ -463,6 +466,61 @@ void TestSyncRendering::marqueePointsAndSelectionMovesSnap()
     QCOMPARE(locked.x(), 67.0);
     session.setSnapEnabled(false);
     QCOMPARE(session.snappedPoint(QPointF(147, 3), 5.0), QPointF(147, 3));
+}
+
+static QVector<quint8> includeRed0(const QImage &) { return {255, 0, 0}; }
+static QImage redBlueHalves()
+{
+    QImage image(20, 10, QImage::Format_RGBA8888_Premultiplied);
+    image.fill(QColor(0, 0, 255));
+    for (int y = 0; y < 10; ++y) for (int x = 0; x < 10; ++x) image.setPixelColor(x, y, QColor(255, 0, 0));
+    image.setPixelColor(19, 9, QColor(0, 0, 0, 0));   // a transparent pixel never matches
+    return image;
+}
+
+void TestSyncRendering::colorRangeSelectsNearColorsAndTakesAwayExcluded()
+{
+    const QImage image = redBlueHalves();
+    const auto red = RasterOperations::colorRangeSample(image, QPoint(2, 2));
+    const auto blue = RasterOperations::colorRangeSample(image, QPoint(15, 5));
+    QVERIFY(red && blue);
+    QCOMPARE(int((*red)[0]), 255);
+    QCOMPARE(qGray(RasterOperations::colorRangeMask(image, includeRed0(image), {}, 40, false).pixel(19, 9)), 0);   // transparent never matches
+    const QVector<quint8> includeRed{(*red)[0], (*red)[1], (*red)[2]}, includeBlue{(*blue)[0], (*blue)[1], (*blue)[2]};
+    QImage mask = RasterOperations::colorRangeMask(image, includeRed, {}, 40, false);
+    QCOMPARE(qGray(mask.pixel(2, 2)), 255);
+    QCOMPARE(qGray(mask.pixel(15, 5)), 0);
+    mask = RasterOperations::colorRangeMask(image, includeRed, {}, 40, true);   // invert: all but red
+    QCOMPARE(qGray(mask.pixel(2, 2)), 0);
+    QCOMPARE(qGray(mask.pixel(15, 5)), 255);
+    QCOMPARE(qGray(mask.pixel(19, 9)), 255);   // inverted selects whatever does not match, transparent included (as mac)
+    mask = RasterOperations::colorRangeMask(image, includeRed + includeBlue, includeBlue, 40, false);   // add blue, take blue away
+    QCOMPARE(qGray(mask.pixel(15, 5)), 0);
+    QCOMPARE(qGray(mask.pixel(2, 2)), 255);
+}
+
+void TestSyncRendering::colorRangeCommitsAsOneUndoStep()
+{
+    EditorSession session;
+    session.createDocument(20, 10, true);
+    session.setRectangularSelection(QRect(0, 0, 4, 4));
+    const QImage before = *session.document()->selection;
+    QImage mask(20, 10, QImage::Format_Grayscale8);
+    mask.fill(0);
+    mask.setPixel(5, 5, 255);
+    session.previewSelection(mask);              // a live preview is not an undo step
+    const int undoCount = session.history().undoCount();
+    session.previewSelection(before);
+    QCOMPARE(session.history().undoCount(), undoCount);
+    QVERIFY(session.replaceSelection(mask, QStringLiteral("Color Range")));
+    QCOMPARE(session.history().undoCount(), undoCount + 1);
+    QCOMPARE(session.history().undoName(), QStringLiteral("Color Range"));
+    session.undo();
+    QCOMPARE(*session.document()->selection, before);
+    QImage empty(20, 10, QImage::Format_Grayscale8);
+    empty.fill(0);
+    QVERIFY(!session.replaceSelection(empty, QStringLiteral("Color Range")));   // nothing matched: deselects
+    QVERIFY(!session.document()->selection.has_value());
 }
 
 QTEST_MAIN(TestSyncRendering)

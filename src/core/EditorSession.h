@@ -64,6 +64,10 @@ public:
     bool insertPixelLayer(const QImage &image, const QPointF &origin, const QString &name,
                           const QString &historyName = QStringLiteral("Paste"), bool dropsSelection = true);
     [[nodiscard]] std::optional<QPair<QImage, QPoint>> copiedPixels(bool merged = false) const;
+    // Replaces the selection with `mask` as one undo step; an empty mask deselects. (Select > Color Range.)
+    bool replaceSelection(const QImage &mask, const QString &historyName);
+    // Shows `mask` (or nothing/the original) as the selection without an undo step, for a dialog's live preview.
+    void previewSelection(const std::optional<QImage> &mask);
     void selectAll();
     void deselect();
     void invertSelection();

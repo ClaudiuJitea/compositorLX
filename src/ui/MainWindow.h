@@ -170,6 +170,7 @@ private:
     void levelsDialog();
     void exposureDialog();
     void hueSaturationDialog();
+    void colorRangeDialog();
     void curvesDialog();
     void gradientMapDialog();
     void grainDialog();

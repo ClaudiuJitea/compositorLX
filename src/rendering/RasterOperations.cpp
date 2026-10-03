@@ -5,6 +5,8 @@ extern "C" {
 #include "LensPixels.h"
 #include "NoisePixels.h"
 #include "WandPixels.h"
+
+#include <cstring>
 #include "LevelsPixels.h"
 #include "AdjustPixels.h"
 #include "ContentFill.h"
@@ -293,6 +295,38 @@ QImage RasterOperations::exposure(const QImage &image, double stops, double offs
         }
     } }
     return result;
+}
+
+QImage RasterOperations::colorRangeMask(const QImage &image, const QVector<quint8> &include, const QVector<quint8> &exclude,
+                                        int fuzziness, bool invert)
+{
+    QImage mask(image.size(), QImage::Format_Grayscale8);
+    mask.fill(0);
+    if (image.isNull() || include.size() < 3) return mask;
+    const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    std::vector<uint8_t> packed(size_t(source.width()) * size_t(source.height()));
+    color_range_mask(source.constBits(), size_t(source.width()), size_t(source.height()), size_t(source.bytesPerLine()),
+                     include.constData(), int(include.size() / 3), exclude.constData(), int(exclude.size() / 3),
+                     std::clamp(fuzziness, 0, 200), invert ? 1 : 0, packed.data());
+    for (int y = 0; y < mask.height(); ++y) std::memcpy(mask.scanLine(y), packed.data() + size_t(y) * size_t(mask.width()), size_t(mask.width()));
+    return mask;
+}
+
+std::optional<std::array<quint8, 3>> RasterOperations::colorRangeSample(const QImage &image, const QPoint &point)
+{
+    if (image.isNull() || !QRect(QPoint(), image.size()).contains(point)) return std::nullopt;
+    const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    long sums[4] = {0, 0, 0, 0};
+    for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+        const int x = point.x() + dx, y = point.y() + dy;
+        if (x < 0 || y < 0 || x >= source.width() || y >= source.height()) continue;   // outside counts as transparent
+        const uchar *p = source.constScanLine(y) + x * 4;
+        for (int c = 0; c < 4; ++c) sums[c] += p[c];
+    }
+    if (sums[3] <= 0) return std::nullopt;
+    std::array<quint8, 3> color{};
+    for (int c = 0; c < 3; ++c) color[size_t(c)] = quint8(std::min<long>(255, (sums[c] * 255 + sums[3] / 2) / sums[3]));
+    return color;
 }
 
 QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationSettings &settings)

@@ -302,6 +302,24 @@ std::optional<QPair<QImage, QPoint>> EditorSession::copiedPixels(bool merged) co
     return QPair<QImage, QPoint>(canvas.copy(region), region.topLeft());
 }
 
+static bool maskHasCoverage(const QImage &source);
+
+bool EditorSession::replaceSelection(const QImage &mask, const QString &historyName)
+{
+    if (!document_) return false;
+    if (mask.isNull() || !maskHasCoverage(mask)) { deselect(); return false; }
+    beginEdit(historyName);
+    document_->selection = mask.convertToFormat(QImage::Format_Grayscale8);
+    endEdit();
+    return true;
+}
+
+void EditorSession::previewSelection(const std::optional<QImage> &mask)
+{
+    if (!document_) return;
+    document_->selection = mask;
+}
+
 void EditorSession::selectAll()
 {
     if (!document_) return;

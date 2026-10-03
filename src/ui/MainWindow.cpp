@@ -2498,6 +2498,8 @@ void MainWindow::createActions()
     connect(layerPixels, &QAction::triggered, this, [this] { if (session_.loadLayerAsSelection()) syncDocumentViews(false); });
     connect(maskPixels, &QAction::triggered, this, [this] { if (session_.loadMaskAsSelection()) syncDocumentViews(false); });
     select->addSeparator();
+    auto *colorRange = select->addAction(tr("Color Range…")); colorRange->setObjectName(QStringLiteral("commandColorRange"));
+    connect(colorRange, &QAction::triggered, this, [this] { colorRangeDialog(); });
     auto *expand = select->addAction(tr("Expand…"));
     auto *contract = select->addAction(tr("Contract…"));
     auto *feather = select->addAction(tr("Feather…")); feather->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F6));
@@ -3112,6 +3114,75 @@ void MainWindow::exposureDialog()
     const int result = runFloatingDialog(dialog);
     if(result==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else if(live)session_.previewAdjustment(target,originalAdjustment);else restoreLayer(document_.get(), session_, target, originalLayer);
     session_.endEdit();syncDocumentViews();
+}
+
+// Select > Color Range (mac c3e360a): every pixel near the colors clicked on the canvas, anywhere in the image. The
+// dialog shows the selection live; OK keeps it as one undo step, Cancel puts back the one there was.
+void MainWindow::colorRangeDialog()
+{
+    if (!document_) return;
+    const QImage sample = LayerRenderer::flattened(*document_);
+    const std::optional<QImage> original = document_->selection;
+    QDialog dialog(this); dialog.setWindowTitle(tr("Color Range")); dialog.setObjectName(QStringLiteral("colorRangeDialog"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *tools = new QHBoxLayout;
+    auto *replaceTool = new QToolButton(&dialog); replaceTool->setText(tr("Sample")); replaceTool->setToolTip(tr("Click the image to select that color"));
+    auto *addTool = new QToolButton(&dialog); addTool->setText(tr("+")); addTool->setToolTip(tr("Click the image to add that color to the selection"));
+    auto *removeTool = new QToolButton(&dialog); removeTool->setText(tr("−")); removeTool->setToolTip(tr("Click the image to take that color out of the selection"));
+    auto *toolGroup = new QButtonGroup(&dialog);
+    int toolIndex = 0;
+    for (QToolButton *button : {replaceTool, addTool, removeTool}) { button->setCheckable(true); toolGroup->addButton(button, toolIndex++); tools->addWidget(button); }
+    replaceTool->setChecked(true);
+    replaceTool->setObjectName(QStringLiteral("colorRangeSample")); addTool->setObjectName(QStringLiteral("colorRangeAdd")); removeTool->setObjectName(QStringLiteral("colorRangeRemove"));
+    tools->addStretch(); layout->addLayout(tools);
+    auto *preview = new QLabel(&dialog); preview->setAlignment(Qt::AlignCenter); preview->setStyleSheet(QStringLiteral("background:black;border:1px solid #444;"));
+    const QSizeF fit = QSizeF(sample.size()).scaled(QSizeF(292, 200), Qt::KeepAspectRatio);
+    preview->setFixedSize(fit.toSize().expandedTo(QSize(1, 1)));
+    layout->addWidget(preview, 0, Qt::AlignHCenter);
+    auto *hint = new QLabel(tr("Click the image to pick the color to select."), &dialog); hint->setWordWrap(true); layout->addWidget(hint);
+    auto *form = new QHBoxLayout;
+    auto *fuzz = new QSlider(Qt::Horizontal, &dialog); fuzz->setRange(0, 200); fuzz->setValue(40); fuzz->setObjectName(QStringLiteral("colorRangeFuzziness"));
+    auto *fuzzValue = new QSpinBox(&dialog); fuzzValue->setRange(0, 200); fuzzValue->setValue(40);
+    form->addWidget(new QLabel(tr("Fuzziness"), &dialog)); form->addWidget(fuzz, 1); form->addWidget(fuzzValue); layout->addLayout(form);
+    auto *invert = new QCheckBox(tr("Invert"), &dialog); invert->setToolTip(tr("Select everything except those colors, such as all but a green screen")); layout->addWidget(invert);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    QVector<quint8> include, exclude;
+    const auto currentMask = [&] { return RasterOperations::colorRangeMask(sample, include, exclude, fuzz->value(), invert->isChecked()); };
+    const auto refresh = [&] {
+        if (include.isEmpty()) { session_.previewSelection(original); preview->clear(); hint->setText(tr("Click the image to pick the color to select.")); canvas_->update(); return; }
+        const QImage mask = currentMask();
+        bool any = false;
+        for (int y = 0; y < mask.height() && !any; ++y) { const uchar *row = mask.constScanLine(y); for (int x = 0; x < mask.width(); ++x) if (row[x]) { any = true; break; } }
+        session_.previewSelection(any ? std::optional<QImage>(mask) : std::nullopt);
+        preview->setPixmap(QPixmap::fromImage(mask.scaled(preview->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation)));
+        hint->setText(tr("Shift-click adds a color, Option/Alt-click takes one away."));
+        canvas_->update();
+    };
+    connect(fuzz, &QSlider::valueChanged, &dialog, [&](int value) { const QSignalBlocker b(fuzzValue); fuzzValue->setValue(value); refresh(); });
+    connect(fuzzValue, &QSpinBox::valueChanged, &dialog, [&](int value) { const QSignalBlocker b(fuzz); fuzz->setValue(value); refresh(); });
+    connect(invert, &QCheckBox::toggled, &dialog, [&](bool) { refresh(); });
+    const CanvasWidget::Tool previousTool = canvas_->tool();
+    canvas_->setTool(CanvasWidget::Tool::Eyedropper);
+    colorSampleOverride_ = [&](const QPoint &point) {
+        const auto color = RasterOperations::colorRangeSample(sample, point);
+        if (!color) { QApplication::beep(); return; }
+        const Qt::KeyboardModifiers mods = QApplication::keyboardModifiers();
+        // Shift adds and Option/Alt takes away, whichever eyedropper is chosen.
+        const int mode = mods.testFlag(Qt::AltModifier) ? 2 : mods.testFlag(Qt::ShiftModifier) ? 1 : toolGroup->checkedId();
+        const QVector<quint8> bytes{(*color)[0], (*color)[1], (*color)[2]};
+        if (mode == 0) { include = bytes; exclude.clear(); } else if (mode == 1) include += bytes; else exclude += bytes;
+        refresh();
+    };
+    const int result = runFloatingDialog(dialog);
+    colorSampleOverride_ = {}; canvas_->setTool(previousTool);
+    QImage finalMask;
+    if (result == QDialog::Accepted && !include.isEmpty()) finalMask = currentMask();
+    session_.previewSelection(original);
+    if (!finalMask.isNull()) session_.replaceSelection(finalMask, QStringLiteral("Color Range"));
+    syncDocumentViews(false);
 }
 
 void MainWindow::hueSaturationDialog()
