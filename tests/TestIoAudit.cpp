@@ -167,7 +167,8 @@ private slots:
     void shortcutConflictsAndPersistence();
     void menuStructureMatchesMac();
     void fileMenuEnabledStates();
-    void zzDumpMenus();
+    void menuEnabledStatesFollowMac();
+    void menuNamingFollowsMac();
 
     // docs/writing-comp-files.md
     void handWrittenMinimalManifestOpens();
@@ -1382,26 +1383,94 @@ void TestIoAudit::fileMenuEnabledStates()
     QVERIFY(!enabled("commandCopyMerged"));
 }
 
-static void dumpMenu(QMenu *menu, const QString &prefix, QStringList &out)
-{
-    for (QAction *a : menu->actions()) {
-        if (a->isSeparator()) continue;
-        if (a->menu()) { emit a->menu()->aboutToShow(); dumpMenu(a->menu(), prefix + a->text() + QStringLiteral(">"), out); continue; }
-        out << QStringLiteral("%1%2 [%3] %4").arg(prefix, a->text(), a->shortcut().toString(), a->isEnabled() ? QStringLiteral("on") : QStringLiteral("off"));
-    }
-}
-void TestIoAudit::zzDumpMenus()
+void TestIoAudit::menuEnabledStatesFollowMac()
 {
     MainWindow window;
-    const auto dump = [&](const char *label) {
-        QStringList out;
-        for (QAction *top : window.menuBar()->actions()) if (top->menu()) { emit top->menu()->aboutToShow(); dumpMenu(top->menu(), top->text() + QStringLiteral(": "), out); }
-        QFile f(QStringLiteral("/tmp/claude-1000/menus_%1.txt").arg(QLatin1String(label))); f.open(QIODevice::WriteOnly); f.write(out.join(QLatin1Char('\n')).toUtf8());
+    const auto on = [&](const char *name) {
+        auto *a = window.findChild<QAction *>(QLatin1String(name));
+        if (!a) QTest::qFail(name, __FILE__, __LINE__);
+        return a && a->isEnabled();
     };
-    dump("nodoc");
-    window.session().createDocument(40, 40, true); window.syncDocumentViews(); dump("blank");
-    window.session().insertImage(solid(40, 40, Qt::red), QStringLiteral("Img")); window.syncDocumentViews(); dump("image");
-    window.session().setRectangularSelection(QRect(5, 5, 10, 10)); window.syncDocumentViews(); dump("selection");
+    const auto refresh = [&] { window.syncDocumentViews(); };
+    const char *needDocument[] = {"cmdImageSize", "cmdCanvasSize", "cmdFlipCanvasH", "cmdFlipCanvasV", "cmdFit", "cmdActual", "cmdZoomIn", "cmdZoomOut",
+        "commandSelectSubject", "commandColorRange"};
+    const char *needPixelLayer[] = {"cmdLevels", "cmdCurves", "cmdHueSaturation", "cmdExposure", "cmdGradientMap", "cmdGrain", "cmdBlackWhite", "cmdColorBalance",
+        "cmdAddNoise", "cmdGaussianBlur", "cmdMotionBlur", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdCameraRaw", "cmdInvert", "cmdLayerPixels"};
+    // No document.
+    for (const char *name : needDocument) QVERIFY2(!on(name), name);
+    for (const char *name : needPixelLayer) QVERIFY2(!on(name), name);
+    QVERIFY(!on("cmdExpand")); QVERIFY(!on("cmdFill")); QVERIFY(!on("cmdMaskDelete"));
+    // A blank layer: document commands on, anything that reads or changes pixels off (canAdjustColors needs an asset).
+    window.session().createDocument(40, 40, true); refresh();
+    for (const char *name : needDocument) QVERIFY2(on(name), name);
+    for (const char *name : needPixelLayer) QVERIFY2(!on(name), name);
+    QVERIFY(on("cmdVignette"));          // canVignette allows an empty layer
+    QVERIFY(on("cmdFill"));              // canEditPixels
+    QVERIFY(!on("commandCopyMerged"));   // canCopyMerged needs a visible layer with pixels
+    QVERIFY(!on("cmdFlipLayerH"));       // canTransform needs pixels
+    QVERIFY(!on("cmdMaskDelete"));       // no mask yet
+    QVERIFY(on("cmdMaskRevealAll"));
+    // A pixel layer.
+    window.session().insertImage(solid(40, 40, Qt::red), QStringLiteral("Img")); refresh();
+    for (const char *name : needPixelLayer) QVERIFY2(on(name), name);
+    QVERIFY(on("commandCopyMerged"));    // no selection needed, as canCopyMerged
+    QVERIFY(on("cmdFlipLayerH"));
+    QVERIFY(!on("cmdExpand")); QVERIFY(!on("cmdContract")); QVERIFY(!on("commandFeatherSelection")); QVERIFY(!on("commandContentFill"));
+    QVERIFY(!on("cmdClearPixels"));
+    // A hidden layer cannot be adjusted or inverted (effectiveVisibleIDs).
+    window.session().toggleLayerVisibility(*window.document()->activeLayerId); refresh();
+    QVERIFY(!on("cmdLevels")); QVERIFY(!on("cmdInvert")); QVERIFY(!on("commandCopyMerged"));
+    window.session().toggleLayerVisibility(*window.document()->activeLayerId); refresh();
+    QVERIFY(on("cmdLevels"));
+    // A selection enables the selection-only commands.
+    window.session().setRectangularSelection(QRect(5, 5, 10, 10)); refresh();
+    QVERIFY(on("cmdExpand")); QVERIFY(on("cmdContract")); QVERIFY(on("commandFeatherSelection")); QVERIFY(on("commandContentFill"));
+    QVERIFY(on("cmdClearPixels"));
+    // A mask enables the mask commands and Select > Mask's Black Areas; with the mask targeted, Invert needs it enabled.
+    window.session().addLayerMask(true, false); refresh();
+    QVERIFY(on("cmdMaskDelete")); QVERIFY(on("cmdMaskToggle")); QVERIFY(on("cmdMaskPixels"));
+    // Two layers selected: adjustments need exactly one layer (selectedLayerIDs.count == 1).
+    window.session().insertImage(solid(40, 40, Qt::blue), QStringLiteral("Img2"));
+    window.session().selectLayers({window.document()->layers[0].id, window.document()->layers[1].id}, window.document()->layers[1].id); refresh();
+    QVERIFY(!on("cmdLevels")); QVERIFY(!on("cmdInvert"));
+}
+
+void TestIoAudit::menuNamingFollowsMac()
+{
+    MainWindow window;
+    const auto text = [&](const char *name) { auto *a = window.findChild<QAction *>(QLatin1String(name)); return a ? plain(a->text()) : QStringLiteral("<missing>"); };
+    window.session().createDocument(40, 40, true);
+    window.session().insertImage(solid(40, 40, Qt::red), QStringLiteral("Img")); window.syncDocumentViews();
+    QCOMPARE(text("commandTransform"), QStringLiteral("Transform Layer"));
+    QCOMPARE(text("commandDuplicate"), QStringLiteral("Duplicate Layer"));
+    QCOMPARE(text("commandDelete"), QStringLiteral("Delete Layer"));
+    QCOMPARE(text("commandVisibility"), QStringLiteral("Hide Layer"));
+    QCOMPARE(text("commandMerge"), QStringLiteral("Merge Down"));
+    window.session().setRectangularSelection(QRect(2, 2, 10, 10)); window.syncDocumentViews();
+    QCOMPARE(text("commandTransform"), QStringLiteral("Transform Selection"));
+    QCOMPARE(text("commandDuplicate"), QStringLiteral("Layer via Copy"));
+    window.session().deselect();
+    window.session().toggleLayerVisibility(*window.document()->activeLayerId); window.syncDocumentViews();
+    QCOMPARE(text("commandVisibility"), QStringLiteral("Show Layer"));
+    window.session().toggleLayerVisibility(*window.document()->activeLayerId);
+    window.session().addLayerMask(true, false);
+    window.session().selectMaskTarget(true); window.syncDocumentViews();
+    QCOMPARE(text("commandDelete"), QStringLiteral("Delete Layer Mask"));
+    QCOMPARE(text("cmdInvert"), QStringLiteral("Invert"));
+    // New Adjustment Layer: editable kinds end in an ellipsis, Invert does not.
+    QMenu *layer = topMenu(window.menuBar(), QStringLiteral("Layer"));
+    QAction *adjustments = menuItem(layer, QStringLiteral("New Adjustment Layer"));
+    emit adjustments->menu()->aboutToShow();
+    QStringList titles;
+    for (QAction *a : adjustments->menu()->actions()) titles << plain(a->text());
+    QVERIFY(titles.contains(QStringLiteral("Invert")));
+    QVERIFY(titles.contains(QStringLiteral("Curves…")));
+    QVERIFY(titles.contains(QStringLiteral("Black & White…")));
+    QVERIFY(titles.contains(QStringLiteral("Add Noise…")));
+    // Merge title with several layers selected.
+    window.session().selectMaskTarget(false);
+    window.session().selectLayers({window.document()->layers[0].id, window.document()->layers[1].id}, window.document()->layers[1].id); window.syncDocumentViews();
+    QVERIFY2(text("commandMerge") != QStringLiteral("Merge Down"), qPrintable(text("commandMerge")));
 }
 
 // ---------------------------------------------------------------------------------------------------- agent contract

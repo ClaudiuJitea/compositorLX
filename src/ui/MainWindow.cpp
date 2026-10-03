@@ -2658,7 +2658,7 @@ void MainWindow::createActions()
         };
         for (const QString &kind : allKinds) {
             if (!session_.canSaveAdjustment(kind)) continue;
-            auto *act = adjustments->addAction(QString(kind).replace(QLatin1Char('&'), QStringLiteral("&&")));
+            auto *act = adjustments->addAction(QString(kind).replace(QLatin1Char('&'), QStringLiteral("&&")) + (kind == QStringLiteral("Invert") ? QString() : QStringLiteral("…")));
             connect(act, &QAction::triggered, this, [this, kind] {
                 QJsonObject settings;
                 if (kind == QStringLiteral("Gradient Map")) {
@@ -3079,6 +3079,29 @@ void MainWindow::createActions()
         session_.clearGuides();
         syncDocumentViews(false);
     });
+
+    // Names the enabled-state logic in updateCommandStates() finds these by (mac CompositorApp.swift .disabled conditions).
+    {
+        const std::initializer_list<std::pair<QAction *, const char *>> names = {
+            {layerPixels, "cmdLayerPixels"}, {maskPixels, "cmdMaskPixels"}, {expand, "cmdExpand"}, {contract, "cmdContract"},
+            {selectSubject, "commandSelectSubject"},
+            {levels, "cmdLevels"}, {exposure, "cmdExposure"}, {hueSaturation, "cmdHueSaturation"}, {curves, "cmdCurves"},
+            {gradientMap, "cmdGradientMap"}, {grain, "cmdGrain"}, {invert, "cmdInvert"}, {blackWhite, "cmdBlackWhite"},
+            {colorBalance, "cmdColorBalance"}, {noise, "cmdAddNoise"}, {lens, "cmdLens"},
+            {imageSize, "cmdImageSize"}, {canvasSize, "cmdCanvasSize"}, {flipCanvasH, "cmdFlipCanvasH"}, {flipCanvasV, "cmdFlipCanvasV"},
+            {flatten, "cmdFlatten"},
+            {cameraRaw, "cmdCameraRaw"}, {gaussianBlur, "cmdGaussianBlur"}, {motionBlur, "cmdMotionBlur"}, {vignetteAction, "cmdVignette"},
+            {bloomGlowAction, "cmdBloom"}, {ditherAction, "cmdDither"}, {tonalContrastAction, "cmdTonalContrast"},
+            {removeBackground, "cmdRemoveBackground"}, {contentFill, "commandContentFill"},
+            {fill, "cmdFill"}, {fillForeground, "cmdFillForeground"}, {fillBackground, "cmdFillBackground"}, {clearPixels, "cmdClearPixels"},
+            {flipLayerH, "cmdFlipLayerH"}, {flipLayerV, "cmdFlipLayerV"},
+            {revealMask, "cmdMaskRevealAll"}, {hideMask, "cmdMaskHideAll"}, {revealSelectionMask, "cmdMaskRevealSelection"},
+            {hideSelectionMask, "cmdMaskHideSelection"}, {toggleMask, "cmdMaskToggle"}, {linkMask, "cmdMaskLink"},
+            {invertMask, "cmdMaskInvert"}, {loadMask, "cmdMaskLoad"}, {deleteMask, "cmdMaskDelete"},
+            {fit, "cmdFit"}, {actual, "cmdActual"}, {zoomIn, "cmdZoomIn"}, {zoomOut, "cmdZoomOut"},
+        };
+        for (const auto &entry : names) if (entry.first && entry.first->objectName().isEmpty()) entry.first->setObjectName(QLatin1String(entry.second));
+    }
 
     auto *help = menuBar()->addMenu(tr("&Help"));
     connect(help->addAction(tr("Check for Updates…")), &QAction::triggered, this, &MainWindow::checkForUpdates);
@@ -6509,6 +6532,50 @@ void MainWindow::updateCommandStates()
     // The menu names the step it would undo or redo, as the mac menu does; in a text field it is the field's own undo.
     if (QAction *item = action("commandUndo")) item->setText(!text && !editingText && session_.canUndo() ? tr("&Undo %1").arg(session_.history().undoName()) : tr("&Undo"));
     if (QAction *item = action("commandRedo")) item->setText(!text && !editingText && session_.canRedo() ? tr("&Redo %1").arg(session_.history().redoName()) : tr("&Redo"));
+    // Enabled states of the Select, Image, Filter, Edit-fill, Layer-mask and View items, from mac EditorSession's
+    // canAdjustColors / canInvert / canCopyMerged / canSelectSubject / canModifySelection / canEditPixels / ...
+    {
+        const auto effectivelyVisible = [this](const Layer *layer) {
+            while (layer) {
+                if (!layer->visible) return false;
+                if (!layer->parentId) return true;
+                const auto parent = std::find_if(document_->layers.cbegin(), document_->layers.cend(), [layer](const Layer &l) { return l.id == *layer->parentId; });
+                layer = parent == document_->layers.cend() ? nullptr : &*parent;
+            }
+            return true;
+        };
+        const bool maskTarget = session_.isMaskSelected();
+        const bool single = session_.selectedLayerIds().size() <= 1;
+        const bool visible = active && effectivelyVisible(active);
+        const bool adjustable = hasDocument && active && !editingText && !active->group && !maskTarget && !active->image.isNull() && single && visible;
+        const bool adjustableOrLive = adjustable || (hasDocument && active && !editingText && !active->adjustment.isEmpty());
+        const bool vignetteOk = adjustable || (hasDocument && active && !editingText && !active->group && active->adjustment.isEmpty() && active->image.isNull() && !maskTarget && single && visible);
+        const bool invertOk = hasDocument && active && !editingText && single && visible && (!active->group || maskTarget)
+            && (maskTarget ? (!active->mask.isNull() && active->maskEnabled) : !active->image.isNull());
+        const bool paintOk = hasDocument && active && !active->group && active->adjustment.isEmpty() && visible && !editingText;
+        const bool anyPixels = hasDocument && std::any_of(document_->layers.cbegin(), document_->layers.cend(), [](const Layer &l) { return l.visible && !l.group && !l.image.isNull(); });
+        enabled("commandCopyMerged", anyPixels);
+        enabled("commandSelectSubject", hasDocument);
+        enabled("commandColorRange", hasDocument);
+        enabled("cmdLayerPixels", hasDocument && active && !active->image.isNull());
+        enabled("cmdMaskPixels", hasDocument && active && !active->mask.isNull());
+        for (const char *name : {"cmdExpand", "cmdContract", "commandFeatherSelection"}) enabled(name, hasSelection);
+        for (const char *name : {"cmdLevels", "cmdHueSaturation", "cmdCurves"}) enabled(name, adjustableOrLive);
+        for (const char *name : {"cmdExposure", "cmdGradientMap", "cmdGrain", "cmdBlackWhite", "cmdColorBalance", "cmdAddNoise", "cmdLens", "cmdCameraRaw",
+                                 "cmdGaussianBlur", "cmdMotionBlur", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdRemoveBackground"}) enabled(name, adjustable);
+        enabled("cmdVignette", vignetteOk);
+        enabled("cmdInvert", invertOk);
+        enabled("commandContentFill", adjustable && hasSelection);
+        for (const char *name : {"cmdImageSize", "cmdCanvasSize", "cmdFlipCanvasH", "cmdFlipCanvasV", "cmdFlatten", "cmdFit", "cmdActual", "cmdZoomIn", "cmdZoomOut", "commandGridSettings"}) enabled(name, hasDocument);
+        for (const char *name : {"cmdFill", "cmdFillForeground", "cmdFillBackground"}) enabled(name, text || paintOk);
+        enabled("cmdClearPixels", paintOk && hasSelection);
+        for (const char *name : {"cmdFlipLayerH", "cmdFlipLayerV"}) enabled(name, canTransformLayer);
+        for (const char *name : {"cmdMaskRevealAll", "cmdMaskHideAll", "cmdMaskRevealSelection", "cmdMaskHideSelection"}) enabled(name, hasActive && !active->group);
+        for (const char *name : {"cmdMaskToggle", "cmdMaskLink", "cmdMaskInvert", "cmdMaskLoad", "cmdMaskDelete"}) enabled(name, hasActive && !active->mask.isNull());
+        for (QAction *view : {actionShowGrid_, actionShowGuides_, actionShowRulers_, actionSnap_, actionSnapToGuides_, actionSnapToGrid_, actionSnapToLayers_, actionSnapToDocumentBounds_, actionLockGuides_})
+            if (view) view->setEnabled(hasDocument);
+    }
+
     if (QAction *item = action("commandTransform")) item->setText(hasSelection ? tr("Transform Selection") : tr("Transform Layer"));
     if (QAction *item = action("commandDuplicate")) item->setText(hasSelection ? tr("Layer via Copy") : tr("Duplicate Layer"));
     if (QAction *item = action("commandDelete")) item->setText(selectedEffect_ ? tr("Delete Effect")
