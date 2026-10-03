@@ -1756,6 +1756,33 @@ std::optional<QColor> EditorSession::levelsSampleAt(const QPointF &documentPoint
 
 static QImage selectionCoverageForLayer(const Layer &layer, const QSize &size, const std::optional<QImage> &selection);
 
+QString EditorSession::paintRefusal() const
+{
+    if (!document_) return {};
+    const Layer *layer = activeLayer();
+    if (!layer) return {};
+    const bool paintingMask = maskSelected_;
+    if (document_->selection) {
+        const QImage &sel = *document_->selection;
+        const QImage gray = sel.format() == QImage::Format_Grayscale8 ? sel : sel.convertToFormat(QImage::Format_Grayscale8);
+        bool any = false;
+        for (int y = 0; y < gray.height() && !any; ++y) {
+            const uchar *row = gray.constScanLine(y);
+            for (int x = 0; x < gray.width(); ++x) if (row[x]) { any = true; break; }
+        }
+        if (!any) return QObject::tr("The selection is empty, so there is nowhere to paint. Deselect (Ctrl+D) to paint anywhere.");
+    }
+    if (selectedLayerIds_.size() > 1) return QObject::tr("Several layers are selected. Select one layer to paint on it.");
+    if (!layer->visible) return QObject::tr("The layer is hidden. Show it to paint on it.");
+    if (paintingMask) {
+        if (layer->mask.isNull() || !layer->maskEnabled) return QObject::tr("The layer mask is turned off. Enable it to paint on it.");
+        return {};
+    }
+    if (layer->group) return QObject::tr("A folder has no pixels to paint on. Select a layer inside it, or its mask.");
+    if (!layer->adjustment.isEmpty()) return QObject::tr("An adjustment layer has no pixels to paint on. Paint on its mask instead.");
+    return {};
+}
+
 bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor &color, double diameter,
                                      double hardness, double opacity, bool erasing, const std::optional<QPointF> &cloneSource,
                                      int healMode, quint32 effectSeed)

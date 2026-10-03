@@ -186,6 +186,9 @@ public:
     void setCloneSource(const QPointF &documentPoint);
     [[nodiscard]] std::optional<QPointF> cloneSource() const { return cloneSource_; }
     [[nodiscard]] std::optional<QPointF> cloneOffset() const { return cloneOffset_; }
+    // Why a brush, gradient, smudge or liquify cannot paint right now, in words for the user; empty when it can
+    // (mac 133c34a). `forMask` is true when the target is the layer's mask.
+    [[nodiscard]] QString paintRefusal() const;
     bool beginCloneStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1, double opacity = 1,
                           bool aligned = true, bool sampleAllLayers = false);
     bool beginHealingStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1,

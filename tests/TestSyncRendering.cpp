@@ -31,6 +31,7 @@ private slots:
     void psdLevelsGammaIsInHundredths();
     void psdHueSaturationReadsMasterAndEachRange();
     void psdMaskPatchSitsWhereItIsOnTheCanvas();
+    void paintRefusalsExplainThemselves();
     // 133c34a / b3419ab
     void inverseOfEverythingDeselects();
     void maskButtonRevealsOrHidesTheSelection();
@@ -272,6 +273,23 @@ void TestSyncRendering::psdMaskPatchSitsWhereItIsOnTheCanvas()
     QCOMPARE(scaled.size(), QSize(8, 4));
     QCOMPARE(qGray(scaled.pixel(5, 1)), 255);
     QCOMPARE(qGray(scaled.pixel(1, 1)), 0);
+}
+
+void TestSyncRendering::paintRefusalsExplainThemselves()
+{
+    EditorSession session;
+    session.createDocument(20, 10, true);
+    QVERIFY(session.paintRefusal().isEmpty());
+    QImage empty(20, 10, QImage::Format_Grayscale8);
+    empty.fill(0);
+    session.document()->selection = empty;          // an empty selection draws no ants and stops every brush
+    QVERIFY(session.paintRefusal().contains(QStringLiteral("Deselect")));
+    session.deselect();
+    session.document()->selection.reset();
+    session.activeLayer()->visible = false;
+    QVERIFY(session.paintRefusal().contains(QStringLiteral("hidden")));
+    session.activeLayer()->visible = true;
+    QVERIFY(session.paintRefusal().isEmpty());
 }
 
 QTEST_MAIN(TestSyncRendering)

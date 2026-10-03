@@ -98,6 +98,7 @@
 #include <QTabBar>
 #include <QTextEdit>
 #include <QTimer>
+#include <QToolTip>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QtConcurrent>
@@ -1832,7 +1833,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::zoomChanged, this, [this](double z) {
         session_.setViewportZoom(z);
     });
-    connect(canvas_, &CanvasWidget::brushStrokeStarted, this, [this](const QPointF &point, bool erasing) {
+    // A stroke the document refuses says why, as Photoshop does, instead of silently doing nothing.
+    const auto explainRefusal = [this] {
+        const QString reason = session_.paintRefusal();
+        if (reason.isEmpty()) return;
+        QToolTip::showText(QCursor::pos(), reason, canvas_, QRect(), 5000);
+    };
+    connect(canvas_, &CanvasWidget::brushStrokeStarted, this, [this, explainRefusal](const QPointF &point, bool erasing) {
+        explainRefusal();
         session_.setViewportZoom(canvas_->zoom());
         session_.setBrushSmoothing(brushSmoothing_);
         session_.beginBrushStroke(point, foregroundColor_, brushDiameter_, brushHardness_, brushOpacity_, erasing);
@@ -1850,7 +1858,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::cloneSourceRequested, this, [this](const QPointF &point) {
         session_.setCloneSource(point); canvas_->setCloneSource(point);
     });
-    connect(canvas_, &CanvasWidget::cloneStrokeStarted, this, [this,cloneAligned,cloneSample](const QPointF &point) {
+    connect(canvas_, &CanvasWidget::cloneStrokeStarted, this, [this,cloneAligned,cloneSample,explainRefusal](const QPointF &point) {
+        explainRefusal();
         if (session_.beginCloneStroke(point, brushDiameter_, brushHardness_, brushOpacity_, cloneAligned->isChecked(), cloneSample->currentIndex() == 1)) {
             const auto offset = cloneAligned->isChecked() ? session_.cloneOffset()
                 : std::optional<QPointF>(*session_.cloneSource() - point);
@@ -1862,17 +1871,20 @@ MainWindow::MainWindow(QWidget *parent)
         canvas_->setCloneAligned(aligned);
         canvas_->setCloneTracking(session_.cloneSource(), session_.cloneOffset());
     });
-    connect(canvas_, &CanvasWidget::healingStrokeStarted, this, [this,healingMode](const QPointF &point) {
+    connect(canvas_, &CanvasWidget::healingStrokeStarted, this, [this,healingMode,explainRefusal](const QPointF &point) {
+        explainRefusal();
         session_.beginHealingStroke(point, brushDiameter_, brushHardness_, brushOpacity_, healingMode->currentIndex(), QRandomGenerator::global()->generate()); canvas_->invalidateDocument();
     });
-    connect(canvas_, &CanvasWidget::blurStrokeStarted, this, [this, smearMode](const QPointF &point) {
+    connect(canvas_, &CanvasWidget::blurStrokeStarted, this, [this, smearMode, explainRefusal](const QPointF &point) {
+        explainRefusal();
         if (smearMode->currentIndex() == 1) session_.beginBlurStroke(point, brushDiameter_, brushHardness_, brushOpacity_);
         else session_.beginWarpStroke(point, smearMode->currentIndex() == 0 ? 0 : 1, brushDiameter_, brushHardness_, brushOpacity_);
         canvas_->invalidateDocument();
     });
     connect(canvas_, &CanvasWidget::cycleSmearModeRequested, this, &MainWindow::cycleSmearMode);
     connect(canvas_, &CanvasWidget::cycleToolModeRequested, this, &MainWindow::cycleToolMode);
-    connect(canvas_, &CanvasWidget::gradientRequested, this, [this,gradientShape,gradientStyle,gradientReverse](const QPointF &start, const QPointF &end) {
+    connect(canvas_, &CanvasWidget::gradientRequested, this, [this,gradientShape,gradientStyle,gradientReverse,explainRefusal](const QPointF &start, const QPointF &end) {
+        explainRefusal();
         previewGradient(start, end, gradientShape->currentIndex() == 1, gradientStyle->currentIndex() == 0,
                         gradientReverse->isChecked(), gradientOpacityField_->value() / 100.0);
     });
