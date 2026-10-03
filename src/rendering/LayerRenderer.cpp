@@ -435,6 +435,18 @@ static void renderScope(const Document &document,
                 drawLayer(own, document, base, QPainter::CompositionMode_SourceOver);
             }
             const QImage baseCoverage = layerCoverage(document, base, {});
+            const QImage stackAlpha = stack;   // the base on its own: its alpha is what the stack keeps
+            // Children draw over the base's color at full strength: lift the soft edge to opaque first.
+            for (int y = 0; y < canvasSize.height(); ++y) {
+                uchar *row = stack.scanLine(y);
+                for (int x = 0; x < canvasSize.width(); ++x) {
+                    uchar *px = row + x * 4;
+                    const int a = px[3];
+                    if (a == 0 || a == 255) continue;
+                    for (int c = 0; c < 3; ++c) px[c] = uchar(std::min(255, int(px[c]) * 255 / a));
+                    px[3] = 255;
+                }
+            }
 
             for (int childIdx = i + 1; childIdx < end; ++childIdx) {
                 const Layer &layer = children.at(childIdx);
@@ -466,8 +478,6 @@ static void renderScope(const Document &document,
                     {
                         QPainter cp(&childImg);
                         drawLayer(cp, document, layer, QPainter::CompositionMode_SourceOver);
-                        cp.setCompositionMode(QPainter::CompositionMode_DestinationIn);
-                        cp.drawImage(0, 0, baseCoverage);
                     }
                     if (customMode(layer.blendMode)) {
                         customComposite(stack, childImg, layer.blendMode);
@@ -476,6 +486,19 @@ static void renderScope(const Document &document,
                         p.setCompositionMode(compositionMode(layer.blendMode));
                         p.drawImage(0, 0, childImg);
                     }
+                }
+            }
+            // Clipping stacks share the base's alpha instead of painting it over itself (mac LiveMaskRenderer stacks):
+            // the clipped layers' colors are blended over the base's color, and the base's own alpha is put back.
+            for (int y = 0; y < canvasSize.height(); ++y) {
+                uchar *row = stack.scanLine(y);
+                const uchar *cov = stackAlpha.constScanLine(y);
+                for (int x = 0; x < canvasSize.width(); ++x) {
+                    uchar *px = row + x * 4;
+                    const int a = cov[x * 4 + 3], total = px[3];
+                    if (a == 0 || total == 0) { px[0] = px[1] = px[2] = px[3] = 0; continue; }
+                    for (int c = 0; c < 3; ++c) px[c] = uchar(std::min(255, int(px[c]) * 255 / total) * a / 255);
+                    px[3] = uchar(a);
                 }
             }
             if (!clip.isNull()) applyMaskToImage(stack, clip);

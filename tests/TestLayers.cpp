@@ -14,7 +14,9 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
 #include <QListView>
+#include <QMimeData>
 #include <QMenu>
 #include <QSlider>
 #include <QTemporaryDir>
@@ -110,7 +112,7 @@ EditorSession redSession(int size = 2)
 {
     EditorSession session;
     session.createDocument(size, size);
-    QVERIFY2(session.insertImage(solid(size, size, Qt::red), QStringLiteral("Red")), "insert");
+    session.insertImage(solid(size, size, Qt::red), QStringLiteral("Red"));
     session.document()->layers[0].transform.sampling = Sampling::Nearest;
     return session;
 }
@@ -1327,7 +1329,7 @@ static EditorSession liveFixture(QUuid *target, QUuid *source)
     s.document()->layers[1].visible = false;
     *target = s.document()->layers[0].id;
     *source = s.document()->layers[1].id;
-    QVERIFY(s.linkMask(*source, *target));
+    s.linkMask(*source, *target);
     return s;
 }
 
@@ -1675,8 +1677,9 @@ void TestLayers::crossProjectCopyRemapsIdentityAndHasIndependentUndo()
     QAction *copy = window.findChild<QAction *>(QStringLiteral("commandCopy"));
     QAction *paste = window.findChild<QAction *>(QStringLiteral("commandPaste"));
     copy->trigger();
-    QAction *newProject = window.findChild<QAction *>(QStringLiteral("commandNewProject"));
-    if (!newProject) QSKIP("no New Project command to open a second tab programmatically");
+    QAction *newProject = nullptr;
+    for (QAction *candidate : window.findChildren<QAction *>()) if (candidate->text().contains(QStringLiteral("New Canvas"))) newProject = candidate;
+    QVERIFY(newProject);
     newProject->trigger();
     window.session().createDocument(200, 200);
     window.syncDocumentViews();

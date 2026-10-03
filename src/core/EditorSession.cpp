@@ -771,6 +771,28 @@ static void rasterizeLayer(Layer &layer)
 bool EditorSession::invertActiveLayerPixels()
 {
     const Layer *layer = activeLayer();
+    // With the mask targeted, Invert inverts the mask (inside the selection, if any), folders' included (mac invertPixels).
+    if (layer && maskSelected_ && !layer->mask.isNull() && layer->maskEnabled) {
+        const int maskIndex = indexOf(layer->id);
+        QImage mask = layer->mask.convertToFormat(QImage::Format_Grayscale8);
+        if (document_->selection) {
+            const QImage selection = document_->selection->convertToFormat(QImage::Format_Grayscale8);
+            const QTransform toDocument = LayerRenderer::pixelToDocument(layer->maskPlacement.value_or(layer->transform), mask.size());
+            for (int y = 0; y < mask.height(); ++y) {
+                uchar *row = mask.scanLine(y);
+                for (int x = 0; x < mask.width(); ++x) {
+                    const QPointF at = toDocument.map(QPointF(x + .5, y + .5));
+                    const int sx = qFloor(at.x()), sy = qFloor(at.y());
+                    const int cov = QRect(QPoint(), selection.size()).contains(sx, sy) ? selection.constScanLine(sy)[sx] : 0;
+                    row[x] = uchar(row[x] + (255 - 2 * row[x]) * cov / 255);
+                }
+            }
+        } else {
+            for (int y = 0; y < mask.height(); ++y) { uchar *row = mask.scanLine(y); for (int x = 0; x < mask.width(); ++x) row[x] = uchar(255 - row[x]); }
+        }
+        if (mask == layer->mask.convertToFormat(QImage::Format_Grayscale8)) return false;
+        beginEdit(QStringLiteral("Invert")); document_->layers[maskIndex].mask = mask; endEdit(); return true;
+    }
     if (!layer || layer->group || layer->image.isNull()) return false;
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::inverted(layer->image), *layer, document_->selection);

@@ -6416,9 +6416,9 @@ void MainWindow::updateCommandStates()
         for (QAction *item : menu->actions()) if (item->property("needsCommittedText").toBool()) item->setEnabled(!editingText);
     enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument);
     enabled("imageTrimAction", hasDocument); enabled("imageCropAction", hasDocument);
-    enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy); enabled("commandCopyMerged", hasDocument && hasSelection);
-    enabled("commandPaste", text || !clipboardImage_.isNull() || !QGuiApplication::clipboard()->image().isNull());
-    enabled("commandDuplicate", hasActive && (hasSelection ? canCopy : !active->group)); enabled("commandDelete", text || hasActive || selectedEffect_.has_value());
+    enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy || (hasActive && !hasSelection && !session_.isMaskSelected())); enabled("commandCopyMerged", hasDocument && hasSelection);
+    enabled("commandPaste", text || !clipboardImage_.isNull() || (QGuiApplication::clipboard()->mimeData() && QGuiApplication::clipboard()->mimeData()->hasFormat(QStringLiteral("application/x-compositor-copied-layer"))) || !QGuiApplication::clipboard()->image().isNull());
+    enabled("commandDuplicate", hasActive && (hasSelection ? canCopy : true)); enabled("commandDelete", text || hasActive || selectedEffect_.has_value());
     enabled("commandTransform", hasSelection ? canCopy : canTransformLayer);
     enabled("commandNewLayer", hasDocument); enabled("commandNewFolder", hasDocument); enabled("commandGroupLayers", hasDocument); enabled("commandUngroupLayers", hasDocument && session_.canUngroupLayers());
     enabled("commandMoveOut", active && active->parentId.has_value()); enabled("commandRenameLayer", hasActive); enabled("commandVisibility", hasActive);
@@ -6435,12 +6435,7 @@ void MainWindow::updateCommandStates()
     if (QAction *item = action("commandVisibility")) item->setText(active && !active->visible ? tr("Show Layer") : tr("Hide Layer"));
     if (QAction *item = action("commandClipping")) {
         item->setText(active && active->maskSourceId ? tr("Release Clipping Mask") : tr("Create Clipping Mask"));
-        bool canClip = active && !active->group;
-        if (canClip && !active->maskSourceId) {
-            int below = -1;
-            for (int i = 0; i < document_->layers.size() && document_->layers.at(i).id != active->id; ++i) if (document_->layers.at(i).parentId == active->parentId) below = i;
-            canClip = below >= 0 && !document_->layers.at(below).group;
-        }
+        const bool canClip = active && session_.canToggleClippingMask(active->id);
         item->setEnabled(canClip);
     }
     if (QAction *item = action("commandMerge")) item->setText(session_.mergeTitle());
