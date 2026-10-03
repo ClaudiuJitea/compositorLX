@@ -417,6 +417,19 @@ void decorateSlider(SnapSlider *slider, QDoubleSpinBox *field)
     else if (name == QLatin1String("blackWhite")) SliderTrack::apply(slider, {Qt::black, Qt::white});
 }
 
+// mac FilterSettings: a filter's panel reopens with the values it was last committed with in this document.
+struct RememberedValue { QString key; QDoubleSpinBox *spin; };
+void rememberFilter(EditorSession &session, QDialog &dialog, bool live, const QString &prefix, const QList<RememberedValue> &values)
+{
+    if (!live) for (const RememberedValue &value : values) {
+        const QString key = prefix + QLatin1Char('.') + value.key;
+        if (session.filterMemory.contains(key)) value.spin->setValue(session.filterMemory.value(key).toDouble());
+    }
+    QObject::connect(&dialog, &QDialog::accepted, &dialog, [&session, values, prefix] {
+        for (const RememberedValue &value : values) session.filterMemory.insert(prefix + QLatin1Char('.') + value.key, value.spin->value());
+    });
+}
+
 QWidget *sliderField(QDoubleSpinBox *field, bool logarithmic = false)
 {
     auto *container = new QWidget(field->parentWidget()); auto *layout = new QHBoxLayout(container); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(8);
@@ -2838,6 +2851,7 @@ void MainWindow::createActions()
     connect(lens, &QAction::triggered, this, [this] {
         Layer *active=session_.activeLayer();if(!active||active->image.isNull())return;const QUuid target=active->id;const Layer original=*active;
         QDialog dialog(this);dialog.setWindowTitle(tr("Lens Correction"));auto *layout=new QVBoxLayout(&dialog);auto *amount=new QDoubleSpinBox(&dialog);amount->setRange(-100,100);amount->setValue(0);amount->setDecimals(0);layout->addWidget(new ScrubLabel(tr("Remove Distortion"),amount,1.0,std::nullopt,&dialog));layout->addWidget(sliderField(amount));auto *hint=new QLabel(tr("Positive straightens barrel distortion; negative straightens pincushion distortion."),&dialog);hint->setWordWrap(true);layout->addWidget(hint);auto *previewEnabled=new QCheckBox(tr("Preview"),&dialog);previewEnabled->setChecked(true);previewEnabled->setObjectName(QStringLiteral("filterPreview"));layout->addWidget(previewEnabled);
+        rememberFilter(session_,dialog,false,QStringLiteral("lens"),{{QStringLiteral("distortion"),amount}});
         session_.beginEdit(QStringLiteral("Lens Correction"));const auto preview=[this,target,original,amount,previewEnabled]{restoreLayer(document_.get(),session_,target,original);if(previewEnabled->isChecked())session_.distortActiveLayer(amount->value());canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel|QDialogButtonBox::Ok,&dialog);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);layout->addWidget(buttons);if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else restoreLayer(document_.get(),session_,target,original);session_.endEdit();syncDocumentViews();
     });
 
@@ -4120,7 +4134,7 @@ void MainWindow::gaussianBlurDialog()
     radius->setObjectName(QStringLiteral("gaussianBlurRadius"));
     radius->setDecimals(1);
     radius->setRange(.1, 250);
-    radius->setValue(live ? originalAdjustment.value(QStringLiteral("blurRadius")).toDouble(10.0) : 3.0);
+    radius->setValue(live ? originalAdjustment.value(QStringLiteral("blurRadius")).toDouble(10.0) : 1.0);   // mac FilterSettings.radius
     radius->setSuffix(tr(" px"));
     addScrubRow(form, tr("Radius"), radius, true);
     layout->addLayout(form);
@@ -4129,6 +4143,7 @@ void MainWindow::gaussianBlurDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, live, QStringLiteral("gaussianBlur"), {{QStringLiteral("radius"), radius}});
     session_.beginEdit(live ? QStringLiteral("Edit Gaussian Blur") : QStringLiteral("Gaussian Blur"));
     const auto value = [&] {
         return QJsonObject{
@@ -4198,6 +4213,7 @@ void MainWindow::motionBlurDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, live, QStringLiteral("motionBlur"), {{QStringLiteral("angle"), angle}, {QStringLiteral("distance"), distance}});
     session_.beginEdit(live ? QStringLiteral("Edit Motion Blur") : QStringLiteral("Motion Blur"));
     const auto value = [&] {
         return QJsonObject{
@@ -4295,6 +4311,7 @@ void MainWindow::vignetteDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, false, QStringLiteral("vignette"), {{QStringLiteral("amount"), amount}, {QStringLiteral("midpoint"), midpoint}, {QStringLiteral("roundness"), roundness}, {QStringLiteral("feather"), feather}, {QStringLiteral("highlights"), highlights}});
     session_.beginEdit(QStringLiteral("Vignette"));
     const auto preview = [this, target, original, amount, &edgeColor, midpoint, roundness, feather, highlights, previewEnabled] {
         restoreLayer(document_.get(), session_, target, original);
@@ -4378,6 +4395,7 @@ void MainWindow::bloomGlowDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, false, QStringLiteral("bloomGlow"), {{QStringLiteral("amount"), amount}, {QStringLiteral("radius"), radius}});
     session_.beginEdit(QStringLiteral("Bloom / Glow"));
     const auto preview = [this, target, original, amount, radius, previewEnabled] {
         restoreLayer(document_.get(), session_, target, original);
@@ -4454,6 +4472,7 @@ void MainWindow::tonalContrastDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, false, QStringLiteral("tonalContrast"), {{QStringLiteral("amount"), amount}, {QStringLiteral("radius"), radius}, {QStringLiteral("shadows"), shadows}, {QStringLiteral("midtones"), midtones}, {QStringLiteral("highlights"), highlights}});
     session_.beginEdit(QStringLiteral("Tonal Contrast"));
     const auto preview = [this, target, original, amount, radius, shadows, midtones, highlights, previewEnabled] {
         restoreLayer(document_.get(), session_, target, original);
@@ -4695,6 +4714,7 @@ void MainWindow::addNoiseDialog()
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     layout->addWidget(previewEnabled);
 
+    rememberFilter(session_, dialog, live, QStringLiteral("addNoise"), {{QStringLiteral("amount"), amount}});
     session_.beginEdit(live ? QStringLiteral("Edit Add Noise") : QStringLiteral("Add Noise"));
     const auto value = [&] {
         return QJsonObject{

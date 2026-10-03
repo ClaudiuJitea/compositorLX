@@ -5,6 +5,7 @@
 #include "core/EditorSession.h"
 #include "io/AdjustmentJson.h"
 #include "ui/CameraRawDialog.h"
+#include "ui/SliderTracks.h"
 #include <QSlider>
 #include <QMouseEvent>
 #include <QStyleOptionSlider>
@@ -135,6 +136,17 @@ private slots:
     void savedAdjustmentsCarryEveryKeyMacRequires();
     void folderScopedAdjustmentOnlyTouchesItsFolder();
     void cameraRawSliderDoubleClickOnTheKnobRestoresTheDefault();
+    // CameraRawTests.hiddenGroupIsLeftOutAndOkIsOneUndoOrNone / hiddenGroupStaysOutOfTheNextOpen
+    void hiddenGroupIsLeftOutOfOkAndStaysOutOfTheNextOpen();
+    void resetPutsEveryControlBackAndOkThenChangesNothing();
+    // mac Camera Raw canvas tools
+    void pointColorEyedropperSavesPickedColorsAndVisualizeIsPreviewOnly();
+    void targetedAdjustmentsDragFromWhereTheyStarted();
+    void defringeEyedropperCentersTheHueRange();
+    void guidedUprightDrawsLinesAndReadoutFollowsThePointer();
+    // CameraRawSliderTests / FilterSheet tracks
+    void colorTracksRunFromTheCoolOrMutedEndToTheWarmOrStrongEnd();
+    void colorBalanceTracksRunFromEachColorToItsOpposite();
 };
 
 // ---------------------------------------------------------------------------------------------------- FilterTests
@@ -978,6 +990,176 @@ void TestFilters::cameraRawSliderDoubleClickOnTheKnobRestoresTheDefault()
     QMouseEvent on(QEvent::MouseButtonDblClick, QPointF(handle.center()), QPointF(handle.center()), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
     QCoreApplication::sendEvent(slider, &on);
     QCOMPARE(spin->value(), 0.0);
+}
+
+static QImage cameraRawFixture()
+{
+    QImage image = blank(16, 16);
+    image.fill(QColor(128, 128, 128));
+    fillRect(image, QRect(0, 0, 8, 8), QColor(220, 30, 30));     // red
+    fillRect(image, QRect(8, 0, 8, 8), QColor(150, 60, 200));    // purple, hue ~277
+    return image;
+}
+
+void TestFilters::hiddenGroupIsLeftOutOfOkAndStaysOutOfTheNextOpen()
+{
+    EditorSession session = sessionWith(cameraRawFixture());
+    const QImage before = session.activeLayer()->image;
+    const QUuid id = *session.document()->activeLayerId;
+    {
+        CameraRawDialog dialog(nullptr, session, id);
+        CameraRawSettings settings; settings.exposure = 1; settings.temperature = 40;
+        dialog.setSettings(settings);
+        QVERIFY(dialog.eyeBox(0)->isEnabled());
+        dialog.eyeBox(0)->setChecked(false);   // the Light eye
+        QCOMPARE(dialog.renderSettings().exposure, 0.0);
+        QCOMPARE(dialog.renderSettings().temperature, 40.0);
+        const int count = session.history().undoCount();
+        dialog.accept();
+        QCOMPARE(session.history().undoCount(), count + 1);
+    }
+    QCOMPARE(session.lastCameraRaw.exposure, 0.0);
+    QCOMPARE(session.lastCameraRaw.temperature, 40.0);
+    const QImage graded = RasterOperations::cameraRaw(before, [] { CameraRawSettings s; s.temperature = 40; return s; }());
+    QCOMPARE(session.activeLayer()->image.convertToFormat(QImage::Format_RGBA8888_Premultiplied), graded.convertToFormat(QImage::Format_RGBA8888_Premultiplied));
+    {
+        CameraRawDialog reopened(nullptr, session, id);
+        QCOMPARE(reopened.settings().exposure, 0.0);                 // the hidden group is not back
+        QCOMPARE(reopened.settings().temperature, 40.0);
+        auto *spin = reopened.findChild<QDoubleSpinBox *>(QStringLiteral("exposureSpin"));
+        QVERIFY(spin);
+        QCOMPARE(spin->value(), 0.0);
+        reopened.reject();
+    }
+}
+
+void TestFilters::resetPutsEveryControlBackAndOkThenChangesNothing()
+{
+    EditorSession session = sessionWith(cameraRawFixture());
+    const Document before = *session.document();
+    CameraRawDialog dialog(nullptr, session, *session.document()->activeLayerId);
+    CameraRawSettings settings; settings.exposure = 2; settings.vibrance = 30; settings.mixer.hue[0] = 20; settings.optics.purpleAmount = 40;
+    dialog.setSettings(settings);
+    QVERIFY(!dialog.settings().isIdentity());
+    auto *reset = dialog.findChild<QPushButton *>(QStringLiteral("cameraRawReset"));
+    QVERIFY(reset);
+    reset->click();
+    QVERIFY(dialog.settings().isIdentity());
+    QCOMPARE(dialog.findChild<QDoubleSpinBox *>(QStringLiteral("exposureSpin"))->value(), 0.0);
+    const int count = session.history().undoCount();
+    dialog.accept();
+    QVERIFY(*session.document() == before);
+    QCOMPARE(session.history().undoCount(), count);
+}
+
+void TestFilters::pointColorEyedropperSavesPickedColorsAndVisualizeIsPreviewOnly()
+{
+    EditorSession session = sessionWith(cameraRawFixture());
+    CameraRawDialog dialog(nullptr, session, *session.document()->activeLayerId);
+    dialog.setProbe(CameraRawDialog::Probe::PointColor);
+    dialog.probePress(QPointF(3.5, 3.5));      // the red patch
+    QCOMPARE(dialog.settings().mixer.points.size(), 1);
+    QVERIFY(dialog.settings().mixer.points[0].hue < 10 || dialog.settings().mixer.points[0].hue > 350);
+    QVERIFY(dialog.settings().mixer.points[0].saturation > 0.7);
+    dialog.probePress(QPointF(11.5, 3.5));     // with a color selected, the next click re-picks it (mac sampleCameraRawPointColor)
+    QCOMPARE(dialog.settings().mixer.points.size(), 1);
+    QVERIFY(std::abs(dialog.settings().mixer.points[0].hue - 277) < 12);
+    dialog.probePress(QPointF(-5, -5));        // outside the layer: nothing happens
+    QVERIFY(std::abs(dialog.settings().mixer.points[0].hue - 277) < 12);
+    // A hue shift on the picked purple changes the purple patch and not the red one.
+    CameraRawSettings next = dialog.settings(); next.mixer.points[0].hueShift = 60;
+    dialog.setSettings(next);
+    const QImage graded = session.activeLayer()->image;
+    QVERIFY(px(graded, 11, 3) != px(cameraRawFixture(), 11, 3));
+    QCOMPARE(px(graded, 3, 3), px(cameraRawFixture(), 3, 3));
+    dialog.setProbe(CameraRawDialog::Probe::None);
+    const int count = session.history().undoCount();
+    dialog.accept();
+    QCOMPARE(session.history().undoCount(), count + 1);
+}
+
+void TestFilters::targetedAdjustmentsDragFromWhereTheyStarted()
+{
+    EditorSession session = sessionWith(cameraRawFixture());
+    CameraRawDialog dialog(nullptr, session, *session.document()->activeLayerId);
+    // Curve, parametric: dragging up 10 px on a midtone raises the region holding that tone by 3.5, measured from the start.
+    dialog.setProbe(CameraRawDialog::Probe::CurveTarget);
+    dialog.probePress(QPointF(12.5, 12.5));    // mid gray, tone 0.5
+    dialog.probeMove(QPointF(12.5, 2.5), true);
+    const auto &curve = dialog.settings().curve;
+    QVERIFY(std::abs(curve.lights - 3.5) < 1e-9 || std::abs(curve.darks - 3.5) < 1e-9);
+    dialog.probeMove(QPointF(12.5, 7.5), true);   // not cumulative
+    QVERIFY(std::abs(dialog.settings().curve.lights - 1.75) < 1e-9 || std::abs(dialog.settings().curve.darks - 1.75) < 1e-9);
+    dialog.probeRelease(QPointF(12.5, 7.5));
+    dialog.setSettings(CameraRawSettings());
+    // Mixer: dragging on the red patch moves the Reds hue (and nearby families) together.
+    dialog.setProbe(CameraRawDialog::Probe::MixerTarget);
+    dialog.probePress(QPointF(3.5, 3.5));
+    dialog.probeMove(QPointF(3.5, -6.5), true);
+    QVERIFY(dialog.settings().mixer.hue[0] > 3.0);
+    dialog.probeRelease(QPointF(3.5, -6.5));
+    QVERIFY(dialog.settings().adjustsMixer());
+}
+
+void TestFilters::defringeEyedropperCentersTheHueRange()
+{
+    EditorSession session = sessionWith(cameraRawFixture());
+    CameraRawDialog dialog(nullptr, session, *session.document()->activeLayerId);
+    dialog.setProbe(CameraRawDialog::Probe::Defringe);
+    dialog.probePress(QPointF(11.5, 3.5));     // purple, hue about 277
+    const auto &optics = dialog.settings().optics;
+    QCOMPARE(optics.purpleAmount, 50.0);
+    QVERIFY(std::abs((optics.purpleHueLow + optics.purpleHueHigh) / 2 - 277) < 12);
+    QVERIFY(std::abs(optics.purpleHueHigh - optics.purpleHueLow - 50) < 1e-6);
+    QCOMPARE(optics.greenAmount, 0.0);
+}
+
+void TestFilters::guidedUprightDrawsLinesAndReadoutFollowsThePointer()
+{
+    EditorSession session = sessionWith(cameraRawFixture());
+    CameraRawDialog dialog(nullptr, session, *session.document()->activeLayerId);
+    dialog.setProbe(CameraRawDialog::Probe::Guide);
+    dialog.probePress(QPointF(2, 2));
+    dialog.probeMove(QPointF(3, 14), true);
+    dialog.probeRelease(QPointF(3, 14));
+    QCOMPARE(dialog.settings().geometry.guides.size(), 1);
+    QCOMPARE(dialog.settings().geometry.upright, CameraRawUprightMode::Guided);
+    QVERIFY(std::abs(dialog.settings().geometry.guides[0].startX - 2.0 / 16) < 1e-9);
+    QVERIFY(std::abs(dialog.settings().geometry.guides[0].endY - 14.0 / 16) < 1e-9);
+    auto *clear = dialog.findChild<QPushButton *>(QStringLiteral("clearGuides"));
+    QVERIFY(clear);
+    clear->click();
+    QVERIFY(dialog.settings().geometry.guides.isEmpty());
+    dialog.setProbe(CameraRawDialog::Probe::None);
+    dialog.probeMove(QPointF(3.5, 3.5), false);
+    QCOMPARE(dialog.readoutText(), QStringLiteral("R 220   G 30   B 30"));
+    dialog.probeMove(QPointF(-3, 3), false);
+    QVERIFY(dialog.readoutText().contains(QStringLiteral("—")));
+}
+
+void TestFilters::colorTracksRunFromTheCoolOrMutedEndToTheWarmOrStrongEnd()
+{
+    const auto temperature = SliderTrack::temperature();
+    QVERIFY(temperature.first().blueF() > temperature.last().blueF());
+    const auto tint = SliderTrack::tint();
+    QVERIFY(tint.first().greenF() > tint.last().greenF());
+    const auto chroma = SliderTrack::chroma();
+    QVERIFY(std::abs(chroma.first().redF() - chroma.first().greenF()) < 0.05);
+    QVERIFY(chroma.last().redF() > chroma.last().greenF() + 0.4);
+    const QColor green = SliderTrack::luminance(120).last();
+    QVERIFY(green.greenF() > green.redF() && green.greenF() > green.blueF());
+    QVERIFY(!SliderTrack::styleSheet(temperature).isEmpty());
+    // A real slider takes the track as its groove.
+    QSlider slider; SliderTrack::apply(&slider, temperature);
+    QVERIFY(slider.styleSheet().contains(QStringLiteral("qlineargradient")));
+}
+
+void TestFilters::colorBalanceTracksRunFromEachColorToItsOpposite()
+{
+    const auto cr = SliderTrack::cyanRed(), mg = SliderTrack::magentaGreen(), yb = SliderTrack::yellowBlue();
+    QVERIFY(cr[0].blueF() > cr[0].redF() && cr[1].redF() > cr[1].blueF());
+    QVERIFY(mg[0].redF() > mg[0].greenF() && mg[1].greenF() > mg[1].redF());
+    QVERIFY(yb[0].greenF() > yb[0].blueF() && yb[1].blueF() > yb[1].greenF());
 }
 
 QTEST_MAIN(TestFilters)
