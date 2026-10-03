@@ -1,5 +1,6 @@
 #include "io/ImageImporter.h"
 #include "io/SvgImporter.h"
+#include "core/DocumentLimits.h"
 
 #include <QColorSpace>
 #include <QFileInfo>
@@ -15,7 +16,7 @@ namespace compositor {
 QImage ImageImporter::read(const QString &path, QString *error)
 {
     if (SvgImporter::matches(path)) {
-        return SvgImporter::read(path, std::nullopt, 100000000LL, error);
+        return SvgImporter::read(path, std::nullopt, DocumentLimits::documentPixelBudget(), error);
     }
 
     QImageReader reader(path); reader.setAutoTransform(true);
@@ -40,7 +41,7 @@ QImage ImageImporter::read(const QString &path, QString *error)
     }
 #endif
     if (image.isNull()) { if (error && error->isEmpty()) *error = reader.errorString(); return {}; }
-    if (image.width() > 30000 || image.height() > 30000 || qint64(image.width()) * image.height() > 100000000LL) {
+    if (image.width() > 30000 || image.height() > 30000 || qint64(image.width()) * image.height() > DocumentLimits::documentPixelBudget()) {
         if (error) *error = QStringLiteral("unsupported dimensions");
         return {};
     }

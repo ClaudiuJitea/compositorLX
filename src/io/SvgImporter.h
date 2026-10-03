@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/DocumentLimits.h"
+
 #include <QByteArray>
 #include <QImage>
 #include <QRectF>
@@ -29,7 +31,6 @@ class SvgImporter final {
 public:
     static constexpr qint64 MaxFileBytes = 512 * 1024 * 1024; // 512 MB file limit
     static constexpr int MaxDimension = 30000;                // DocumentLimits.maxSide
-    static constexpr qint64 MaxSurfacePixels = 100000000LL;   // 100 MP surface budget
 
     /// Returns true if the file exists and is recognized as an SVG or SVGZ image.
     [[nodiscard]] static bool matches(const QString &path);
@@ -50,13 +51,13 @@ public:
     /// Decodes an SVG from disk into a premultiplied sRGB QImage with bounds checks.
     [[nodiscard]] static QImage read(const QString &path,
                                      const std::optional<QSize> &fitting = std::nullopt,
-                                     qint64 remainingPixels = MaxSurfacePixels,
+                                     qint64 remainingPixels = DocumentLimits::documentPixelBudget(),
                                      QString *error = nullptr);
 
     /// Decodes an SVG from byte buffer into a premultiplied sRGB QImage with bounds checks.
     [[nodiscard]] static QImage readFromData(const QByteArray &data,
                                              const std::optional<QSize> &fitting = std::nullopt,
-                                             qint64 remainingPixels = MaxSurfacePixels,
+                                             qint64 remainingPixels = DocumentLimits::documentPixelBudget(),
                                              QString *error = nullptr);
 
     /// Parses an SVG viewBox string into a QRectF (minX, minY, width, height).

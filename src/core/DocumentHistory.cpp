@@ -68,6 +68,8 @@ std::optional<DocumentHistory::Snapshot> DocumentHistory::undo()
     const Snapshot result = entry.before;
     future_.push_back(std::move(entry));
     revision_ = result.revision;
+    // The document the undo lands on decides which pixels only history still holds (mac DocumentHistory.undo).
+    trim(result.document ? std::make_shared<Document>(*result.document) : nullptr);
     return result;
 }
 
@@ -78,6 +80,7 @@ std::optional<DocumentHistory::Snapshot> DocumentHistory::redo()
     const Snapshot result = entry.after;
     past_.push_back(std::move(entry));
     revision_ = result.revision;
+    trim(result.document ? std::make_shared<Document>(*result.document) : nullptr);
     return result;
 }
 

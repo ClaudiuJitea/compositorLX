@@ -1,5 +1,7 @@
 #include "io/ProjectReader.h"
 
+#include "core/DocumentLimits.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -18,7 +20,7 @@ namespace {
 
 constexpr qint64 maxManifestBytes = 4LL * 1024LL * 1024LL;
 constexpr qint64 maxAssetBytes = 512LL * 1024LL * 1024LL;
-constexpr qint64 maxTotalPixels = 100000000LL; // 100 megapixels
+// The raster a document may hold scales with the machine (mac DocumentLimits.documentPixelBudget).
 
 [[noreturn]] void invalid(const QString &detail = {})
 {
@@ -134,7 +136,7 @@ QImage loadPng(const QDir &root, const QString &fileName, qint64 &pixelBudget, b
         invalid(QStringLiteral("an image has invalid dimensions"));
     }
     const qint64 pixels = qint64(size.width()) * qint64(size.height());
-    if (pixels > maxTotalPixels - pixelBudget) {
+    if (pixels > DocumentLimits::documentPixelBudget() - pixelBudget) {
         invalid(QStringLiteral("image pixel limit exceeded"));
     }
 

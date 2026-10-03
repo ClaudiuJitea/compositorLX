@@ -4,11 +4,52 @@
 #include <QColorSpace>
 #include <QImageWriter>
 #include <QPainter>
+#include <QSaveFile>
 
 #include <algorithm>
 #include <cmath>
 
 namespace compositor {
+
+std::optional<QByteArray> ImageExporter::png(const QImage &source, double resolution, QString *error)
+{
+    if (source.isNull() || !std::isfinite(resolution) || resolution < 1 || resolution > 9600) {
+        if (error) *error = QStringLiteral("Invalid PNG export options.");
+        return std::nullopt;
+    }
+    QImage image = source.convertToFormat(QImage::Format_RGBA8888);
+    image.setColorSpace(QColorSpace::SRgb);
+    const int dotsPerMeter = qRound(resolution / .0254);
+    image.setDotsPerMeterX(dotsPerMeter);
+    image.setDotsPerMeterY(dotsPerMeter);
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    if (!buffer.open(QIODevice::WriteOnly)) {
+        if (error) *error = buffer.errorString();
+        return std::nullopt;
+    }
+    QImageWriter writer(&buffer, "PNG");
+    writer.setText(QStringLiteral("Software"), QStringLiteral("CompositorLX"));
+    if (!writer.write(image)) {
+        if (error) *error = writer.errorString();
+        return std::nullopt;
+    }
+    return bytes;
+}
+
+bool ImageExporter::writeAtomically(const QByteArray &data, const QString &path, QString *error)
+{
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        if (error) *error = file.errorString();
+        return false;
+    }
+    if (file.write(data) != data.size() || !file.commit()) {
+        if (error) *error = file.errorString();
+        return false;
+    }
+    return true;
+}
 
 std::optional<JpegResult> ImageExporter::jpeg(const QImage &source, int quality, const QColor &matte,
                                                double resolution, QString *error)

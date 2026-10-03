@@ -63,7 +63,7 @@ std::optional<BlendMode> PSDReader::blendModeFromPSD(const QString &key)
 namespace {
 
 constexpr int MaxSide = 30000;
-constexpr qint64 MaxSurfacePixels = 200000000LL;
+constexpr qint64 MaxSurfacePixels = DocumentLimits::maxSurfacePixels;
 constexpr qint64 MaxFileBytes = 512LL * 1024LL * 1024LL; // 512 MB file size limit
 constexpr qint32 MaxCoordinate = 10000000; // 10 million pixel coordinate limit
 

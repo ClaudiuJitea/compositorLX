@@ -1446,8 +1446,8 @@ MainWindow::MainWindow(QWidget *parent)
     startOuter->addWidget(startPanel, 0, Qt::AlignHCenter); startOuter->addStretch();
     canvasStack_->addWidget(startPage); canvasStack_->addWidget(canvas_); canvasStack_->setCurrentWidget(startPage);
     connect(createStart, &QPushButton::clicked, this, [this] {
-        if (qint64(newCanvasWidth_->value()) * newCanvasHeight_->value() > 100000000LL) {
-            showMessage(this, tr("Canvas Too Large"), tr("A canvas may contain at most 100 megapixels.")); return;
+        if (qint64(newCanvasWidth_->value()) * newCanvasHeight_->value() > DocumentLimits::maxSurfacePixels) {
+            showMessage(this, tr("Canvas Too Large"), tr("A canvas may contain at most %1 megapixels.").arg(DocumentLimits::maxSurfaceMegapixels())); return;
         }
         session_.createDocument(newCanvasWidth_->value(), newCanvasHeight_->value(), true); syncDocumentViews();
     });
@@ -2494,6 +2494,10 @@ void MainWindow::createActions()
     open->setObjectName(QStringLiteral("commandOpen"));
     open->setShortcut(QKeySequence::Open);
     connect(open, &QAction::triggered, this, &MainWindow::chooseProject);
+    openRecentMenu_ = file->addMenu(tr("Open &Recent"));
+    openRecentMenu_->setObjectName(QStringLiteral("menuOpenRecent"));
+    connect(openRecentMenu_, &QMenu::aboutToShow, this, &MainWindow::rebuildOpenRecentMenu);
+    rebuildOpenRecentMenu();
     auto *importAction = file->addAction(tr("&Import Images…"));
     connect(importAction, &QAction::triggered, this, &MainWindow::importImages);
     auto *save = file->addAction(tr("&Save"));
@@ -2519,7 +2523,10 @@ void MainWindow::createActions()
     file->addSeparator();
     auto *quit = file->addAction(tr("&Quit"));
     quit->setShortcut(QKeySequence::Quit);
-    connect(quit, &QAction::triggered, qApp, &QApplication::quit);
+    quit->setObjectName(QStringLiteral("commandQuit"));
+    // QApplication::quit() sends no close events, so unsaved tabs would be dropped without asking; closing the window
+    // runs closeEvent, which asks about each modified tab (mac applicationShouldTerminate -> confirmQuit).
+    connect(quit, &QAction::triggered, this, &QWidget::close);
 
     auto *edit = menuBar()->addMenu(tr("&Edit"));
     auto *undo = edit->addAction(tr("&Undo")); undo->setShortcut(QKeySequence::Undo);
@@ -4896,7 +4903,7 @@ void MainWindow::resizeImageDialog()
         const int finalWidth = qRound(draft->width), finalHeight = qRound(draft->height);
         const bool valid = finalWidth >= 1 && finalWidth <= 30000 && finalHeight >= 1 && finalHeight <= 30000
             && draft->resolution >= 1 && draft->resolution <= 9600
-            && (!draft->resample || qint64(finalWidth) * finalHeight <= 100000000LL);
+            && (!draft->resample || qint64(finalWidth) * finalHeight <= DocumentLimits::maxSurfacePixels);
         result->setText(valid ? tr("Result: %1 × %2 pixels").arg(finalWidth).arg(finalHeight)
                               : tr("Use 1–30,000 pixels per side, up to 100 megapixels, and 1–9,600 ppi."));
         buttons->button(QDialogButtonBox::Ok)->setEnabled(valid);
@@ -5087,10 +5094,15 @@ void MainWindow::importImages()
     importImageFiles(paths);
 }
 
-bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<QPointF> &center)
+bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<QPointF> &requestedCenter)
 {
     bool imported = false;
     QStringList failures;
+    // No document yet: the first successful image decides the canvas, wherever it was dropped (mac drainImports).
+    const std::optional<QPointF> center = document_ ? requestedCenter : std::nullopt;
+    // A batch is one undo step, however many files come in; failures add nothing (mac drainImports beginEdit).
+    const bool photoshopOnly = !paths.isEmpty() && std::all_of(paths.cbegin(), paths.cend(), [](const QString &path) { return PSDReader::matches(path); });
+    session_.beginEdit(photoshopOnly ? QStringLiteral("Import Photoshop File") : QStringLiteral("Import Images"));
     for (const QString &path : paths) {
         if (RawImporter::matches(path)) {
             RawDevelopDialog dialog(this, path);
@@ -5114,7 +5126,7 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
                     if (!l.mask.isNull()) usedPixels += (qint64(l.mask.width()) * l.mask.height());
                 }
             }
-            const qint64 remaining = std::max(0LL, 100000000LL - usedPixels);
+            const qint64 remaining = std::max(0LL, DocumentLimits::documentPixelBudget() - usedPixels);
             PSDImportResult result;
             QString psdError;
             if (!PSDReader::read(path, result, &psdError, remaining)) {
@@ -5156,6 +5168,7 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
         }
         imported = true;
     }
+    session_.endEdit();
     if (imported) syncDocumentViews();
     if (!failures.isEmpty()) showMessage(this, tr("Some Images Could Not Be Imported"), failures.join(QLatin1Char('\n')));
     return imported;
@@ -5175,6 +5188,38 @@ void MainWindow::noteRecentProject(const QString &path)
     recents.prepend(path);
     while (recents.size() > 20) recents.removeLast();
     settings.setValue(QStringLiteral("recentProjects"), recents);
+    rebuildOpenRecentMenu();
+}
+
+QStringList MainWindow::existingRecentProjects() const
+{
+    QStringList result;
+    for (const QString &path : recentProjects()) if (QFileInfo(path).isDir()) result << path;
+    return result;
+}
+
+void MainWindow::clearRecentProjects()
+{
+    QSettings settings;
+    settings.remove(QStringLiteral("recentProjects"));
+    rebuildOpenRecentMenu();
+}
+
+void MainWindow::rebuildOpenRecentMenu()
+{
+    if (!openRecentMenu_) return;
+    openRecentMenu_->clear();
+    const QStringList paths = existingRecentProjects();
+    for (const QString &path : paths) {
+        QAction *item = openRecentMenu_->addAction(QFileInfo(path).completeBaseName());
+        item->setToolTip(path);
+        connect(item, &QAction::triggered, this, [this, path] { openProject(path); });
+    }
+    openRecentMenu_->addSeparator();
+    QAction *clear = openRecentMenu_->addAction(tr("Clear Menu"));
+    clear->setObjectName(QStringLiteral("commandClearRecent"));
+    clear->setEnabled(!paths.isEmpty());
+    connect(clear, &QAction::triggered, this, &MainWindow::clearRecentProjects);
 }
 
 QStringList MainWindow::recentProjects() const
@@ -5572,12 +5617,17 @@ void MainWindow::setupWatcherForTab(int tabIndex, const QString &path)
     const QUuid capturedDocId = (workspaceTabs_.size() > tabIndex && workspaceTabs_[tabIndex].hasDocument())
                                 ? workspaceTabs_[tabIndex].document()->id : QUuid();
 
+    // The tab is found from the watcher each time: reordering the strip or closing an earlier tab moves it, and a
+    // stale index would make every later external change look like it belonged to another document.
     connect(watcher, &ProjectWatcher::packageValidatedExternally, this,
-        [this, tabIndex, capturedDocId](uint64_t reqId, const QString &changedPath, const std::optional<ProjectDigest> &expectedDigest, const ProjectDigest &newDigest, const std::shared_ptr<Document> &loadedDoc) {
-            handleExternalChangeValidated(tabIndex, capturedDocId, reqId, changedPath, expectedDigest, newDigest, loadedDoc);
+        [this, watcher, capturedDocId](uint64_t reqId, const QString &changedPath, const std::optional<ProjectDigest> &expectedDigest, const ProjectDigest &newDigest, const std::shared_ptr<Document> &loadedDoc) {
+            const int current = int(tabWatchers_.indexOf(watcher));
+            if (current < 0) return;
+            handleExternalChangeValidated(current, capturedDocId, reqId, changedPath, expectedDigest, newDigest, loadedDoc);
     });
-    connect(watcher, &ProjectWatcher::packageRemovedExternally, this, [this, tabIndex, path](const QString &removedPath) {
-        handleExternalRemoval(tabIndex, removedPath);
+    connect(watcher, &ProjectWatcher::packageRemovedExternally, this, [this, watcher](const QString &removedPath) {
+        const int current = int(tabWatchers_.indexOf(watcher));
+        if (current >= 0) handleExternalRemoval(current, removedPath);
     });
 
     tabWatchers_[tabIndex] = watcher;
@@ -6040,28 +6090,38 @@ void MainWindow::exportPng(bool jpegDefault)
     const QString path = QFileDialog::getSaveFileName(this, jpegDefault ? tr("Export JPEG") : tr("Export PNG"), suggested,
                                                        jpegDefault ? tr("JPEG images (*.jpg *.jpeg)") : tr("PNG images (*.png)"));
     if (path.isEmpty()) return;
-    const int dotsPerMeter = qRound(document_->resolution / .0254); image.setDotsPerMeterX(dotsPerMeter); image.setDotsPerMeterY(dotsPerMeter);
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) {
-        showMessage(this, tr("Export Failed"), file.errorString());
-        return;
+    QString exportError;
+    if (!jpegDefault) {
+        const auto png = ImageExporter::png(image, document_->resolution, &exportError);
+        if (!png) { showMessage(this, tr("Export Failed"), exportError); return; }
+        jpegData = *png;
     }
-    if (jpegDefault) {
-        if (file.write(jpegData) != jpegData.size() || !file.commit()) { showMessage(this, tr("Export Failed"), file.errorString()); return; }
-        statusBar()->showMessage(tr("Exported %1").arg(QFileInfo(path).fileName()), 6000); return;
-    }
-    QImageWriter writer(&file, "PNG"); writer.setText(QStringLiteral("Software"), QStringLiteral("CompositorLX"));
-    if (!writer.write(image) || !file.commit()) {
-        showMessage(this, tr("Export Failed"),
-                              writer.errorString().isEmpty() ? file.errorString() : writer.errorString());
-        return;
-    }
+    if (!ImageExporter::writeAtomically(jpegData, path, &exportError)) { showMessage(this, tr("Export Failed"), exportError); return; }
     statusBar()->showMessage(tr("Exported %1").arg(QFileInfo(path).fileName()), 6000);
 }
 
 bool MainWindow::openProject(const QString &path)
 {
     cancelActiveSelectionTask();
+    // A recent project deleted since: name the project, not the manifest inside it that the load would miss (mac
+    // ProjectController.open).
+    if (!QFileInfo::exists(path)) {
+        rebuildOpenRecentMenu();
+        showMessage(this, tr("Could Not Open Project"), tr("The project “%1” could not be found.").arg(QFileInfo(path).fileName()));
+        return false;
+    }
+    // A project already open in a tab is brought forward, not opened twice (mac ProjectWorkspace.loadProject).
+    if (QFileInfo(path).isDir()) {
+        stashCurrentTab();
+        const QString canonical = QFileInfo(path).canonicalFilePath();
+        for (int i = 0; i < workspaceTabs_.size(); ++i) {
+            const auto &doc = workspaceTabs_.at(i).document();
+            if (doc && !doc->projectPath.isEmpty() && QFileInfo(doc->projectPath).canonicalFilePath() == canonical) {
+                tabs_->setCurrentIndex(i); activateTab(i);
+                return true;
+            }
+        }
+    }
     if (RawImporter::matches(path)) {
         RawDevelopDialog dialog(this, path);
         if (dialog.exec() != QDialog::Accepted) return false;
@@ -6284,8 +6344,8 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
         usedPixels += qint64(layer.image.width()) * layer.image.height();
         usedPixels += qint64(layer.mask.width()) * layer.mask.height();
     }
-    if (usedPixels + addedPixels > 100000000LL) {
-        showMessage(this, tr("Layers Too Large"), tr("The copied layers exceed this project's 100-megapixel limit."));
+    if (usedPixels + addedPixels > DocumentLimits::documentPixelBudget()) {
+        showMessage(this, tr("Layers Too Large"), tr("The copied layers exceed this project's %1-megapixel limit.").arg(DocumentLimits::documentBudgetMegapixels()));
         return false;
     }
     const auto root = std::find_if(sourceSnapshot.layers.cbegin(), sourceSnapshot.layers.cend(), [&ids](const Layer &layer) { return ids.contains(layer.id); });
@@ -6446,6 +6506,9 @@ void MainWindow::updateCommandStates()
     enabled("commandLayerEffects", session_.canEditEffects());
     enabled("commandSelectAll", text || hasDocument); enabled("commandDeselect", hasSelection); enabled("commandInverseSelection", hasSelection);
 
+    // The menu names the step it would undo or redo, as the mac menu does; in a text field it is the field's own undo.
+    if (QAction *item = action("commandUndo")) item->setText(!text && !editingText && session_.canUndo() ? tr("&Undo %1").arg(session_.history().undoName()) : tr("&Undo"));
+    if (QAction *item = action("commandRedo")) item->setText(!text && !editingText && session_.canRedo() ? tr("&Redo %1").arg(session_.history().redoName()) : tr("&Redo"));
     if (QAction *item = action("commandTransform")) item->setText(hasSelection ? tr("Transform Selection") : tr("Transform Layer"));
     if (QAction *item = action("commandDuplicate")) item->setText(hasSelection ? tr("Layer via Copy") : tr("Duplicate Layer"));
     if (QAction *item = action("commandDelete")) item->setText(selectedEffect_ ? tr("Delete Effect")
@@ -6674,15 +6737,37 @@ void MainWindow::dropEvent(QDropEvent *event)
         return;
     }
     if (!event->mimeData()->hasUrls()) return;
-    const QList<QUrl> urls = event->mimeData()->urls();
-    if (urls.size() == 1 && QFileInfo(urls.constFirst().toLocalFile()).isDir()) {
-        if (openProject(urls.constFirst().toLocalFile())) event->acceptProposedAction();
-        return;
-    }
     QStringList paths;
-    for (const QUrl &url : urls) if (url.isLocalFile() && QFileInfo(url.toLocalFile()).isFile()) paths << url.toLocalFile();
+    for (const QUrl &url : event->mimeData()->urls()) if (url.isLocalFile()) paths << url.toLocalFile();
     const QPoint canvasPoint = canvas_->mapFrom(this, event->position().toPoint());
-    if (importImageFiles(paths, canvas_->documentPointAt(canvasPoint))) event->acceptProposedAction();
+    if (receiveFiles(paths, canvas_->documentPointAt(canvasPoint))) event->acceptProposedAction();
+}
+
+// Files handed to the window (drop, command line): at most one project, opened first, then whatever images came with
+// it (mac ProjectController.receive).
+bool MainWindow::receiveFiles(const QStringList &paths, const std::optional<QPointF> &point)
+{
+    QStringList projects, others;
+    for (const QString &path : paths) {
+        if (!QFileInfo::exists(path)) {
+            showMessage(this, tr("Could Not Open File"), tr("“%1” could not be found.").arg(QFileInfo(path).fileName()));
+            continue;
+        }
+        if (path.endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive) || (QFileInfo(path).isDir() && QFileInfo(path).fileName().endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive))) projects << path;
+        else if (QFileInfo(path).isFile()) others << path;
+        else if (QFileInfo(path).isDir()) projects << path;
+    }
+    if (projects.size() > 1) {
+        showMessage(this, tr("Open one project at a time"), tr("This is not a valid Compositor project, or its metadata is damaged."));
+        return false;
+    }
+    bool handled = false;
+    if (!projects.isEmpty()) {
+        if (!openProject(projects.constFirst())) return false;
+        handled = true;
+    }
+    if (!others.isEmpty()) handled = importImageFiles(others, projects.isEmpty() ? point : std::nullopt) || handled;
+    return handled;
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

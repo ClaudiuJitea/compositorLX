@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Document.h"
+#include "core/DocumentLimits.h"
 
 #include <QByteArray>
 #include <QImage>
@@ -43,8 +44,8 @@ public:
     static bool matches(const QString &path);
     static bool matches(const QByteArray &data);
 
-    static bool read(const QString &path, PSDImportResult &result, QString *error = nullptr, qint64 remainingPixels = 100000000LL);
-    static bool read(const QByteArray &data, PSDImportResult &result, QString *error = nullptr, qint64 remainingPixels = 100000000LL);
+    static bool read(const QString &path, PSDImportResult &result, QString *error = nullptr, qint64 remainingPixels = DocumentLimits::documentPixelBudget());
+    static bool read(const QByteArray &data, PSDImportResult &result, QString *error = nullptr, qint64 remainingPixels = DocumentLimits::documentPixelBudget());
 
     static std::optional<BlendMode> blendModeFromPSD(const QString &key);
 
