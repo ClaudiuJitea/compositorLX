@@ -63,8 +63,8 @@ public:
     [[nodiscard]] CanvasRulerWidget *verticalRuler() const { return verticalRuler_; }
     [[nodiscard]] CanvasRulerCornerWidget *rulerCorner() const { return rulerCorner_; }
     [[nodiscard]] std::optional<LayerEffectKind> selectedEffectKind() const { return selectedEffect_ ? std::optional<LayerEffectKind>(selectedEffect_->kind) : std::nullopt; }
-    [[nodiscard]] QColor foregroundColor() const { return foregroundColor_; }
-    [[nodiscard]] QColor backgroundColor() const { return backgroundColor_; }
+    [[nodiscard]] QColor foregroundColor() const { return session_.foregroundColor(); }
+    [[nodiscard]] QColor backgroundColor() const { return session_.backgroundColor(); }
     [[nodiscard]] QToolButton *menuRestoreButton() const { return menuRestoreButton_; }
     [[nodiscard]] QMenu *quickFileMenu() const { return quickFileMenu_; }
     [[nodiscard]] bool isMenuBarVisible() const;
@@ -119,6 +119,9 @@ public:
     [[nodiscard]] SegmentedControl *smearMode() const { return smearMode_; }
     [[nodiscard]] QLabel *statusHint() const { return statusHint_; }
     void openColorPicker(bool background = false);
+    // Swatches, the canvas's copy of the foreground and a pending gradient follow the session's palette (on a mask the
+    // swatches show black and white, the brush's Paint choice).
+    void refreshPaletteSwatches();
     void cycleSmearMode();
     void cycleToolMode();
     void updateSmearStatusHint();
@@ -304,8 +307,6 @@ private:
     double brushSmoothing_ = 0;
     int pendingOpacityDigit_ = -1;
     qint64 pendingOpacityAt_ = 0;
-    QColor foregroundColor_ = QColor(22, 134, 232);
-    QColor backgroundColor_ = QColor(31, 15, 11);
     QImage clipboardImage_;
     QPoint clipboardOrigin_;
     QTimer *autosaveTimer_ = nullptr;

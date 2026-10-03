@@ -79,6 +79,9 @@ add_library(compositor_core
     src/core/EditorSession.h
     src/core/ImageTrim.cpp
     src/core/ImageTrim.h
+    src/core/ColorPalette.cpp
+    src/core/ColorPalette.h
+    src/core/EditorSessionPaint.cpp
     src/io/ProjectReader.cpp
     src/io/ProjectReader.h
     src/io/ProjectWriter.cpp
