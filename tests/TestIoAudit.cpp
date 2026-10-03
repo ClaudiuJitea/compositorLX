@@ -98,6 +98,118 @@ struct DialogLog {
     QStringList texts;
 };
 
+
+// ------------------------------------------------------------------------------------------------ PSD builder
+namespace psd {
+void be16(QByteArray &b, quint16 v) { b.append(char(v >> 8)); b.append(char(v)); }
+void be32(QByteArray &b, quint32 v) { be16(b, quint16(v >> 16)); be16(b, quint16(v)); }
+void be64(QByteArray &b, quint64 v) { be32(b, quint32(v >> 32)); be32(b, quint32(v)); }
+
+struct Channel { qint16 id; QByteArray payload; };
+struct Layer {
+    QString name;
+    int left = 0, top = 0, width = 0, height = 0;
+    QVector<Channel> channels;
+    QByteArray blend = "norm";
+    quint8 opacity = 255, clipping = 0, flags = 8;
+    int section = -1;                    // lsct type
+    QVector<QPair<QByteArray, QByteArray>> blocks;
+    QImage image;                        // RGBA, drawn into channels when `channels` is empty
+    QImage mask;                         // grayscale, same rectangle as the layer
+};
+
+QByteArray raw(const QByteArray &plane) { QByteArray b; be16(b, 0); b.append(plane); return b; }
+
+QVector<Channel> channelsFor(const QImage &rgba)
+{
+    const QImage image = rgba.convertToFormat(QImage::Format_RGBA8888);
+    QByteArray planes[4];
+    for (int y = 0; y < image.height(); ++y) for (int x = 0; x < image.width(); ++x) {
+        const QColor c = image.pixelColor(x, y);
+        planes[0].append(char(c.red())); planes[1].append(char(c.green())); planes[2].append(char(c.blue())); planes[3].append(char(c.alpha()));
+    }
+    return {{-1, raw(planes[3])}, {0, raw(planes[0])}, {1, raw(planes[1])}, {2, raw(planes[2])}};
+}
+
+QByteArray emptyPayload() { QByteArray b; be16(b, 0); return b; }
+
+QByteArray build(int width, int height, const QVector<Layer> &layers, bool large = false, quint16 depth = 8, quint16 mode = 3)
+{
+    QByteArray file("8BPS");
+    be16(file, large ? 2 : 1); file.append(QByteArray(6, 0)); be16(file, 3);
+    be32(file, quint32(height)); be32(file, quint32(width)); be16(file, depth); be16(file, mode);
+    be32(file, 0); be32(file, 0);                       // color mode data, image resources
+    QByteArray records, payloads;
+    be16(records, quint16(layers.size()));
+    for (Layer layer : layers) {
+        if (layer.channels.isEmpty() && !layer.image.isNull()) layer.channels = channelsFor(layer.image);
+        if (layer.channels.isEmpty()) layer.channels = {{-1, emptyPayload()}, {0, emptyPayload()}, {1, emptyPayload()}, {2, emptyPayload()}};
+        if (!layer.mask.isNull()) {
+            QByteArray plane; const QImage g = layer.mask.convertToFormat(QImage::Format_Grayscale8);
+            for (int y = 0; y < g.height(); ++y) plane.append(reinterpret_cast<const char *>(g.constScanLine(y)), g.width());
+            layer.channels.push_back({-2, raw(plane)});
+        }
+        be32(records, quint32(layer.top)); be32(records, quint32(layer.left));
+        be32(records, quint32(layer.top + layer.height)); be32(records, quint32(layer.left + layer.width));
+        be16(records, quint16(layer.channels.size()));
+        for (const Channel &channel : layer.channels) {
+            be16(records, quint16(channel.id));
+            if (large) be64(records, quint64(channel.payload.size())); else be32(records, quint32(channel.payload.size()));
+            payloads.append(channel.payload);
+        }
+        records.append("8BIM"); records.append(layer.blend.leftJustified(4, ' ').left(4));
+        records.append(char(layer.opacity)); records.append(char(layer.clipping)); records.append(char(layer.flags)); records.append(char(0));
+        QByteArray extra;
+        if (!layer.mask.isNull()) {
+            be32(extra, 20); be32(extra, quint32(layer.top)); be32(extra, quint32(layer.left));
+            be32(extra, quint32(layer.top + layer.mask.height())); be32(extra, quint32(layer.left + layer.mask.width()));
+            extra.append(char(0)); extra.append(char(0)); be16(extra, 0);
+        } else be32(extra, 0);
+        be32(extra, 0);                                   // blending ranges
+        const QByteArray name = layer.name.toLatin1().left(255);
+        extra.append(char(name.size())); extra.append(name);
+        extra.append(QByteArray((4 - ((name.size() + 1) % 4)) % 4, 0));
+        const auto block = [&](const QByteArray &key, const QByteArray &payload) {
+            extra.append("8BIM"); extra.append(key);
+            if (large && (key == "LMsk" || key == "Lr16" || key == "Lr32")) be64(extra, quint64(payload.size())); else be32(extra, quint32(payload.size()));
+            extra.append(payload);
+            if (payload.size() % 2) extra.append(char(0));
+        };
+        if (layer.section >= 0) { QByteArray v; be32(v, quint32(layer.section)); block("lsct", v); }
+        for (const auto &b : layer.blocks) block(b.first, b.second);
+        // Unicode name last so a large block before it must not hide it.
+        QByteArray uni; be32(uni, quint32(layer.name.size()));
+        for (QChar c : layer.name) be16(uni, c.unicode());
+        be16(uni, 0);
+        block("luni", uni);
+        be32(records, quint32(extra.size())); records.append(extra);
+    }
+    QByteArray info = records + payloads;
+    if (info.size() % 2) info.append(char(0));
+    QByteArray section;
+    if (large) { be64(section, quint64(info.size())); } else be32(section, quint32(info.size()));
+    section.append(info);
+    be32(section, 0);                                    // global layer mask info
+    if (large) be64(file, quint64(section.size())); else be32(file, quint32(section.size()));
+    file.append(section);
+    // Composite: raw, three planes.
+    be16(file, 0); file.append(QByteArray(width * height * 3, 0));
+    return file;
+}
+
+QImage pattern(int width, int height)
+{
+    QImage image(width, height, QImage::Format_RGBA8888);
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) image.setPixelColor(x, y, QColor(x * 30 + y, y * 50, 255 - x * 20, 255));
+    return image;
+}
+QImage grayPattern(int width, int height)
+{
+    QImage image(width, height, QImage::Format_Grayscale8);
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) image.scanLine(y)[x] = uchar((y * width + x) * 10);
+    return image;
+}
+} // namespace psd
 } // namespace
 
 class TestIoAudit : public QObject {
@@ -169,6 +281,18 @@ private slots:
     void fileMenuEnabledStates();
     void menuEnabledStatesFollowMac();
     void menuNamingFollowsMac();
+
+    // PSD / PSB (PSDRoundTripTests, PSBImportTests, CropToCanvasImportTests)
+    void psdLayersOrderVisibilityOpacityAndBlend();
+    void psdGroupsMasksAndClippingFollowLsct();
+    void psdOversizedLayerBoundsAreRejected();
+    void psdSpotChannelsSkippedAndBadColorCompressionRejected();
+    void psdBlendConversionReportAndFolderOpacity();
+    void psdHeadersRejected();
+    void psbMatchesPsdContentAndLimits();
+    void psbLargeAdditionalInfoDoesNotHideUnicodeName();
+    void psdCropToCanvasWhenOverBudget();
+    void psdImportThroughTheWindowShowsConversionReport();
 
     // docs/writing-comp-files.md
     void handWrittenMinimalManifestOpens();
@@ -1471,6 +1595,234 @@ void TestIoAudit::menuNamingFollowsMac()
     window.session().selectMaskTarget(false);
     window.session().selectLayers({window.document()->layers[0].id, window.document()->layers[1].id}, window.document()->layers[1].id); window.syncDocumentViews();
     QVERIFY2(text("commandMerge") != QStringLiteral("Merge Down"), qPrintable(text("commandMerge")));
+}
+
+
+// ---------------------------------------------------------------------------------------------------- PSD / PSB
+
+void TestIoAudit::psdLayersOrderVisibilityOpacityAndBlend()
+{
+    psd::Layer bottom; bottom.name = QStringLiteral("Red"); bottom.width = 2; bottom.height = 2; bottom.image = solid(2, 2, Qt::red); bottom.opacity = 128; bottom.blend = "mul ";
+    psd::Layer top; top.name = QStringLiteral("Blue"); top.left = 2; top.width = 2; top.height = 2; top.image = solid(2, 2, Qt::blue); top.flags = 8 | 2;  // bit 1: hidden
+    PSDImportResult result; QString error;
+    QVERIFY2(PSDReader::read(psd::build(4, 4, {bottom, top}), result, &error), qPrintable(error));
+    const auto &layers = result.document.layers;
+    QCOMPARE(result.document.canvasSize, QSize(4, 4));
+    QCOMPARE(layers.size(), 2);
+    QCOMPARE(layers[0].name, QStringLiteral("Red"));
+    QCOMPARE(layers[1].name, QStringLiteral("Blue"));
+    QVERIFY(layers[0].visible);
+    QVERIFY(!layers[1].visible);
+    QVERIFY(qAbs(layers[0].opacity - 0.5) < 0.01);
+    QCOMPARE(layers[0].blendMode, BlendMode::Multiply);
+    QCOMPARE(layers[0].image.size(), QSize(2, 2));
+    QCOMPARE(layers[1].transform.origin, QPointF(2, 0));
+    QCOMPARE(pixelAt(layers[0].image, 0, 0), qRgb(255, 0, 0));
+    QVERIFY(result.conversions.isEmpty());
+}
+
+void TestIoAudit::psdGroupsMasksAndClippingFollowLsct()
+{
+    psd::Layer divider; divider.name = QStringLiteral("</Layer group>"); divider.section = 3;
+    psd::Layer base; base.name = QStringLiteral("Base"); base.width = 2; base.height = 2; base.image = solid(2, 2, Qt::green); base.mask = psd::grayPattern(2, 2);
+    psd::Layer clipped; clipped.name = QStringLiteral("Clipped"); clipped.width = 2; clipped.height = 2; clipped.image = solid(2, 2, Qt::yellow); clipped.clipping = 1;
+    psd::Layer folder; folder.name = QStringLiteral("Stack"); folder.section = 1; folder.opacity = 128;
+    PSDImportResult result; QString error;
+    // File order is bottom-to-top: divider (type 3), children, then the folder record (type 1).
+    QVERIFY2(PSDReader::read(psd::build(4, 4, {divider, base, clipped, folder}), result, &error), qPrintable(error));
+    const auto &layers = result.document.layers;
+    const auto find = [&](const QString &name) { return std::find_if(layers.cbegin(), layers.cend(), [&](const Layer &l) { return l.name == name; }); };
+    QVERIFY(find(QStringLiteral("Stack")) != layers.cend());
+    const Layer &stack = *find(QStringLiteral("Stack"));
+    QVERIFY(stack.group);
+    QVERIFY(qAbs(stack.opacity - 0.5) < 0.01);                       // folder opacity lands on the folder
+    for (const QString &child : {QStringLiteral("Base"), QStringLiteral("Clipped")}) {
+        QVERIFY(find(child) != layers.cend());
+        QCOMPARE(find(child)->parentId, std::optional<QUuid>(stack.id));
+    }
+    QVERIFY(!find(QStringLiteral("Base"))->mask.isNull());
+    QCOMPARE(find(QStringLiteral("Clipped"))->maskSourceId, std::optional<QUuid>(find(QStringLiteral("Base"))->id));
+    for (const PSDConversion &c : result.conversions) QVERIFY2(!c.message.contains(QStringLiteral("opacity")), qPrintable(c.message));
+    // The imported document is a valid project: it saves and reopens.
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    Document doc = result.document; doc.id = QUuid::createUuid();
+    ProjectWriter::save(doc, dir.filePath(QStringLiteral("FromPsd.comp")));
+    QCOMPARE(ProjectReader::load(dir.filePath(QStringLiteral("FromPsd.comp"))).layers.size(), layers.size());
+}
+
+void TestIoAudit::psdOversizedLayerBoundsAreRejected()
+{
+    psd::Layer huge; huge.name = QStringLiteral("Huge"); huge.width = 30000; huge.height = 30000;
+    PSDImportResult result; QString error;
+    QVERIFY(!PSDReader::read(psd::build(8, 8, {huge}), result, &error, 50));
+    QVERIFY2(error.contains(QStringLiteral("too large")), qPrintable(error));
+    psd::Layer plain; plain.name = QStringLiteral("Huge"); plain.width = 20; plain.height = 20; plain.image = solid(20, 20, Qt::red);
+    error.clear();
+    QVERIFY(!PSDReader::read(psd::build(20, 20, {plain}), result, &error, 50));
+    QVERIFY2(error.contains(QStringLiteral("too large")), qPrintable(error));
+    QVERIFY(PSDReader::read(psd::build(20, 20, {plain}), result, &error, 400));
+}
+
+void TestIoAudit::psdSpotChannelsSkippedAndBadColorCompressionRejected()
+{
+    psd::Layer layer; layer.name = QStringLiteral("Spots"); layer.width = 2; layer.height = 2;
+    layer.channels = psd::channelsFor(solid(2, 2, Qt::white));
+    QByteArray bogus; psd::be16(bogus, 99); bogus.append(QByteArray(2, 0));
+    for (int id = 3; id <= 54; ++id) layer.channels.push_back({qint16(id), bogus});   // 52 extras fill the 56-channel cap
+    PSDImportResult result; QString error;
+    QVERIFY2(PSDReader::read(psd::build(4, 4, {layer}), result, &error), qPrintable(error));
+    QCOMPARE(result.document.layers.size(), 1);
+    QCOMPARE(result.document.layers[0].image.size(), QSize(2, 2));
+    // The same bogus compression on a colour channel is still an error.
+    psd::Layer broken; broken.name = QStringLiteral("Broken"); broken.width = 2; broken.height = 2;
+    broken.channels = psd::channelsFor(solid(2, 2, Qt::white));
+    broken.channels[1].payload = bogus;
+    error.clear();
+    QVERIFY(!PSDReader::read(psd::build(4, 4, {broken}), result, &error));
+    QVERIFY2(error.contains(QStringLiteral("compression")), qPrintable(error));
+    // More than 56 channels is refused outright.
+    for (int id = 55; id <= 60; ++id) layer.channels.push_back({qint16(id), bogus});
+    QVERIFY(!PSDReader::read(psd::build(4, 4, {layer}), result, &error));
+}
+
+void TestIoAudit::psdBlendConversionReportAndFolderOpacity()
+{
+    psd::Layer dissolved; dissolved.name = QStringLiteral("Dissolved"); dissolved.width = 2; dissolved.height = 2; dissolved.image = solid(2, 2, Qt::red); dissolved.blend = "diss";
+    PSDImportResult result; QString error;
+    QVERIFY2(PSDReader::read(psd::build(2, 2, {dissolved}), result, &error), qPrintable(error));
+    QVERIFY(!result.conversions.isEmpty());
+    bool named = false;
+    for (const PSDConversion &c : result.conversions) named = named || (c.layerName == QStringLiteral("Dissolved") && c.message.contains(QStringLiteral("diss")));
+    QVERIFY2(named, "the report names the layer and the unsupported blend key");
+    QCOMPARE(result.document.layers.first().blendMode, BlendMode::Normal);
+    psd::Layer soft = dissolved; soft.name = QStringLiteral("Soft"); soft.blend = "sLit";
+    QVERIFY(PSDReader::read(psd::build(2, 2, {soft}), result, &error));
+    QVERIFY(result.conversions.isEmpty());
+    QCOMPARE(result.document.layers.first().blendMode, BlendMode::SoftLight);
+    // Every PSD key LX maps agrees with the mac table for the common modes.
+    const struct { const char *key; BlendMode mode; } keys[] = {{"mul ", BlendMode::Multiply}, {"scrn", BlendMode::Screen}, {"over", BlendMode::Overlay},
+        {"dark", BlendMode::Darken}, {"lite", BlendMode::Lighten}, {"diff", BlendMode::Difference}, {"div ", BlendMode::ColorDodge}, {"idiv", BlendMode::ColorBurn},
+        {"hLit", BlendMode::HardLight}, {"lddg", BlendMode::LinearDodge}, {"lbrn", BlendMode::LinearBurn}, {"hue ", BlendMode::Hue}, {"sat ", BlendMode::Saturation},
+        {"colr", BlendMode::Color}, {"lum ", BlendMode::Luminosity}, {"vLit", BlendMode::VividLight}, {"lLit", BlendMode::LinearLight}, {"pLit", BlendMode::PinLight},
+        {"hMix", BlendMode::HardMix}, {"fsub", BlendMode::Subtract}, {"fdiv", BlendMode::Divide}};
+    for (const auto &entry : keys) {
+        const auto mode = PSDReader::blendModeFromPSD(QString::fromLatin1(entry.key));
+        QVERIFY2(mode.has_value() && *mode == entry.mode, entry.key);
+    }
+    QVERIFY(!PSDReader::blendModeFromPSD(QStringLiteral("diss")).has_value());
+}
+
+void TestIoAudit::psdHeadersRejected()
+{
+    PSDImportResult result; QString error;
+    QVERIFY(!PSDReader::read(psd::build(8, 8, {}, false, 8, 4), result, &error));       // CMYK
+    QVERIFY2(error.contains(QStringLiteral("8-bit RGB")), qPrintable(error));
+    QVERIFY(!PSDReader::read(psd::build(8, 8, {}, false, 16, 3), result, &error));      // 16-bit
+    QVERIFY2(error.contains(QStringLiteral("8-bit RGB")), qPrintable(error));
+    QVERIFY(!PSDReader::read(psd::build(8, 8, {}, false, 8, 1), result, &error));       // grayscale
+    QByteArray version3 = psd::build(8, 8, {}); version3[5] = 3;
+    QVERIFY(!PSDReader::read(version3, result, &error));
+    QVERIFY2(error.contains(QStringLiteral("version")), qPrintable(error));
+    QVERIFY(!PSDReader::read(psd::build(30001, 10, {}), result, &error));
+    QVERIFY2(error.contains(QStringLiteral("too large")), qPrintable(error));
+    QVERIFY(PSDReader::matches(psd::build(8, 8, {})));
+    QVERIFY(!PSDReader::matches(QByteArray("\xff\xd8\xff\xe0", 4)));
+}
+
+void TestIoAudit::psbMatchesPsdContentAndLimits()
+{
+    psd::Layer a; a.name = QStringLiteral("Red"); a.width = 3; a.height = 2; a.image = solid(3, 2, Qt::red);
+    psd::Layer b; b.name = QStringLiteral("Green"); b.left = 1; b.top = 1; b.width = 2; b.height = 3; b.image = solid(2, 3, Qt::green);
+    psd::Layer c; c.name = QStringLiteral("Blue mask"); c.left = 2; c.top = 2; c.width = 2; c.height = 2; c.image = solid(2, 2, Qt::blue); c.mask = psd::grayPattern(2, 2);
+    PSDImportResult psdResult, psbResult; QString error;
+    QVERIFY2(PSDReader::read(psd::build(5, 5, {a, b, c}), psdResult, &error), qPrintable(error));
+    QVERIFY2(PSDReader::read(psd::build(5, 5, {a, b, c}, true), psbResult, &error), qPrintable(error));
+    QCOMPARE(psbResult.document.layers.size(), psdResult.document.layers.size());
+    for (int i = 0; i < psdResult.document.layers.size(); ++i) {
+        QCOMPARE(psbResult.document.layers[i].name, psdResult.document.layers[i].name);
+        QVERIFY(psbResult.document.layers[i].transform == psdResult.document.layers[i].transform);
+        QVERIFY(psbResult.document.layers[i].image == psdResult.document.layers[i].image);
+        QVERIFY(psbResult.document.layers[i].mask == psdResult.document.layers[i].mask);
+    }
+    QVERIFY(!psbResult.document.layers[2].mask.isNull());
+    // A PSB canvas over 30,000 px is refused (PSB allows 300,000).
+    QByteArray tooWide = psd::build(2, 2, {a}, true);
+    tooWide.replace(18, 4, QByteArray("\x00\x00\x75\x31", 4));
+    QVERIFY(!PSDReader::read(tooWide, psbResult, &error));
+    QVERIFY2(error.contains(QStringLiteral("too large")), qPrintable(error));
+}
+
+void TestIoAudit::psbLargeAdditionalInfoDoesNotHideUnicodeName()
+{
+    psd::Layer layer; layer.name = QStringLiteral("Cafe layer"); layer.width = 2; layer.height = 2; layer.image = solid(2, 2, Qt::red);
+    layer.blocks.push_back({"LMsk", QByteArray("\x01\x02\x03", 3)});
+    PSDImportResult result; QString error;
+    QVERIFY2(PSDReader::read(psd::build(2, 2, {layer}, true), result, &error), qPrintable(error));
+    QCOMPARE(result.document.layers.size(), 1);
+    QCOMPARE(result.document.layers.first().name, QStringLiteral("Cafe layer"));
+}
+
+void TestIoAudit::psdCropToCanvasWhenOverBudget()
+{
+    psd::Layer layer; layer.name = QStringLiteral("Overhang"); layer.left = -2; layer.top = 1; layer.width = 6; layer.height = 3;
+    layer.image = psd::pattern(6, 3); layer.mask = psd::grayPattern(6, 3);
+    const QByteArray file = psd::build(4, 4, {layer});
+    PSDImportResult result; QString error;
+    // Fits: nothing is cropped.
+    QVERIFY2(PSDReader::read(file, result, &error, 100), qPrintable(error));
+    QCOMPARE(result.document.layers[0].transform.origin, QPointF(-2, 1));
+    QCOMPARE(result.document.layers[0].image.size(), QSize(6, 3));
+    for (const PSDConversion &c : result.conversions) QVERIFY(!c.message.contains(QStringLiteral("Cropped to the canvas")));
+    // Over budget (6*3 image + 6*3 mask = 36): the canvas crop (4*3 + 4*3 = 24) is imported instead.
+    QVERIFY2(PSDReader::read(file, result, &error, 24), qPrintable(error));
+    const Layer &cropped = result.document.layers[0];
+    QCOMPARE(cropped.transform.origin, QPointF(0, 1));
+    QCOMPARE(cropped.image.size(), QSize(4, 3));
+    QCOMPARE(cropped.mask.size(), QSize(4, 3));
+    const QImage source = psd::pattern(6, 3), sourceMask = psd::grayPattern(6, 3);
+    for (int y = 0; y < 3; ++y) for (int x = 0; x < 4; ++x) {
+        QCOMPARE(pixelAt(cropped.image, x, y), pixelAt(source, x + 2, y));
+        QCOMPARE(cropped.mask.convertToFormat(QImage::Format_Grayscale8).constScanLine(y)[x], sourceMask.constScanLine(y)[x + 2]);
+    }
+    int notes = 0;
+    for (const PSDConversion &c : result.conversions) if (c.message.contains(QStringLiteral("Cropped to the canvas")) && c.layerName == QStringLiteral("Overhang")) ++notes;
+    QCOMPARE(notes, 1);
+    // Still over budget after cropping: refused.
+    QVERIFY(!PSDReader::read(file, result, &error, 23));
+    QVERIFY2(error.contains(QStringLiteral("too large")), qPrintable(error));
+    // A layer wholly off the canvas is kept without pixels and reported.
+    psd::Layer outside; outside.name = QStringLiteral("Outside"); outside.left = 5; outside.width = 2; outside.height = 2; outside.image = psd::pattern(2, 2);
+    QVERIFY2(PSDReader::read(psd::build(4, 4, {outside}), result, &error, 1), qPrintable(error));
+    QVERIFY(result.document.layers.first().image.isNull());
+    bool reported = false;
+    for (const PSDConversion &c : result.conversions) reported = reported || (c.layerName == QStringLiteral("Outside") && c.message.contains(QStringLiteral("Cropped to the canvas")));
+    QVERIFY(reported);
+}
+
+void TestIoAudit::psdImportThroughTheWindowShowsConversionReport()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    psd::Layer dissolved; dissolved.name = QStringLiteral("Dissolved"); dissolved.width = 4; dissolved.height = 2; dissolved.image = solid(4, 2, Qt::blue); dissolved.blend = "diss";
+    const QString path = dir.filePath(QStringLiteral("Sky.psd"));
+    { QFile f(path); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(psd::build(4, 2, {dissolved})); }
+    MainWindow window;
+    QVector<PSDConversion> shown; bool answer = false;
+    window.session().setConfirmConversionsCallback([&](const QVector<PSDConversion> &conversions) { shown = conversions; return answer; });
+    // Cancelled: nothing changes.
+    QVERIFY(!window.importImageFiles({path}));
+    QVERIFY(window.document() == nullptr);
+    QCOMPARE(shown.size(), 1);
+    QCOMPARE(shown.first().layerName, QStringLiteral("Dissolved"));
+    answer = true;
+    QVERIFY(window.importImageFiles({path}));
+    QCOMPARE(window.document()->canvasSize, QSize(4, 2));
+    QCOMPARE(window.document()->layers.first().name, QStringLiteral("Dissolved"));
+    // Into an existing canvas the layers arrive in a folder named after the file.
+    QVERIFY(window.importImageFiles({path}));
+    const auto &layers = window.document()->layers;
+    QVERIFY(std::any_of(layers.cbegin(), layers.cend(), [](const Layer &l) { return l.group && l.name == QStringLiteral("Sky"); }));
+    QCOMPARE(std::count_if(layers.cbegin(), layers.cend(), [](const Layer &l) { return l.name == QStringLiteral("Dissolved"); }), 2);
+    QCOMPARE(window.session().history().undoName(), QStringLiteral("Import Photoshop File"));
 }
 
 // ---------------------------------------------------------------------------------------------------- agent contract
