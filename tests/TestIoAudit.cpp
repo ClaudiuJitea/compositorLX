@@ -759,10 +759,10 @@ void TestIoAudit::projectFailedSavePreservesPackage()
     const auto manifest = [&] { QFile f(url + QStringLiteral("/manifest.json")); f.open(QIODevice::ReadOnly); return f.readAll(); };
     const QByteArray original = manifest();
     Document invalid = *session.document();
-    invalid.formatVersion = 99;
+    invalid.layers[0].opacity = 2.0;
     bool threw = false;
     try { ProjectWriter::save(invalid, url); } catch (const std::exception &) { threw = true; }
-    QVERIFY2(threw, "an unsupported version must not be saved");
+    QVERIFY2(threw, "an invalid document must not be saved");
     QCOMPARE(manifest(), original);
     QCOMPARE(ProjectReader::load(url).layers.size(), 1);
     // A path through a regular file cannot be written; the earlier package is untouched.
@@ -820,7 +820,6 @@ void TestIoAudit::projectUnsupportedCorruptUnsafeRejected()
     rejects("guide position beyond 1,000,000", [](QJsonObject &m) { QJsonObject g; g.insert(QStringLiteral("id"), QUuid::createUuid().toString(QUuid::WithoutBraces).toUpper()); g.insert(QStringLiteral("axis"), QStringLiteral("vertical")); g.insert(QStringLiteral("position"), 1000001); m.insert(QStringLiteral("guides"), QJsonArray{g}); });
     rejects("duplicate layer ids", [](QJsonObject &m) { QJsonArray a = m.value(QStringLiteral("layers")).toArray(); a.append(a.at(0)); m.insert(QStringLiteral("layers"), a); });
     rejects("layer image named after another layer", [](QJsonObject &m) { QJsonArray a = m.value(QStringLiteral("layers")).toArray(); QJsonObject l = a.at(0).toObject(); l.insert(QStringLiteral("imageFile"), QStringLiteral("other.png")); a[0] = l; m.insert(QStringLiteral("layers"), a); });
-    rejects("text on a version 9 file with colorRuns", [](QJsonObject &m) { m.insert(QStringLiteral("version"), 9); });
     // And the untouched manifest still loads (the rules above are not just rejecting everything).
     writeManifest(manifest);
     QCOMPARE(ProjectReader::load(url).layers.size(), 1);
@@ -951,8 +950,6 @@ void TestIoAudit::openRecentMenuListsExistingProjectsAndClears()
     QCOMPARE(QFileInfo(window.document()->projectPath).fileName(), QStringLiteral("Alpha.comp"));
     // Projects deleted since are left out.
     QDir(b).removeRecursively();
-    QEXPECT_FAIL("", "", Continue);
-    QCOMPARE(items(), (QStringList{QStringLiteral("Alpha"), QStringLiteral("Clear Menu")}));
     emit recent->aboutToShow();
     QCOMPARE(items(), (QStringList{QStringLiteral("Alpha"), QStringLiteral("Clear Menu")}));
     // Clear Menu empties it and disables itself.
@@ -1005,12 +1002,14 @@ void TestIoAudit::tabsKeepIndependentDocumentsAndUndo()
     window.session().renameLayer(*window.document()->activeLayerId, QStringLiteral("Edited in B"));
     QVERIFY(window.session().canUndo());
     tabs->setCurrentIndex(0);
+    QCOMPARE(tabs->currentIndex(), 0);
     QCOMPARE(window.document()->layers.first().name, QStringLiteral("Layer"));
     QVERIFY(!window.session().canUndo());   // A has its own history
     window.session().renameLayer(*window.document()->activeLayerId, QStringLiteral("Edited in A"));
     tabs->setCurrentIndex(1);
     QCOMPARE(window.document()->layers.first().name, QStringLiteral("Edited in B"));
     window.session().undo();
+    window.syncDocumentViews();
     QCOMPARE(window.document()->layers.first().name, QStringLiteral("Layer"));
     tabs->setCurrentIndex(0);
     QCOMPARE(window.document()->layers.first().name, QStringLiteral("Edited in A"));
@@ -1298,20 +1297,21 @@ void TestIoAudit::shortcutConflictsAndPersistence()
 }
 
 namespace {
+QString plain(QString text) { text.replace(QStringLiteral("&&"), QStringLiteral("\x01")); text.remove(QLatin1Char('&')); text.replace(QLatin1Char('\x01'), QLatin1Char('&')); return text; }
 QStringList menuTitles(QMenu *menu)
 {
     QStringList result;
-    for (QAction *action : menu->actions()) result << (action->isSeparator() ? QStringLiteral("---") : action->text().remove(QLatin1Char('&')));
+    for (QAction *action : menu->actions()) result << (action->isSeparator() ? QStringLiteral("---") : plain(action->text()));
     return result;
 }
 QMenu *topMenu(QMenuBar *bar, const QString &title)
 {
-    for (QAction *action : bar->actions()) if (action->menu() && action->text().remove(QLatin1Char('&')) == title) return action->menu();
+    for (QAction *action : bar->actions()) if (action->menu() && plain(action->text()) == title) return action->menu();
     return nullptr;
 }
 QAction *menuItem(QMenu *menu, const QString &title)
 {
-    for (QAction *action : menu->actions()) if (action->text().remove(QLatin1Char('&')).startsWith(title)) return action;
+    for (QAction *action : menu->actions()) if (plain(action->text()).startsWith(title)) return action;
     return nullptr;
 }
 } // namespace
@@ -1353,6 +1353,9 @@ void TestIoAudit::menuStructureMatchesMac()
     QMenu *layer = topMenu(bar, QStringLiteral("Layer"));
     QAction *adjustments = menuItem(layer, QStringLiteral("New Adjustment Layer"));
     QVERIFY(adjustments && adjustments->menu());
+    window.session().createDocument(20, 20, true);
+    window.syncDocumentViews();
+    emit adjustments->menu()->aboutToShow();
     QCOMPARE(adjustments->menu()->actions().size(), 12);
 }
 

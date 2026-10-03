@@ -2658,7 +2658,7 @@ void MainWindow::createActions()
         };
         for (const QString &kind : allKinds) {
             if (!session_.canSaveAdjustment(kind)) continue;
-            auto *act = adjustments->addAction(kind);
+            auto *act = adjustments->addAction(QString(kind).replace(QLatin1Char('&'), QStringLiteral("&&")));
             connect(act, &QAction::triggered, this, [this, kind] {
                 QJsonObject settings;
                 if (kind == QStringLiteral("Gradient Map")) {
@@ -2790,7 +2790,7 @@ void MainWindow::createActions()
     image->addSeparator();
     auto *invert = image->addAction(tr("&Invert")); invert->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
     connect(invert, &QAction::triggered, this, [this] { if (session_.invertActiveLayerPixels()) syncDocumentViews(); });
-    auto *blackWhite = image->addAction(tr("Black & White…"));
+    auto *blackWhite = image->addAction(tr("Black && White…"));
     auto *colorBalance = image->addAction(tr("Color Balance…"));
     connect(blackWhite, &QAction::triggered, this, &MainWindow::blackWhiteDialog);
     connect(colorBalance, &QAction::triggered, this, &MainWindow::colorBalanceDialog);

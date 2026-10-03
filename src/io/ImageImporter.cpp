@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QImageReader>
+#include <algorithm>
 
 #ifdef COMPOSITOR_HAVE_LIBHEIF
 #include <libheif/heif.h>
@@ -20,6 +21,14 @@ QImage ImageImporter::read(const QString &path, QString *error)
     }
 
     QImageReader reader(path); reader.setAutoTransform(true);
+    reader.setAllocationLimit(int(std::min<qint64>(2047, DocumentLimits::documentPixelBudget() * 4 / (1024 * 1024)) + 1));
+    // The Mac importer takes JPEG, PNG, HEIC and TIFF (plus PSD, SVG and RAW through their own paths); Qt would also
+    // decode GIF, BMP, WebP and more, which the Mac refuses.
+    const QByteArray format = reader.format();
+    if (!format.isEmpty() && !QList<QByteArray>{"png", "jpeg", "jpg", "tiff", "tif", "heic", "heif"}.contains(format)) {
+        if (error) *error = QStringLiteral("Choose a JPEG, PNG, HEIC, TIFF, or Photoshop (PSD) file.");
+        return {};
+    }
     QImage image = reader.read();
 #ifdef COMPOSITOR_HAVE_LIBHEIF
     const QString suffix = QFileInfo(path).suffix().toLower();

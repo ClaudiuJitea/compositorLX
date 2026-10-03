@@ -128,6 +128,8 @@ QImage loadPng(const QDir &root, const QString &fileName, qint64 &pixelBudget, b
 {
     const QString path = checkedAssetPath(root, fileName);
     QImageReader reader(path, "PNG");
+    // Qt refuses images over 256 MB by default (64 MP); the document budget is the limit that applies here.
+    reader.setAllocationLimit(int(std::min<qint64>(2047, DocumentLimits::documentPixelBudget() * 4 / (1024 * 1024)) + 1));
     if (!reader.canRead()) {
         invalid(QStringLiteral("an image is damaged or cannot be read"));
     }
