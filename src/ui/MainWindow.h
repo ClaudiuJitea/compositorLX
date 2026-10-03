@@ -58,6 +58,7 @@ public:
     [[nodiscard]] LayerListModel *layerModel() const { return layerModel_; }
     [[nodiscard]] QListView *layerView() const { return layerView_; }
     [[nodiscard]] CanvasWidget *canvas() const { return canvas_; }
+    [[nodiscard]] QDoubleSpinBox *transformXField() const { return xField_; }
     [[nodiscard]] InlineTextEditor *inlineTextEditor() const;
     [[nodiscard]] CanvasRulerWidget *horizontalRuler() const { return horizontalRuler_; }
     [[nodiscard]] CanvasRulerWidget *verticalRuler() const { return verticalRuler_; }
@@ -219,7 +220,7 @@ private:
     void stashCurrentTab();
     void installTabCloseButton(int index);
     void installInNewTab(EditorSession session, const QString &title);
-    bool copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab);
+    bool copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab, const std::optional<QPointF> &point = std::nullopt);
 
     CanvasWidget *canvas_ = nullptr;
     CanvasRulerCornerWidget *rulerCorner_ = nullptr;

@@ -67,7 +67,8 @@ void gaussianBlurFloats(std::vector<float> &buffer, int width, int height, doubl
         sweep(temp.data(), buffer.data(), width, height, 1, width);
         return;
     }
-    constexpr int passes = 3;
+    // Large sigmas: more box passes follow a Gaussian's tail closely (six stay within about a level of it).
+    const int passes = 6;
     const double ideal = std::sqrt(12.0 * sigma * sigma / passes + 1.0);
     int lower = int(std::floor(ideal));
     if (!(lower & 1)) --lower;

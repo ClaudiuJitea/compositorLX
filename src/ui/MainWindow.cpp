@@ -739,6 +739,12 @@ public:
         const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
         if (!icon.isNull()) icon.paint(p, thumb.adjusted(1, 1, -1, -1), Qt::AlignCenter);
         p->setPen(QColor(92, 94, 98)); p->drawRect(thumb);
+        if (index.data(Qt::UserRole + 20).toBool()) {   // editable text badge
+            const QRect badge(thumb.right() - 11, thumb.bottom() - 11, 11, 11);
+            p->fillRect(badge, QColor(30, 30, 32)); p->setPen(QColor(235, 237, 240));
+            QFont badgeFont = option.font; badgeFont.setPixelSize(9); badgeFont.setBold(true); p->setFont(badgeFont);
+            p->drawText(badge, Qt::AlignCenter, QStringLiteral("T"));
+        }
 
         const QImage mask = index.data(Qt::UserRole + 3).value<QImage>();
         int textStart = thumb.right() + 10;
@@ -747,6 +753,16 @@ public:
             p->fillRect(maskRect, QColor(50, 50, 52));
             p->drawImage(maskRect, mask);
             p->setPen(QColor(92, 94, 98)); p->drawRect(maskRect);
+            if (index.data(Qt::UserRole + 7).toBool()) { p->setPen(QPen(QColor(226, 80, 80), 2)); p->drawLine(maskRect.bottomLeft() + QPoint(2, -2), maskRect.topRight() + QPoint(-2, 2)); }
+            if (index.data(Qt::UserRole + 8).toBool()) {
+                // The chain between the thumbnails while layer and mask are linked; empty (still clickable) once unlinked.
+                if (index.data(Qt::UserRole + 9).toBool()) {
+                    p->setPen(QPen(QColor(160, 164, 170), 1.2)); p->setBrush(Qt::NoBrush);
+                    const QPointF c(thumb.right() + 3.5, thumb.center().y());
+                    p->drawRoundedRect(QRectF(c.x() - 2, c.y() - 6, 4, 7), 2, 2);
+                    p->drawRoundedRect(QRectF(c.x() - 2, c.y() - 1, 4, 7), 2, 2);
+                }
+            }
             if (index.data(Qt::UserRole + 6).toBool()) { p->setPen(QPen(Qt::white, 2)); p->setBrush(Qt::NoBrush); p->drawRect(maskRect.adjusted(1, 1, -1, -1)); }
             textStart = maskRect.right() + 8;
         }
@@ -1686,6 +1702,11 @@ MainWindow::MainWindow(QWidget *parent)
             }
         }
 
+        if (layerModel_->data(index, Qt::UserRole + 8).toBool() && x >= thumbnail + 36 && x < thumbnail + 42) {
+            session_.selectLayer(layer.id);
+            if (session_.toggleMaskLink()) syncDocumentViews();
+            return;
+        }
         const Qt::KeyboardModifiers modifiers = QApplication::keyboardModifiers();
         if (modifiers.testFlag(Qt::ControlModifier) && x >= thumbnail && x <= thumbnail + 80) {
             const SelectionMode mode = modifiers.testFlag(Qt::AltModifier) ? SelectionMode::Subtract
@@ -6219,7 +6240,7 @@ void MainWindow::installInNewTab(EditorSession session, const QString &title)
     session_ = workspaceTabs_.at(currentTab_); syncDocumentViews();
 }
 
-bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab)
+bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab, const std::optional<QPointF> &point)
 {
     if (ids.isEmpty()) return false;
     stashCurrentTab();
@@ -6250,6 +6271,16 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
         addedPixels += qint64(layer.mask.width()) * layer.mask.height();
     }
     if (copied.isEmpty()) return false;
+    // A layer clipped to or masked by a layer that stays behind keeps its masked look as plain pixels (mac LiveMaskBaker);
+    // an adjustment simply loses the link.
+    for (Layer &layer : copied) {
+        if (!layer.maskSourceId || included.contains(*layer.maskSourceId)) continue;
+        if (layer.image.isNull() || !layer.adjustment.isEmpty()) { layer.maskSourceId.reset(); continue; }
+        layer.image = LayerRenderer::bakeLiveMask(sourceSnapshot, layer);
+        layer.transform.origin = {}; layer.transform.size = sourceSnapshot.canvasSize; layer.transform.rotation = 0;
+        layer.transform.flipX = layer.transform.flipY = false;
+        layer.mask = {}; layer.maskPlacement.reset(); layer.maskSourceId.reset();
+    }
 
     if (newTab) {
         installInNewTab(EditorSession(), tr("Untitled %1").arg(workspaceTabs_.size() + 1));
@@ -6269,9 +6300,17 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
         showMessage(this, tr("Layers Too Large"), tr("The copied layers exceed this project's 100-megapixel limit."));
         return false;
     }
-    const auto root = std::find_if(sourceSnapshot.layers.cbegin(), sourceSnapshot.layers.cend(), [&ids](const Layer &layer) { return ids.contains(layer.id); });
-    const QPointF anchor = root == sourceSnapshot.layers.cend() ? QPointF(sourceSnapshot.canvasSize.width() / 2.0, sourceSnapshot.canvasSize.height() / 2.0) : root->transform.center();
-    const QPointF destination(session_.document()->canvasSize.width() / 2.0, session_.document()->canvasSize.height() / 2.0);
+    // One layer keeps its own centre as the anchor; several keep where they sit relative to each other, anchored at the
+    // middle of their drawn pixels (mac copyLayers).
+    QPointF anchor(sourceSnapshot.canvasSize.width() / 2.0, sourceSnapshot.canvasSize.height() / 2.0);
+    {
+        QRectF united;
+        for (const Layer &layer : copied) if (!layer.group) united |= QRectF(layer.transform.origin, layer.transform.size);
+        const auto root = std::find_if(copied.cbegin(), copied.cend(), [&ids](const Layer &layer) { return ids.contains(layer.id); });
+        if (ids.size() == 1 && root != copied.cend()) anchor = root->transform.center();
+        else if (!united.isNull()) anchor = united.center();
+    }
+    const QPointF destination = point.value_or(QPointF(session_.document()->canvasSize.width() / 2.0, session_.document()->canvasSize.height() / 2.0));
     const QPointF offset = destination - anchor;
     QHash<QUuid, QUuid> mapping;
     for (const Layer &layer : copied) mapping.insert(layer.id, QUuid::createUuid());
@@ -6383,6 +6422,11 @@ void MainWindow::updateInspector()
         scaleField_->setEnabled(true); sampling_->setEnabled(true);
     }
     sampling_->setCurrentIndex(2-int(it->transform.sampling));
+    // mac canEditOpacity / canEditAppearance: opacity needs one layer or folder selected; blending also not a folder.
+    const bool single = session_.selectedLayerIds().size() <= 1;
+    if (opacitySlider_) opacitySlider_->setEnabled(single);
+    if (layerOpacityLabel_) layerOpacityLabel_->setEnabled(single);
+    if (blendMode_) blendMode_->setEnabled(single && !it->group);
     opacitySlider_->setValue(qRound(it->opacity * 100));
     const int blendIndex = std::clamp(int(it->blendMode), 0, blendMode_->count() - 1);
     blendMode_->setCurrentIndex(blendIndex);

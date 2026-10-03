@@ -15,7 +15,11 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDoubleSpinBox>
+#include <QLabel>
 #include <QListView>
+#include <QSignalSpy>
+#include "ui/CanvasWidget.h"
 #include <QMimeData>
 #include <QMenu>
 #include <QSlider>
@@ -195,6 +199,15 @@ private slots:
     // Whole-layer clipboard and cross-project copy (ProjectWorkspaceTests)
     void wholeLayerCopyAndPasteInsideOneProject();
     void crossProjectCopyRemapsIdentityAndHasIndependentUndo();
+    void crossProjectCopyBakesLiveMasksAndAnchorsSeveralLayers();
+
+    // Layer panel / inspector
+    void inspectorMovesAnUnlinkedMaskOrLayerSeparately();
+    void opacityAndBlendControlsFollowMacEnablingRules();
+    void panelRowsShowChainDisabledMaskAndTextBadge();
+    void maskAloneBadgeTakesItsClicks();
+    void folderMaskShowsWhileItIsBeingPainted();
+    void largeGlowsStayCloseToAGaussian();
 };
 
 // ---- LayerTests ---------------------------------------------------------------------------------------------
@@ -1693,6 +1706,183 @@ void TestLayers::crossProjectCopyRemapsIdentityAndHasIndependentUndo()
     QVERIFY(window.session().document()->layers.isEmpty());
     window.session().redo();
     QCOMPARE(window.session().document()->layers.size(), 1);
+}
+
+void TestLayers::crossProjectCopyBakesLiveMasksAndAnchorsSeveralLayers()
+{
+    MainWindow window;
+    window.session().createDocument(100, 100);
+    // A hidden 20x20 source supplies a live mask to a 40x40 red layer; copying only the red layer bakes the clip.
+    window.session().insertImage(solid(20, 20, Qt::black), QStringLiteral("Source"), QPointF(50, 50));
+    const QUuid source = active(window.session());
+    window.session().insertImage(solid(40, 40, Qt::red), QStringLiteral("Red"), QPointF(50, 50));
+    const QUuid red = active(window.session());
+    QVERIFY(window.session().linkMask(source, red));
+    findMutable(window.session(), source)->visible = false;
+    const QImage before = render(window.session());
+    QCOMPARE(qAlpha(before.pixel(50, 50)), 255);
+    QCOMPARE(qAlpha(before.pixel(35, 50)), 0);
+    window.syncDocumentViews();
+    QAction *copy = window.findChild<QAction *>(QStringLiteral("commandCopy"));
+    QAction *paste = window.findChild<QAction *>(QStringLiteral("commandPaste"));
+    window.session().selectLayer(red);
+    window.syncDocumentViews();
+    copy->trigger();
+    QAction *newProject = nullptr;
+    for (QAction *candidate : window.findChildren<QAction *>()) if (candidate->text().contains(QStringLiteral("New Canvas"))) newProject = candidate;
+    QVERIFY(newProject);
+    newProject->trigger();
+    window.session().createDocument(100, 100);
+    window.syncDocumentViews();
+    paste->trigger();
+    QCOMPARE(window.session().document()->layers.size(), 1);
+    QVERIFY2(!window.session().document()->layers.first().maskSourceId.has_value(), "the link to a layer that stayed behind is baked away");
+    const QImage after = render(window.session());
+    QCOMPARE(qAlpha(after.pixel(50, 50)), 255);
+    QCOMPARE(qAlpha(after.pixel(35, 50)), 0);     // the clip survived as pixels
+    QCOMPARE(qAlpha(after.pixel(65, 65)), 0);
+}
+
+void TestLayers::inspectorMovesAnUnlinkedMaskOrLayerSeparately()
+{
+    MainWindow window;
+    EditorSession &s = window.session();
+    s.createDocument(400, 200);
+    s.insertImage(solid(400, 200, Qt::red), QStringLiteral("Layer"));
+    const QUuid id = active(s);
+    QImage mask(400, 200, QImage::Format_Grayscale8);
+    mask.fill(255);
+    for (int y = 50; y < 150; ++y) for (int x = 100; x < 200; ++x) mask.scanLine(y)[x] = 0;
+    findMutable(s, id)->mask = mask;
+    findMutable(s, id)->transform.sampling = Sampling::Nearest;
+    window.syncDocumentViews();
+    QDoubleSpinBox *x = window.transformXField();
+    QVERIFY(x);
+    // Linked: the mask moves with its layer whichever thumbnail is selected, so the hole moves too.
+    QVERIFY(s.toggleMaskLink());                       // unlink
+    QVERIFY(!find(s, id)->maskLinked);
+    s.selectMaskTarget(true);
+    window.syncDocumentViews();
+    x->setValue(100);
+    QMetaObject::invokeMethod(x, "editingFinished");
+    QCOMPARE(find(s, id)->transform.origin.x(), 0.0);                // the layer stays put
+    QVERIFY(find(s, id)->maskPlacement.has_value());
+    QCOMPARE(find(s, id)->maskPlacement->origin.x(), 100.0);         // the mask moved alone
+    QCOMPARE(find(s, id)->mask, mask);                               // moving never resamples it
+    QImage image = render(s);
+    QCOMPARE(qAlpha(image.pixel(150, 100)), 255);                    // old hole now revealed
+    QCOMPARE(qAlpha(image.pixel(250, 100)), 0);                      // hole moved to x 200..300
+    QCOMPARE(qAlpha(image.pixel(50, 100)), 255);
+    s.undo();
+    QVERIFY(!find(s, id)->maskPlacement.has_value());
+    // Unlinked, with the layer selected: the layer moves and the mask stays on the canvas.
+    s.selectMaskTarget(false);
+    window.syncDocumentViews();
+    x->setValue(50);
+    QMetaObject::invokeMethod(x, "editingFinished");
+    QCOMPARE(find(s, id)->transform.origin.x(), 50.0);
+    QVERIFY(find(s, id)->maskPlacement.has_value());
+    QCOMPARE(find(s, id)->maskPlacement->origin.x(), 0.0);
+    image = render(s);
+    QCOMPARE(qAlpha(image.pixel(150, 100)), 0);                      // hole still at x 100..200
+    QCOMPARE(qAlpha(image.pixel(25, 100)), 0);                       // outside the moved layer
+    QCOMPARE(qAlpha(image.pixel(250, 100)), 255);
+}
+
+void TestLayers::opacityAndBlendControlsFollowMacEnablingRules()
+{
+    MainWindow window;
+    EditorSession &s = window.session();
+    s.createDocument(40, 40);
+    s.addBlankLayer(); const QUuid a = active(s);
+    s.addBlankLayer(); const QUuid b = active(s);
+    s.addGroup(); const QUuid folder = active(s);
+    auto *slider = window.findChild<QSlider *>(QStringLiteral("layerOpacity"));
+    auto *blend = window.findChild<QComboBox *>(QStringLiteral("blendMode"));
+    window.syncDocumentViews();
+    QVERIFY(slider->isEnabled());                  // a folder takes an opacity of its own
+    QVERIFY(!blend->isEnabled());                  // folders are pass-through: no blend mode
+    s.selectLayer(a);
+    window.syncDocumentViews();
+    QVERIFY(slider->isEnabled() && blend->isEnabled());
+    s.selectLayers({a, b}, a);
+    window.syncDocumentViews();
+    QVERIFY(!slider->isEnabled() && !blend->isEnabled());
+    Q_UNUSED(folder);
+}
+
+void TestLayers::panelRowsShowChainDisabledMaskAndTextBadge()
+{
+    MainWindow window;
+    EditorSession &s = window.session();
+    s.createDocument(40, 40);
+    s.addBlankLayer();
+    s.addLayerMask(true, false);
+    window.syncDocumentViews();
+    LayerListModel *model = window.layerModel();
+    QModelIndex row = model->index(0, 0);
+    QVERIFY(model->data(row, Qt::UserRole + 8).toBool());                // chain slot shown
+    QVERIFY(model->data(row, Qt::UserRole + 9).toBool());                // linked
+    QVERIFY(!model->data(row, Qt::UserRole + 7).toBool());
+    s.toggleLayerMask();
+    s.toggleMaskLink();
+    window.syncDocumentViews();
+    row = model->index(0, 0);
+    QVERIFY(model->data(row, Qt::UserRole + 7).toBool());                // disabled mark
+    QVERIFY(!model->data(row, Qt::UserRole + 9).toBool());               // unlinked: empty chain
+    QVERIFY(!model->data(row, Qt::UserRole + 20).toBool());
+}
+
+void TestLayers::maskAloneBadgeTakesItsClicks()
+{
+    MainWindow window;
+    EditorSession &s = window.session();
+    s.createDocument(200, 100);
+    s.addBlankLayer();
+    s.addLayerMask(true, false);
+    s.toggleMaskAlone(active(s));
+    window.syncDocumentViews();
+    CanvasWidget *canvas = window.canvas();
+    canvas->resize(600, 400);
+    QSignalSpy spy(canvas, &CanvasWidget::maskAloneExitRequested);
+    const QRectF badge((canvas->width() - 220) / 2.0, canvas->height() - 26 - 14.0, 220, 26);   // CanvasWidget::maskAloneBadgeRect
+    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, badge.center().toPoint());
+    QCOMPARE(spy.count(), 1);
+}
+
+void TestLayers::folderMaskShowsWhileItIsBeingPainted()
+{
+    EditorSession s;
+    s.createDocument(200, 100);
+    s.insertImage(solid(200, 100, Qt::red), QStringLiteral("Red"));
+    s.groupSelectedLayers();
+    s.addLayerMask(true, false);
+    QVERIFY(s.beginBrushStroke(QPointF(100, 50), Qt::black, 30, 1.0, 1.0, false));
+    s.continueBrushStroke(QPointF(101, 50));
+    // Before the stroke ends, the composite already shows the hole and still shows the layer elsewhere.
+    QVERIFY(s.isPainting());
+    const QImage mid = render(s);
+    QCOMPARE(qAlpha(mid.pixel(100, 50)), 0);
+    QCOMPARE(qAlpha(mid.pixel(140, 50)), 255);
+    s.cancelBrushStroke();
+    QCOMPARE(qAlpha(render(s).pixel(100, 50)), 255);
+}
+
+void TestLayers::largeGlowsStayCloseToAGaussian()
+{
+    // A 100 px square with a 60 px outer glow: sigma 30. Across the edge the glow follows a Gaussian CDF.
+    const QImage image = squareWithMargin(160, 100, Qt::white);
+    LayerEffects effects;
+    effects.outerGlow = OuterGlowEffect{.enabled = true, .size = 60, .red = 1, .green = 1, .blue = 1, .opacity = 1.0};
+    const auto [rendered, inset] = LayerEffectsRenderer::render(image, QImage(), effects);
+    const int in = int(inset);
+    const int y = in + 80;
+    for (int distance : {5, 20, 40, 70}) {
+        const int x = in + 30 - distance;                              // distance px left of the square's edge
+        const double expected = 0.5 * std::erfc((distance - 0.5) / (30.0 * std::sqrt(2.0))) * std::erf(50.0 / (30.0 * std::sqrt(2.0)));   // times the share of the kernel inside the square's height
+        const double got = rendered.pixelColor(x, y).alphaF();
+        QVERIFY2(std::abs(got - expected) < 0.012, qPrintable(QStringLiteral("distance %1: %2 vs %3").arg(distance).arg(got).arg(expected)));
+    }
 }
 
 QTEST_MAIN(TestLayers)
