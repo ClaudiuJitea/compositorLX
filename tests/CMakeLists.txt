@@ -77,3 +77,10 @@ add_executable(paint_tools_tests
 target_include_directories(paint_tools_tests PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(paint_tools_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME paint_tools_tests COMMAND paint_tools_tests -platform offscreen)
+
+add_executable(layers_tests
+    TestLayers.cpp
+)
+target_include_directories(layers_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(layers_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME layers_tests COMMAND layers_tests -platform offscreen)

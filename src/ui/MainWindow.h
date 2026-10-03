@@ -70,6 +70,10 @@ public:
     [[nodiscard]] bool isMenuBarVisible() const;
     void updateMenuRestoreButton();
     void syncDocumentViews(bool compositeChanged = true);
+    // The Layers panel's right-click menu for the active layer (mac NativeLayerList.contextMenu), and the row selection a
+    // right-click makes first. Both are used by the panel and by tests.
+    void populateLayerContextMenu(QMenu &menu);
+    void selectRowForContextMenu(const QModelIndex &index);
     void updateRulerVisibility();
 
     [[nodiscard]] ScrubLabel *brushSizeLabel() const { return brushSizeLabel_; }
@@ -203,6 +207,8 @@ private:
     void cutPixels();
     void pastePixels();
     void layerViaCopy();
+    void copyWholeLayers();
+    bool pasteWholeLayers();
     void deleteLayersWithMaskChoice();
     void showAbout();
     void checkForUpdates();

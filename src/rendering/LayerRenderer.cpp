@@ -72,11 +72,27 @@ QImage LayerRenderer::placedMask(const Layer &owner,const Layer &target,const QS
 
 
 
-static void drawLayer(QPainter &painter, const Document &document,const Layer &layer, QPainter::CompositionMode mode)
+// Folders are pass-through (mac LayerGroups.swift, LayerOpacity): a folder's opacity multiplies into every layer inside
+// it, folders further out included, and nothing inside is composited as a unit.
+static double ancestorFactor(const Document &document, const Layer &layer)
 {
-    Q_UNUSED(document);
+    double factor = 1.0;
+    std::optional<QUuid> parent = layer.parentId;
+    for (int depth = 0; parent && depth < 64; ++depth) {
+        const auto it = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &candidate) {
+            return candidate.id == *parent;
+        });
+        if (it == document.layers.cend()) break;
+        factor *= it->opacity;
+        parent = it->parentId;
+    }
+    return factor;
+}
+
+static void drawLayer(QPainter &painter, const Document &document,const Layer &layer, QPainter::CompositionMode mode, double factor = -1)
+{
     painter.save();
-    painter.setOpacity(layer.opacity);
+    painter.setOpacity(layer.opacity * (factor < 0 ? ancestorFactor(document, layer) : factor));
     painter.setCompositionMode(mode);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, layer.transform.sampling != Sampling::Nearest);
     const QImage mask = (layer.maskEnabled && !layer.mask.isNull())
@@ -208,14 +224,15 @@ static void customComposite(QImage &backdrop,const QImage &source,BlendMode mode
     for(int y=0;y<backdrop.height();++y){uchar *out=backdrop.scanLine(y);const uchar *top=source.constScanLine(y);for(int x=0;x<backdrop.width();++x){uchar *b=out+x*4;const uchar *s=top+x*4;const double ab=b[3]/255.0,as=s[3]/255.0;if(as<=0)continue;std::array<double,3> cb{},cs{};for(int c=0;c<3;++c){cb[c]=ab?b[c]/255.0/ab:0;cs[c]=as?s[c]/255.0/as:0;}const auto mixed=blendColor(cb,cs,mode);const double ao=as+ab-as*ab;for(int c=0;c<3;++c){const double premult=(1-as)*b[c]/255.0+(1-ab)*s[c]/255.0+as*ab*mixed[c];b[c]=uchar(std::clamp(qRound(premult*255),0,255));}b[3]=uchar(std::clamp(qRound(ao*255),0,255));}}
 }
 
-static void compositeRendered(QImage &target,const Document &document,const Layer &layer)
+static void applyMaskToImage(QImage &image, const QImage &mask);
+static void compositeRendered(QImage &target,const Document &document,const Layer &layer,const QImage &clip={})
 {
-    QImage source(target.size(),QImage::Format_RGBA8888_Premultiplied);source.fill(Qt::transparent);QPainter render(&source);drawLayer(render,document,layer,QPainter::CompositionMode_SourceOver);render.end();customComposite(target,source,layer.blendMode);
+    QImage source(target.size(),QImage::Format_RGBA8888_Premultiplied);source.fill(Qt::transparent);QPainter render(&source);drawLayer(render,document,layer,QPainter::CompositionMode_SourceOver);render.end();if(!clip.isNull())applyMaskToImage(source,clip);customComposite(target,source,layer.blendMode);
 }
 
-static QImage adjustedComposite(const QImage &original, const Document &document,const Layer &layer)
+static QImage adjustedComposite(const QImage &original, const Document &document,const Layer &layer, const QImage &clip = {})
 {
-    Q_UNUSED(document);
+    const double effectiveOpacity = layer.opacity * ancestorFactor(document, layer);
     QImage adjusted = RasterOperations::adjustment(original, layer.adjustment);
     if (adjusted.size() != original.size()) return original;
     QImage result = original.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
@@ -236,8 +253,9 @@ static QImage adjustedComposite(const QImage &original, const Document &document
     for (int y = 0; y < result.height(); ++y) {
         uchar *out = result.scanLine(y);
         const uchar *base = original.constScanLine(y), *top = adjusted.constScanLine(y), *coverage = mask.isNull() ? nullptr : mask.constScanLine(y);
+        const uchar *folderClip = clip.isNull() ? nullptr : clip.constScanLine(y);
         for (int x = 0; x < result.width(); ++x) {
-            const int amount = std::clamp(qRound(255 * layer.opacity * (coverage ? coverage[x] / 255.0 : 1.0)), 0, 255), inverse = 255 - amount;
+            const int amount = std::clamp(qRound(255 * effectiveOpacity * (coverage ? coverage[x] / 255.0 : 1.0) * (folderClip ? folderClip[x] / 255.0 : 1.0)), 0, 255), inverse = 255 - amount;
             for (int c = 0; c < 4; ++c) out[x * 4 + c] = uchar((int(base[x * 4 + c]) * inverse + int(top[x * 4 + c]) * amount + 127) / 255);
         }
     }
@@ -314,7 +332,7 @@ static QImage clippedLayerImage(const Document &document, const Layer &layer, QS
 {
     Layer ownLayer = layer; if (normalizeOwn) ownLayer.opacity = 1; ownLayer.blendMode = BlendMode::Normal;
     QImage image(document.canvasSize, QImage::Format_RGBA8888_Premultiplied); image.fill(Qt::transparent);
-    { QPainter own(&image); drawLayer(own, document, ownLayer, QPainter::CompositionMode_SourceOver); }
+    { QPainter own(&image); drawLayer(own, document, ownLayer, QPainter::CompositionMode_SourceOver, normalizeOwn ? 1.0 : -1.0); }
     if (!layer.maskSourceId || visiting.contains(layer.id)) return image;
     const auto it = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &candidate){ return candidate.id == *layer.maskSourceId; });
     if (it == document.layers.cend() || !drawable(*it)) { image.fill(Qt::transparent); return image; }
@@ -323,13 +341,19 @@ static QImage clippedLayerImage(const Document &document, const Layer &layer, QS
     QPainter clip(&image); clip.setCompositionMode(QPainter::CompositionMode_DestinationIn); clip.drawImage(0, 0, coverage); return image;
 }
 
-static QImage renderScope(const Document &document,
-                          const std::optional<QUuid> &scopeId,
-                          const QSize &canvasSize,
-                          const std::function<QImage(const Layer &, QSet<QUuid>)> &clippedImage)
+// `clip` is the product of the masks of every enabled folder enclosing the scope (Grayscale8, canvas sized), or null.
+// Folders are pass-through: their children draw straight onto `scopeCanvas`, each clipped by the folder masks.
+static void renderScope(const Document &document,
+                        const std::optional<QUuid> &scopeId,
+                        const QSize &canvasSize,
+                        QImage &scopeCanvas,
+                        const QImage &clip,
+                        const std::function<QImage(const Layer &, QSet<QUuid>)> &clippedImage)
 {
-    QImage scopeCanvas(canvasSize, QImage::Format_RGBA8888_Premultiplied);
-    scopeCanvas.fill(Qt::transparent);
+    const auto clipped = [&clip](QImage image) {
+        if (!clip.isNull()) applyMaskToImage(image, clip);
+        return image;
+    };
 
     QVector<Layer> children;
     for (const Layer &layer : document.layers) {
@@ -343,25 +367,25 @@ static QImage renderScope(const Document &document,
         if (!LayerRenderer::effectivelyVisible(document, base)) continue;
 
         if (base.group) {
-            QImage folderCanvas = renderScope(document, base.id, canvasSize, clippedImage);
+            QImage childClip = clip;
             if (base.maskEnabled && !base.mask.isNull()) {
-                const QImage fmask = LayerRenderer::placedMask(base, base, canvasSize);
-                applyMaskToImage(folderCanvas, fmask);
+                QImage folderMask = LayerRenderer::placedMask(base, base, canvasSize).convertToFormat(QImage::Format_Grayscale8);
+                if (!clip.isNull()) {
+                    for (int y = 0; y < canvasSize.height(); ++y) {
+                        uchar *m = folderMask.scanLine(y);
+                        const uchar *c = clip.constScanLine(y);
+                        for (int x = 0; x < canvasSize.width(); ++x) m[x] = uchar((int(m[x]) * c[x] + 127) / 255);
+                    }
+                }
+                childClip = folderMask;
             }
-            if (base.opacity < 0.999999) {
-                applyOpacityToImage(folderCanvas, base.opacity);
-            }
-            {
-                QPainter p(&scopeCanvas);
-                p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-                p.drawImage(0, 0, folderCanvas);
-            }
+            renderScope(document, base.id, canvasSize, scopeCanvas, childClip, clippedImage);
             continue;
         }
 
         if (!base.adjustment.isEmpty()) {
             if (!base.maskSourceId) {
-                scopeCanvas = adjustedComposite(scopeCanvas, document, base);
+                scopeCanvas = adjustedComposite(scopeCanvas, document, base, clip);
             } else {
                 const auto it = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &candidate){ return candidate.id == *base.maskSourceId; });
                 if (it != document.layers.cend() && drawable(*it)) {
@@ -369,10 +393,11 @@ static QImage renderScope(const Document &document,
                     QImage adjusted = adjustedComposite(scopeCanvas, document, base);
                     for (int y = 0; y < canvasSize.height(); ++y) {
                         const uchar *covRow = baseCov.constScanLine(y);
+                        const uchar *clipRow = clip.isNull() ? nullptr : clip.constScanLine(y);
                         uchar *scRow = scopeCanvas.scanLine(y);
                         const uchar *adjRow = adjusted.constScanLine(y);
                         for (int x = 0; x < canvasSize.width(); ++x) {
-                            const int a = covRow[x * 4 + 3];
+                            const int a = clipRow ? (covRow[x * 4 + 3] * clipRow[x] + 127) / 255 : covRow[x * 4 + 3];
                             if (a == 255) {
                                 scRow[x * 4 + 0] = adjRow[x * 4 + 0];
                                 scRow[x * 4 + 1] = adjRow[x * 4 + 1];
@@ -453,6 +478,7 @@ static QImage renderScope(const Document &document,
                     }
                 }
             }
+            if (!clip.isNull()) applyMaskToImage(stack, clip);
             if (customMode(base.blendMode)) {
                 customComposite(scopeCanvas, stack, base.blendMode);
             } else {
@@ -462,7 +488,7 @@ static QImage renderScope(const Document &document,
             }
             i = end - 1;
         } else if (base.maskSourceId) {
-            const QImage image = clippedImage(base, {});
+            const QImage image = clipped(clippedImage(base, {}));
             if (customMode(base.blendMode)) {
                 customComposite(scopeCanvas, image, base.blendMode);
             } else {
@@ -471,14 +497,20 @@ static QImage renderScope(const Document &document,
                 p.drawImage(0, 0, image);
             }
         } else if (customMode(base.blendMode)) {
-            compositeRendered(scopeCanvas, document, base);
+            compositeRendered(scopeCanvas, document, base, clip);
+        } else if (!clip.isNull()) {
+            QImage plane(canvasSize, QImage::Format_RGBA8888_Premultiplied);
+            plane.fill(Qt::transparent);
+            { QPainter own(&plane); drawLayer(own, document, base, QPainter::CompositionMode_SourceOver); }
+            applyMaskToImage(plane, clip);
+            QPainter p(&scopeCanvas);
+            p.setCompositionMode(compositionMode(base.blendMode));
+            p.drawImage(0, 0, plane);
         } else {
             QPainter p(&scopeCanvas);
             drawLayer(p, document, base, compositionMode(base.blendMode));
         }
     }
-
-    return scopeCanvas;
 }
 
 void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
@@ -499,7 +531,9 @@ void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
         QPainter clip(&image); clip.setCompositionMode(QPainter::CompositionMode_DestinationIn); clip.drawImage(0, 0, coverage); return image;
     };
 
-    QImage canvas = renderScope(document, std::nullopt, document.canvasSize, clippedImage);
+    QImage canvas(document.canvasSize, QImage::Format_RGBA8888_Premultiplied);
+    canvas.fill(Qt::transparent);
+    renderScope(document, std::nullopt, document.canvasSize, canvas, QImage(), clippedImage);
     outputPainter.drawImage(0, 0, canvas);
 }
 

@@ -1760,27 +1760,9 @@ MainWindow::MainWindow(QWidget *parent)
                     syncDocumentViews();
                 });
             }
-        } else if (session_.canUngroupLayers()) {
-            auto *groupAct = menu.addAction(tr("Group Selected Layers"));
-            connect(groupAct, &QAction::triggered, this, [this] { session_.groupSelectedLayers(); syncDocumentViews(); });
-            auto *ungroupAct = menu.addAction(tr("Ungroup Layers"));
-            connect(ungroupAct, &QAction::triggered, this, [this] { if (transformOriginalDocument_) finishPersistentTransform(true); session_.ungroupLayers(); syncDocumentViews(); });
-        } else if (session_.canEditEffects()) {
-            auto *effectsAct = menu.addAction(tr("Layer Effects…"));
-            connect(effectsAct, &QAction::triggered, this, [this]() {
-                layerEffectsDialog();
-            });
-            auto *addMenu = menu.addMenu(tr("Add Effect"));
-            for (LayerEffectKind kind : {LayerEffectKind::Stroke, LayerEffectKind::DropShadow, LayerEffectKind::ColorOverlay,
-                                         LayerEffectKind::InnerShadow, LayerEffectKind::OuterGlow, LayerEffectKind::InnerGlow}) {
-                auto *act = addMenu->addAction(layerEffectKindToString(kind) + QStringLiteral("…"));
-                connect(act, &QAction::triggered, this, [this, kind]() {
-                    if (!document_ || !document_->activeLayerId) return;
-                    const QUuid target = *document_->activeLayerId;
-                    session_.addLayerEffect(target, kind);
-                    layerEffectsDialog(target, kind);
-                });
-            }
+        } else if (index.isValid()) {
+            selectRowForContextMenu(index);
+            populateLayerContextMenu(menu);
         }
         if (!menu.isEmpty()) {
             menu.exec(layerView_->viewport()->mapToGlobal(pos));
@@ -2902,11 +2884,7 @@ void MainWindow::createActions()
     connect(harderBrush, &QAction::triggered, this, [this, usesBrushSettings] { if (usesBrushSettings()) brushHardnessField_->setValue(std::min(1.0, std::floor(brushHardness_ * 4 + .001) / 4 + .25) * 100); });
     const auto cycleBlend = [this](bool forward) {
         if (textEditorHasFocus()) return;
-        if (!document_ || !document_->activeLayerId || session_.selectedLayerIds().size() != 1 || !session_.activeLayer() || session_.activeLayer()->group) return;
-        constexpr int count = int(BlendMode::Luminosity) + 1;
-        const int current = int(session_.activeLayer()->blendMode);
-        session_.setLayerBlendMode(*document_->activeLayerId, BlendMode((current + (forward ? 1 : count - 1)) % count));
-        syncDocumentViews();
+        if (session_.cycleBlendMode(forward)) syncDocumentViews();
     };
     connect(nextBlend, &QAction::triggered, this, [cycleBlend] { cycleBlend(true); });
     connect(previousBlend, &QAction::triggered, this, [cycleBlend] { cycleBlend(false); });
@@ -3221,6 +3199,8 @@ void MainWindow::createActions()
 
 void MainWindow::copyPixels(bool merged)
 {
+    // With no selection and no mask targeted, Copy takes the layer itself, whole, for Paste (mac copySelection).
+    if (!merged && document_ && !document_->selection && !session_.isMaskSelected() && session_.activeLayer()) { copyWholeLayers(); return; }
     const auto copied = session_.copiedPixels(merged);
     if (!copied) return;
     clipboardImage_ = copied->first; clipboardOrigin_ = copied->second;
@@ -3238,13 +3218,14 @@ void MainWindow::cutPixels()
 void MainWindow::pastePixels()
 {
     if (!document_) return;
+    if (pasteWholeLayers()) return;
     const QImage image = QGuiApplication::clipboard()->image();
     if (image.isNull()) return;
     QPointF origin;
     if (!clipboardImage_.isNull() && image == clipboardImage_) origin = clipboardOrigin_;
     else origin = QPointF(std::floor((document_->canvasSize.width() - image.width()) / 2.0),
                           std::floor((document_->canvasSize.height() - image.height()) / 2.0));
-    if (session_.insertPixelLayer(image, origin, QStringLiteral("Pasted Layer"), QStringLiteral("Paste"))) syncDocumentViews();
+    if (session_.insertPixelLayer(image, origin, QString(), QStringLiteral("Paste"))) syncDocumentViews();
 }
 
 void MainWindow::layerViaCopy()
@@ -3252,7 +3233,7 @@ void MainWindow::layerViaCopy()
     if (!document_) return;
     if (!document_->selection) { session_.duplicateActiveLayer(); syncDocumentViews(); return; }
     const auto copied = session_.copiedPixels(false);
-    if (copied && session_.insertPixelLayer(copied->first, copied->second, QStringLiteral("Layer via Copy"),
+    if (copied && session_.insertPixelLayer(copied->first, copied->second, QString(),
                                             QStringLiteral("Layer via Copy"))) syncDocumentViews();
 }
 
@@ -6650,6 +6631,10 @@ void MainWindow::deleteLayersWithMaskChoice()
         session_.removeLayerEffect(sel.layerId, sel.kind);
         syncDocumentViews();
         return;
+    }
+    // With one layer's mask thumbnail targeted only the mask goes (mac deleteLayerOrMask).
+    if (const Layer *active = session_.activeLayer(); active && session_.isMaskSelected() && !active->mask.isNull() && session_.selectedLayerIds().size() <= 1) {
+        session_.deleteLayerMask(); syncDocumentViews(); return;
     }
     if (session_.selectedDeletionLiveMaskDependents().isEmpty()) { session_.deleteSelectedLayers(); syncDocumentViews(); return; }
     QMessageBox box(QMessageBox::Question, tr("This layer supplies a live mask"),
