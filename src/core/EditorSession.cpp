@@ -815,6 +815,22 @@ static QImage clippedGrayscale(const QImage &originalImage, int value, const Lay
     return result;
 }
 
+bool EditorSession::recolorText(const QUuid &id, const QColor &color)
+{
+    const int index = indexOf(id);
+    if (!document_ || index < 0 || !document_->layers[index].text || !color.isValid()) return false;
+    TextStyle style = *document_->layers[index].text;
+    if (style.red == color.redF() && style.green == color.greenF() && style.blue == color.blueF() && !style.colorRuns) return true;
+    style.setColor({color.redF(), color.greenF(), color.blueF()}, 0, 0);
+    const QImage image = renderStyledText(style);
+    if (!style.isValid() || image.isNull() || image.size() != document_->layers[index].image.size()) return false;
+    beginEdit(QStringLiteral("Fill Text"));
+    document_->layers[index].image = image;
+    document_->layers[index].text = style;
+    endEdit();
+    return true;
+}
+
 bool EditorSession::fillSelection(const QColor &color)
 {
     Layer *layer = activeLayer();
@@ -827,6 +843,8 @@ bool EditorSession::fillSelection(const QColor &color)
         if (result == original) return false;
         beginEdit(QStringLiteral("Fill Mask")); document_->layers[index].mask = result; endEdit(); return true;
     }
+    // Filling a text layer with a color paints its letters, keeping it editable text (macOS recolorText).
+    if (!document_->selection && layer->text && recolorText(layer->id, color)) return true;
     QImage original = layer->image;
     if (original.isNull()) {
         const QSize size = layer->transform.size.toSize().expandedTo(QSize(1, 1));

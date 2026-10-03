@@ -77,3 +77,13 @@ add_executable(paint_tools_tests
 target_include_directories(paint_tools_tests PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(paint_tools_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME paint_tools_tests COMMAND paint_tools_tests -platform offscreen)
+
+add_executable(text_layer_tests
+    TestTextLayers.cpp
+)
+target_include_directories(text_layer_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(text_layer_tests PRIVATE compositor_ui Qt6::Test)
+target_compile_definitions(text_layer_tests PRIVATE
+    FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+add_test(NAME text_layer_tests COMMAND text_layer_tests -platform offscreen)

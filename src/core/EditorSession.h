@@ -141,6 +141,8 @@ public:
     void setObjectSelectionSampleAllLayers(bool sampleAll) { objectSelectionSampleAllLayers_ = sampleAll; }
     bool invertActiveLayerPixels();
     bool fillSelection(const QColor &color);
+    // Paints a text layer's letters in `color`, keeping it text. False when the layer is not live text.
+    bool recolorText(const QUuid &id, const QColor &color);
     bool clearSelectedPixels();
     bool beginSelectionTransform(bool duplicate = false);
     bool commitSelectionTransform();
