@@ -1239,7 +1239,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(shapeRadius, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeCornerRadius);
     connect(shapeLineWidth, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeLineWidth);
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
-    connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushHardness_ = value / 100.0; });
+    connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
+        brushHardness_ = value / 100.0;
+        canvas_->setHardnessRing(brushHardness_);
+        QTimer::singleShot(900, canvas_, [this] { canvas_->setHardnessRing(std::nullopt); });
+    });
     connect(brushOpacityField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushOpacity_ = value / 100.0; });
     connect(blurRadiusField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { blurRadius_ = value; });
     connect(brushSmoothingField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
@@ -2588,6 +2592,8 @@ void MainWindow::createActions()
         if (dispatchTextEditCommand(TextEditCommand::Undo)) return;
         // While text is open its own history answers, never the document's.
         if (auto *editor = inlineTextEditor()) { editor->undo(); return; }
+        // Like Photoshop, the first Undo discards a pending gradient (mac EditorSession.undo).
+        if (canvas_->hasPendingGradient()) { canvas_->resolvePendingGradient(false); return; }
         session_.undo(); syncDocumentViews();
     });
     connect(redo, &QAction::triggered, this, [this] {

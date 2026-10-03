@@ -56,6 +56,8 @@ public:
     void setShowPixelGrid(bool enabled) { showPixelGrid_ = enabled; update(); }
     void setShowSampleRing(bool enabled) { showSampleRing_ = enabled; update(); }
     void setPaletteForeground(const QColor &color) { paletteForeground_ = color; }
+    // While hardness is being changed the cursor also shows the fraction of its radius painted at full strength.
+    void setHardnessRing(std::optional<double> hardness) { hardnessRing_ = hardness; update(); }
     [[nodiscard]] bool showsPixelGrid() const { return showPixelGrid_; }
     void setCloneSource(const QPointF &point) { setCloneTracking(point, std::nullopt); }
     void setCloneTracking(const std::optional<QPointF> &source, const std::optional<QPointF> &offset)
@@ -109,6 +111,7 @@ public:
     void setShapeLineWidth(double width) { shapeLineWidth_ = std::clamp(width, 1.0, 5000.0); update(); }
     void refreshPendingGradient();
     void resolvePendingGradient(bool commit = true);
+    [[nodiscard]] bool hasPendingGradient() const { return pendingGradient_.has_value(); }
     void resolvePendingDistortion(bool apply = true);
     void resolvePendingCrop(bool apply = true);
     [[nodiscard]] std::optional<QRectF> cropRect() const { return cropRect_; }
@@ -276,6 +279,7 @@ private:
     std::optional<QUuid> lastBrushLayerId_;
     bool lastBrushMask_ = false;
     bool creationDragging_ = false;
+    std::optional<double> hardnessRing_;
     int gradientHandle_ = 0; // 0: new/end, 1: start, 2: end
     std::optional<QPair<QPointF, QPointF>> pendingGradient_;
     bool creationSquare_ = false;

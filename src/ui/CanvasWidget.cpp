@@ -752,6 +752,11 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
         painter.drawEllipse(center, diameter / 2, diameter / 2);
         painter.setPen(QPen(QColor(20, 20, 20, 190), 1));
         painter.drawEllipse(center, diameter / 2 + 1, diameter / 2 + 1);
+        if (hardnessRing_ && *hardnessRing_ > 0 && *hardnessRing_ < 1) {
+            const qreal inner = diameter / 2 * *hardnessRing_;
+            QPen dashed(QColor(245, 245, 245, 230), 1, Qt::DashLine); painter.setPen(dashed); painter.drawEllipse(center, inner, inner);
+            dashed.setColor(QColor(20, 20, 20, 200)); dashed.setDashOffset(3); painter.setPen(dashed); painter.drawEllipse(center, inner, inner);
+        }
     }
     if (session_ && session_->maskAloneLayerId()) {
         painter.save();
