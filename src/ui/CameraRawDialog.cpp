@@ -10,6 +10,9 @@
 #include <QDialogButtonBox>
 #include <QPainter>
 #include <QPainterPath>
+#include <QComboBox>
+#include <QMouseEvent>
+#include <algorithm>
 #include <cmath>
 
 namespace compositor {
@@ -352,11 +355,88 @@ QWidget *CameraRawDialog::createEffectsTab()
     return w;
 }
 
+namespace {
+// The point curve as a graph (mac 60d9117: dragging in it works, as in Image > Curves): click empty space to add a point,
+// drag a point to move it (the end points only move up and down), double-click an inner point to remove it. The drawn line
+// is the whole tone curve, parametric sliders included, as the image gets it.
+class CameraRawCurveGraph final : public QWidget {
+public:
+    explicit CameraRawCurveGraph(QWidget *parent = nullptr) : QWidget(parent)
+    {
+        setMinimumSize(240, 240); setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); setFixedHeight(240); setObjectName(QStringLiteral("cameraRawCurveGraph"));
+    }
+    CameraRawCurveSettings *curve = nullptr;
+    std::function<void()> changed;
+    int channel = 0;   // RGB, Red, Green, Blue
+
+    QVector<CurvePoint> &points() { return channel == 1 ? curve->red : channel == 2 ? curve->green : channel == 3 ? curve->blue : curve->rgb; }
+
+protected:
+    QPointF toWidget(const CurvePoint &p) const { return QPointF(p.x * width(), (1.0 - p.y) * height()); }
+    CurvePoint fromWidget(const QPointF &p) const { return {std::clamp(p.x() / std::max(1, width()), 0.0, 1.0), std::clamp(1.0 - p.y() / std::max(1, height()), 0.0, 1.0)}; }
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this); painter.fillRect(rect(), QColor(18, 19, 22)); painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor(255, 255, 255, 30), 1));
+        for (int i = 0; i <= 4; ++i) { const double f = i / 4.0; painter.drawLine(QPointF(f * width(), 0), QPointF(f * width(), height())); painter.drawLine(QPointF(0, f * height()), QPointF(width(), f * height())); }
+        if (!curve) return;
+        const auto table = channel == 0 ? curve->toneTable() : curve->channelTable(points());
+        const QColor colors[] = {Qt::white, QColor(230, 70, 70), QColor(70, 210, 100), QColor(70, 130, 235)};
+        QPainterPath path;
+        for (int i = 0; i < 256; ++i) { const QPointF at(i / 255.0 * width(), (1.0 - double(table[size_t(i)])) * height()); if (!i) path.moveTo(at); else path.lineTo(at); }
+        painter.setPen(QPen(colors[std::clamp(channel, 0, 3)], 2)); painter.setBrush(Qt::NoBrush); painter.drawPath(path);
+        painter.setPen(QPen(QColor(25, 25, 25), 1));
+        for (int i = 0; i < points().size(); ++i) { painter.setBrush(i == selected_ ? palette().color(QPalette::Highlight) : QColor(235, 235, 235)); painter.drawEllipse(toWidget(points()[i]), 5.0, 5.0); }
+    }
+    int nearestPoint(const QPointF &at, double *distance = nullptr)
+    {
+        int index = -1; double best = 1e9;
+        for (int i = 0; i < points().size(); ++i) { const double d = QLineF(toWidget(points()[i]), at).length(); if (d < best) { best = d; index = i; } }
+        if (distance) *distance = best;
+        return index;
+    }
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (!curve || event->button() != Qt::LeftButton) return;
+        double distance = 0; int index = nearestPoint(event->position(), &distance);
+        if (distance >= 14) {
+            const CurvePoint p = fromWidget(event->position());
+            auto &pts = points();
+            if (pts.size() >= 32 || p.x <= 0.004 || p.x >= 0.996 || std::any_of(pts.cbegin(), pts.cend(), [&](const CurvePoint &q) { return std::abs(q.x - p.x) <= 0.004; })) return;
+            pts.push_back(p); std::sort(pts.begin(), pts.end(), [](const CurvePoint &a, const CurvePoint &b) { return a.x < b.x; });
+            index = int(std::find_if(pts.cbegin(), pts.cend(), [&](const CurvePoint &q) { return q.x == p.x; }) - pts.cbegin());
+        }
+        dragging_ = selected_ = index; moveSelected(event->position()); event->accept();
+    }
+    void mouseMoveEvent(QMouseEvent *event) override { if (dragging_ >= 0 && (event->buttons() & Qt::LeftButton)) { moveSelected(event->position()); event->accept(); } }
+    void mouseReleaseEvent(QMouseEvent *) override { dragging_ = -1; }
+    void mouseDoubleClickEvent(QMouseEvent *event) override
+    {
+        if (!curve) return;
+        double distance = 0; const int index = nearestPoint(event->position(), &distance);
+        auto &pts = points();
+        if (distance < 14 && index > 0 && index + 1 < pts.size()) { pts.remove(index); selected_ = dragging_ = -1; update(); if (changed) changed(); }
+    }
+private:
+    void moveSelected(const QPointF &at)
+    {
+        auto &pts = points();
+        if (selected_ < 0 || selected_ >= pts.size()) return;
+        const CurvePoint p = fromWidget(at);
+        pts[selected_].y = p.y;
+        if (selected_ > 0 && selected_ + 1 < pts.size()) pts[selected_].x = std::clamp(p.x, pts[selected_ - 1].x + 0.004, pts[selected_ + 1].x - 0.004);
+        update(); if (changed) changed();
+    }
+    int selected_ = -1;
+    int dragging_ = -1;
+};
+} // namespace
+
 QWidget *CameraRawDialog::createCurveTab()
 {
     auto *w = new QWidget(this);
     auto *form = new QFormLayout(w);
-    const auto cb = [this] { syncToSettings(); };
+    const auto cb = [this] { syncToSettings(); if (curveGraph_) curveGraph_->update(); };
 
     curvePresetCombo_ = new QComboBox(this);
     curvePresetCombo_->addItems({tr("Custom"), tr("Linear"), tr("Medium Contrast"), tr("Strong Contrast")});
@@ -365,8 +445,16 @@ QWidget *CameraRawDialog::createCurveTab()
         else if (idx == 2) settings_.curve.rgb = CameraRawCurveSettings::mediumContrast;
         else if (idx == 3) settings_.curve.rgb = CameraRawCurveSettings::strongContrast;
         syncToSettings();
+        if (curveGraph_) curveGraph_->update();
     });
     form->addRow(tr("Point Curve Preset"), curvePresetCombo_);
+
+    auto *graph = new CameraRawCurveGraph(w); graph->curve = &settings_.curve; graph->setToolTip(tr("Click to add a point, drag to move it, double-click an inner point to remove it."));
+    auto *channelCombo = new QComboBox(w); channelCombo->addItems({tr("RGB"), tr("Red"), tr("Green"), tr("Blue")});
+    connect(channelCombo, &QComboBox::currentIndexChanged, this, [graph](int index) { graph->channel = index; graph->update(); });
+    graph->changed = [this] { if (curvePresetCombo_) { const QSignalBlocker blocker(curvePresetCombo_); curvePresetCombo_->setCurrentIndex(0); } syncToSettings(); };
+    curveGraph_ = graph;
+    form->addRow(tr("Channel"), channelCombo); form->addRow(graph);
 
     addScrubRow(form, tr("Highlights"), this, -100.0, 100.0, 0.0, 0, curveHighlightsSpin_, cb);
     addScrubRow(form, tr("Lights"), this, -100.0, 100.0, 0.0, 0, curveLightsSpin_, cb);

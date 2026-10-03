@@ -137,6 +137,7 @@ private:
     QDoubleSpinBox *curveDarkSplitSpin_ = nullptr;
     QDoubleSpinBox *curveLightSplitSpin_ = nullptr;
     QComboBox *curvePresetCombo_ = nullptr;
+    QWidget *curveGraph_ = nullptr;
     QDoubleSpinBox *curveRefineSatSpin_ = nullptr;
 
     // Mixer

@@ -219,7 +219,14 @@ QVariant LayerListModel::data(const QModelIndex &index, int role) const
     if (role == Qt::UserRole) {
         if (layer.group) return tr("Group");
         if (!layer.adjustment.isEmpty()) return tr("Adjustment · %1").arg(layer.adjustment.value(QStringLiteral("kind")).toString());
-        if (!layer.image.isNull()) return QStringLiteral("%1 × %2 px").arg(layer.image.width()).arg(layer.image.height());
+        if (!layer.image.isNull()) {
+            QString text = QStringLiteral("%1 × %2 px").arg(layer.image.width()).arg(layer.image.height());
+            // A layer keeps its full pixels however small it is scaled, so a scaled one says so: "100 × 100 px · 5%" rather
+            // than looking as if it had been resampled (mac 67cc31e).
+            const double scale = layer.transform.size.width() / std::max(1, layer.image.width());
+            if (layer.transform.size.width() > 0 && std::abs(scale - 1.0) > 0.005) text += QStringLiteral(" · %1%").arg(qRound(scale * 100));
+            return text;
+        }
         return QStringLiteral("%1 × %2 px").arg(qRound(layer.transform.size.width())).arg(qRound(layer.transform.size.height()));
     }
     if (role == Qt::UserRole + 1) return depthFor(layer);
