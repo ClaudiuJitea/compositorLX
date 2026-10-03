@@ -279,6 +279,9 @@ private slots:
     void tabReorderKeepsDocumentsAndExternalWatch();
     void tabDragReorderWithRealMouseEvents();
     void copyThenPasteAcrossTabs();
+    void autosaveWritesRecoveryForUntitledAndOffersItBack();
+    void recoveryDiscardAndCleanup();
+    void autosaveOfTitledProjectKeepsDocumentEditable();
     void quitAsksAboutEveryUnsavedTab();
     void closeTabAsksAndRemoves();
     void unsavedMarkOnTabAndTitle();
@@ -1240,6 +1243,96 @@ void TestIoAudit::copyThenPasteAcrossTabs()
     tabs->setCurrentIndex(0);
     QCOMPARE(window.document()->layers.size(), 1);
     QVERIFY(!window.session().isModified());
+}
+
+void TestIoAudit::autosaveWritesRecoveryForUntitledAndOffersItBack()
+{
+    QDir(QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("recovery"))).removeRecursively();
+    QString recoveryFolder;
+    {
+        auto window = std::make_unique<MainWindow>();
+        window->session().createDocument(30, 20, true);
+        window->session().insertImage(solid(30, 20, QColor(10, 220, 30)), QStringLiteral("Painted"));
+        window->syncDocumentViews();
+        QVERIFY(window->session().isModified());
+        window->autosave();
+        window->finishWriting();
+        recoveryFolder = window->recoveryDirectory();
+        const QStringList written = QDir(recoveryFolder).entryList({QStringLiteral("*.comp")}, QDir::Dirs | QDir::NoDotAndDotDot);
+        QCOMPARE(written.size(), 1);
+        const Document recovered = ProjectReader::load(QDir(recoveryFolder).filePath(written.constFirst()));
+        QCOMPARE(recovered.layers.size(), 2);
+        QCOMPARE(pixelAt(recovered.layers.last().image, 3, 3), qRgb(10, 220, 30));
+        // A clean untitled canvas writes nothing more.
+        // (The window is destroyed without closeEvent, as after a crash.)
+    }
+    MainWindow fresh;
+    QString asked;
+    MainWindow::setMessageDialogHook([&](const QString &title, const QString &) -> std::optional<QMessageBox::StandardButton> { asked = title; return QMessageBox::Yes; });
+    fresh.offerRecovery();
+    QCOMPARE(asked, QStringLiteral("Recover Unsaved Project"));
+    QVERIFY(fresh.document() != nullptr);
+    QCOMPARE(fresh.document()->layers.size(), 2);
+    QVERIFY(fresh.document()->projectPath.isEmpty());      // still untitled
+    QVERIFY(fresh.session().isModified());                  // and unsaved
+    QCOMPARE(pixelAt(fresh.document()->layers.last().image, 3, 3), qRgb(10, 220, 30));
+    QVERIFY(QFileInfo(fresh.recoveryPath()).isDir());
+}
+
+void TestIoAudit::recoveryDiscardAndCleanup()
+{
+    const QString folder = QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath(QStringLiteral("recovery"));
+    QDir(folder).removeRecursively();
+    {
+        MainWindow window;
+        window.session().createDocument(10, 10, true);
+        window.session().addBlankLayer();
+        window.syncDocumentViews();
+        window.autosave(); window.finishWriting();
+        QCOMPARE(QDir(folder).entryList({QStringLiteral("*.comp")}, QDir::Dirs | QDir::NoDotAndDotDot).size(), 1);
+        // Closing the tab and discarding removes its recovery copy.
+        MainWindow::setMessageDialogHook([](const QString &, const QString &) -> std::optional<QMessageBox::StandardButton> { return QMessageBox::Discard; });
+        window.closeTab(0);
+        QCOMPARE(QDir(folder).entryList({QStringLiteral("*.comp")}, QDir::Dirs | QDir::NoDotAndDotDot).size(), 0);
+    }
+    {   // Discard at the recovery offer removes the copies.
+        MainWindow window;
+        window.session().createDocument(10, 10, true); window.session().addBlankLayer(); window.syncDocumentViews();
+        window.autosave(); window.finishWriting();
+    }
+    QCOMPARE(QDir(folder).entryList({QStringLiteral("*.comp")}, QDir::Dirs | QDir::NoDotAndDotDot).size(), 1);
+    MainWindow fresh;
+    MainWindow::setMessageDialogHook([](const QString &, const QString &) -> std::optional<QMessageBox::StandardButton> { return QMessageBox::Discard; });
+    fresh.offerRecovery();
+    QVERIFY(fresh.document() == nullptr);
+    QCOMPARE(QDir(folder).entryList({QStringLiteral("*.comp")}, QDir::Dirs | QDir::NoDotAndDotDot).size(), 0);
+    // A damaged recovery copy is reported and does not stop the others.
+    QVERIFY(QDir().mkpath(folder + QStringLiteral("/Untitled-broken.comp")));
+    QString failureTitle;
+    MainWindow::setMessageDialogHook([&](const QString &title, const QString &) -> std::optional<QMessageBox::StandardButton> {
+        if (title == QStringLiteral("Recover Unsaved Project")) return QMessageBox::Yes;
+        failureTitle = title; return QMessageBox::Ok; });
+    MainWindow another;
+    another.offerRecovery();
+    QVERIFY(failureTitle.contains(QStringLiteral("Could Not Be Recovered")));
+}
+
+void TestIoAudit::autosaveOfTitledProjectKeepsDocumentEditable()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString path = saveSimpleProject(dir, QStringLiteral("Titled.comp"));
+    MainWindow window;
+    QVERIFY(window.openProject(path));
+    window.session().renameLayer(*window.document()->activeLayerId, QStringLiteral("Autosaved name"));
+    // Edits made while the background write runs are kept and stay unsaved (mac 'keep working while saving').
+    window.autosave();
+    window.session().addBlankLayer();
+    window.finishWriting();
+    QTRY_VERIFY(!window.hasInFlightSave());
+    QVERIFY(window.session().isModified());
+    QVERIFY(window.session().canUndo());
+    QCOMPARE(window.document()->layers.size(), 2);
+    QCOMPARE(ProjectReader::load(path).layers.first().name, QStringLiteral("Autosaved name"));
 }
 
 void TestIoAudit::quitAsksAboutEveryUnsavedTab()
