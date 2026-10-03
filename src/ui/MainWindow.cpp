@@ -9,6 +9,7 @@
 #include "rendering/TextLayout.h"
 #include "rendering/RasterOperations.h"
 #include "rendering/Dither.h"
+#include "ui/SliderTracks.h"
 #include "rendering/SubjectRemoval.h"
 #include "ui/CanvasWidget.h"
 #include "ui/LayerListModel.h"
@@ -252,7 +253,17 @@ void installFontMenuPreviews(QFontComboBox *combo, const std::function<InlineTex
 class SnapSlider final : public QSlider {
 public:
     using QSlider::QSlider;
+    // mac CameraRawSliderView: a double-click on the knob restores the control's default.
+    std::function<void()> onReset;
 protected:
+    void mouseDoubleClickEvent(QMouseEvent *event) override
+    {
+        if (onReset && event->button() == Qt::LeftButton) {
+            QStyleOptionSlider option; initStyleOption(&option);
+            if (style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, this).contains(event->position().toPoint())) { onReset(); event->accept(); return; }
+        }
+        QSlider::mouseDoubleClickEvent(event);
+    }
     void mousePressEvent(QMouseEvent *event) override
     {
         if (event->button() == Qt::LeftButton && orientation() == Qt::Horizontal && isEnabled()) {
@@ -386,6 +397,26 @@ QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, c
     return QMessageBox::StandardButton(result);
 }
 
+// A named colored track (property "sliderTrack" on the field, e.g. "cyanRed", "spectrum:120") and the double-click reset
+// value (property "resetValue", else 0 when the range has a zero, else the value the control starts with).
+void decorateSlider(SnapSlider *slider, QDoubleSpinBox *field)
+{
+    const QVariant resetProperty = field->property("resetValue");
+    const double reset = resetProperty.isValid() ? resetProperty.toDouble()
+        : (field->minimum() <= 0 && field->maximum() >= 0 ? 0.0 : field->value());
+    slider->onReset = [field, reset] { field->setValue(reset); };
+    const QString track = field->property("sliderTrack").toString();
+    const QString name = track.section(QLatin1Char(':'), 0, 0);
+    const double degrees = track.section(QLatin1Char(':'), 1, 1).toDouble();
+    if (name == QLatin1String("cyanRed")) SliderTrack::apply(slider, SliderTrack::cyanRed());
+    else if (name == QLatin1String("magentaGreen")) SliderTrack::apply(slider, SliderTrack::magentaGreen());
+    else if (name == QLatin1String("yellowBlue")) SliderTrack::apply(slider, SliderTrack::yellowBlue());
+    else if (name == QLatin1String("chroma")) SliderTrack::apply(slider, SliderTrack::chroma());
+    else if (name == QLatin1String("spectrum")) SliderTrack::apply(slider, SliderTrack::spectrum(degrees));
+    else if (name == QLatin1String("saturation")) SliderTrack::apply(slider, SliderTrack::saturation(degrees));
+    else if (name == QLatin1String("blackWhite")) SliderTrack::apply(slider, {Qt::black, Qt::white});
+}
+
 QWidget *sliderField(QDoubleSpinBox *field, bool logarithmic = false)
 {
     auto *container = new QWidget(field->parentWidget()); auto *layout = new QHBoxLayout(container); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(8);
@@ -401,9 +432,17 @@ QWidget *sliderField(QDoubleSpinBox *field, bool logarithmic = false)
         return logarithmic && minimum > 0 ? std::exp(std::log(minimum) + fraction * (std::log(maximum) - std::log(minimum))) : minimum + fraction * (maximum - minimum);
     };
     slider->setValue(positionFor(field->value()));
+    decorateSlider(slider, field);
     QObject::connect(slider, &QSlider::valueChanged, field, [field, valueFor](int position) { field->setValue(valueFor(position)); });
     QObject::connect(field, qOverload<double>(&QDoubleSpinBox::valueChanged), slider, [slider, positionFor](double value) { const QSignalBlocker blocker(slider); slider->setValue(positionFor(value)); });
     layout->addWidget(slider, 1); layout->addWidget(field); return container;
+}
+
+void decorateSlider(SnapSlider *slider, QSpinBox *field)
+{
+    const QVariant resetProperty = field->property("resetValue");
+    const int reset = resetProperty.isValid() ? resetProperty.toInt() : (field->minimum() <= 0 && field->maximum() >= 0 ? 0 : field->value());
+    slider->onReset = [field, reset] { field->setValue(reset); };
 }
 
 QWidget *sliderField(QSpinBox *field)
@@ -413,6 +452,7 @@ QWidget *sliderField(QSpinBox *field)
     if (!field->objectName().isEmpty()) slider->setObjectName(field->objectName() + QStringLiteral("Slider"));
     const auto positionFor = [field](int value) { return qRound((value - field->minimum()) / double(field->maximum() - field->minimum()) * 1000); };
     slider->setValue(positionFor(field->value()));
+    decorateSlider(slider, field);
     QObject::connect(slider, &QSlider::valueChanged, field, [field](int position) { field->setValue(qRound(field->minimum() + position / 1000.0 * (field->maximum() - field->minimum()))); });
     QObject::connect(field, &QSpinBox::valueChanged, slider, [slider, positionFor](int value) { const QSignalBlocker blocker(slider); slider->setValue(positionFor(value)); });
     layout->addWidget(slider, 1); layout->addWidget(field); return container;
@@ -3542,6 +3582,15 @@ void MainWindow::hueSaturationDialog()
         spectrum->setVisible(spectrumVisible); handleText->setVisible(spectrumVisible); invert->setVisible(spectrumVisible);
         for (QToolButton *button : {sample, addSample, removeSample}) button->setVisible(spectrumVisible);
         targeted->setEnabled(!settings.colorize); spectrum->update();
+        // mac HueSaturationSheet: the hue track is the spectrum around the range's own hue (180 when colorizing); the
+        // saturation track runs gray to that hue (neutral to red for Master).
+        const double center = settings.range == ColorRange::Master ? 0.0 : std::fmod(band.rangeStart + HueBand::forward(band.rangeStart, band.rangeEnd) / 2, 360.0);
+        if (auto *track = hue->parentWidget() ? hue->parentWidget()->findChild<QSlider *>() : nullptr)
+            SliderTrack::apply(track, SliderTrack::spectrum(settings.colorize ? 180 : center));
+        if (auto *track = saturation->parentWidget() ? saturation->parentWidget()->findChild<QSlider *>() : nullptr)
+            SliderTrack::apply(track, settings.colorize ? SliderTrack::saturation(hue->value()) : settings.range == ColorRange::Master ? SliderTrack::chroma() : SliderTrack::saturation(center));
+        if (auto *track = lightness->parentWidget() ? lightness->parentWidget()->findChild<QSlider *>() : nullptr)
+            SliderTrack::apply(track, {Qt::black, Qt::white});
     };
     connect(range, &QComboBox::currentIndexChanged, &dialog, [&, previous = range->currentIndex()](int current) mutable {
         settings.adjustments[size_t(previous)] = {double(hue->value()), double(saturation->value()), double(lightness->value())};
@@ -3942,6 +3991,7 @@ void MainWindow::colorBalanceDialog()
     auto createTab = [&](QDoubleSpinBox *cr, QDoubleSpinBox *mg, QDoubleSpinBox *yb) {
         auto *tab = new QWidget(&dialog);
         auto *tabForm = new QFormLayout(tab);
+        cr->setProperty("sliderTrack", QStringLiteral("cyanRed")); mg->setProperty("sliderTrack", QStringLiteral("magentaGreen")); yb->setProperty("sliderTrack", QStringLiteral("yellowBlue"));
         addScrubRow(tabForm, tr("Cyan / Red"), cr);
         addScrubRow(tabForm, tr("Magenta / Green"), mg);
         addScrubRow(tabForm, tr("Yellow / Blue"), yb);

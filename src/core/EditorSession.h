@@ -9,6 +9,7 @@
 
 
 #include <QSet>
+#include <QVariantMap>
 
 #include <array>
 #include <atomic>
@@ -38,6 +39,10 @@ struct GuideDrag {
 class EditorSession final {
 public:
     EditorSession() = default;
+
+    // mac EditorSession.filterSettings: the last values each filter was committed with, which its panel reopens with.
+    CameraRawSettings lastCameraRaw;
+    QVariantMap filterMemory;
 
     [[nodiscard]] const std::shared_ptr<Document> &document() const { return document_; }
     [[nodiscard]] std::shared_ptr<Document> &document() { return document_; }
