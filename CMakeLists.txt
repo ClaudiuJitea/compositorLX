@@ -92,6 +92,10 @@ add_library(compositor_core
     src/io/ImageImporter.cpp
     src/io/ImageImporter.h
     src/io/PSDReader.cpp
+    src/io/PSDText.cpp
+    src/io/PSDText.h
+    src/io/PSDVector.cpp
+    src/io/PSDVector.h
     src/io/PSDReader.h
     src/io/RawImporter.cpp
     src/io/RawImporter.h
