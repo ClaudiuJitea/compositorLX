@@ -6467,6 +6467,13 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         }
     }
     if (layerView_ && (watched == layerView_ || watched == layerView_->viewport())) {
+        // Select > All offers Select All to the focused view first; with the Layers panel just clicked, its list took it
+        // and selected every layer. The canvas gets it instead (mac 451281e); a layer's name being edited still gets it first.
+        if (event->type() == QEvent::ShortcutOverride && static_cast<QKeyEvent *>(event)->matches(QKeySequence::SelectAll)
+            && layerView_->state() != QAbstractItemView::EditingState) {
+            event->ignore();
+            return true;
+        }
         if (event->type() == QEvent::KeyPress) {
             auto *key = static_cast<QKeyEvent *>(event);
             if (key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) {
