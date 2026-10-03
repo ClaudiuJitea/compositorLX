@@ -41,6 +41,8 @@ public:
     void setTool(Tool tool);
     [[nodiscard]] Tool tool() const { return tool_; }
     void setBrushDiameter(double diameter) { brushDiameter_ = diameter; update(); }
+    // Clone Stamp's cursor previews what a click would stamp, through the tip's hardness and at the brush's opacity.
+    void setBrushTip(double hardness, double opacity) { brushHardness_ = hardness; brushOpacity_ = opacity; update(); }
     [[nodiscard]] double brushDiameter() const { return brushDiameter_; }
     void setBrushSmoothing(double smoothing) { brushSmoothing_ = smoothing; }
     [[nodiscard]] double brushSmoothing() const { return brushSmoothing_; }
@@ -280,6 +282,7 @@ private:
     bool lastBrushMask_ = false;
     bool creationDragging_ = false;
     std::optional<double> hardnessRing_;
+    double brushHardness_ = 1, brushOpacity_ = 1;
     int gradientHandle_ = 0; // 0: new/end, 1: start, 2: end
     std::optional<QPair<QPointF, QPointF>> pendingGradient_;
     bool creationSquare_ = false;

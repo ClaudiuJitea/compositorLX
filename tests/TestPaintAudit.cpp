@@ -525,6 +525,23 @@ private slots:
         r.canvas()->resolvePendingGradient(false);
         QVERIFY(*r.session().activeLayer() == committed);
     }
+    void cloneCursorPreviewsTheSourceInsideTheBrush()
+    {
+        Rig r; r.window.resize(1100, 800); r.window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&r.window));
+        r.session().createDocument(200, 100);
+        QImage image(200, 100, QImage::Format_RGBA8888_Premultiplied);
+        for (int y = 0; y < 100; ++y) for (int x = 0; x < 200; ++x) image.setPixelColor(x, y, x < 100 ? QColor(255, 0, 0) : QColor(0, 0, 255));
+        QVERIFY(r.session().insertImage(image, "Halves")); r.window.syncDocumentViews();
+        r.canvas()->setZoom(1.0); r.canvas()->setTool(CanvasWidget::Tool::Clone);
+        r.window.findChild<QDoubleSpinBox *>("brushSize")->setValue(30); r.window.findChild<QDoubleSpinBox *>("brushHardness")->setValue(100);
+        r.press(30, 50, Qt::AltModifier); r.release(30, 50, Qt::AltModifier);       // source in the red half
+        QTest::mouseMove(r.canvas(), r.at(150, 50)); QCoreApplication::processEvents();
+        const QImage shot = r.canvas()->grab().toImage();
+        const QColor inside = shot.pixelColor(r.at(150, 50));
+        QVERIFY2(inside.red() > 150 && inside.blue() < 120, qPrintable(inside.name()));   // red under the cursor, not the blue canvas
+        QVERIFY(shot.pixelColor(r.at(170, 50) + QPoint(10, 0)).blue() > 150);               // outside the circle
+    }
     // SpotHealingTests (all modes) and CloneStampTests
     static QImage blemished()
     {

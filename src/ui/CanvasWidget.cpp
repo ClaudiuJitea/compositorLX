@@ -747,6 +747,21 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
     if (cursorDocument_ && (tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Clone || tool_ == Tool::Blur)) {
         const QPointF center = target.topLeft() + *cursorDocument_ * zoom_;
         const qreal diameter = brushDiameter_ * zoom_;
+        if (tool_ == Tool::Clone && cloneSource_ && !renderedDocument_.isNull() && diameter >= 2 && diameter <= 1200) {
+            // What one click would stamp: the pixels at the source, through the tip.
+            const QPointF source = (cloneOffset_ && cloneAligned_) ? *cursorDocument_ + *cloneOffset_ : (brushDrawing_ && cloneOffset_ ? *cursorDocument_ + *cloneOffset_ : *cloneSource_);
+            const int side = qMax(2, qRound(diameter));
+            QImage preview(side, side, QImage::Format_ARGB32_Premultiplied); preview.fill(Qt::transparent);
+            { QPainter p(&preview); p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+              const double span = side / zoom_;
+              p.drawImage(QRectF(0, 0, side, side), renderedDocument_, QRectF(source.x() - span / 2, source.y() - span / 2, span, span));
+              QRadialGradient tip(side / 2.0, side / 2.0, side / 2.0);
+              const double h = std::clamp(brushHardness_, 0.0, 0.999);
+              tip.setColorAt(0, Qt::white); tip.setColorAt(h, Qt::white); tip.setColorAt(1, QColor(255, 255, 255, 0));
+              p.setCompositionMode(QPainter::CompositionMode_DestinationIn); p.fillRect(preview.rect(), tip); }
+            painter.save(); painter.setOpacity(std::clamp(brushOpacity_, 0.0, 1.0));
+            painter.drawImage(QPointF(center.x() - side / 2.0, center.y() - side / 2.0), preview); painter.restore();
+        }
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(QColor(245, 245, 245, 210), 1));
         painter.drawEllipse(center, diameter / 2, diameter / 2);

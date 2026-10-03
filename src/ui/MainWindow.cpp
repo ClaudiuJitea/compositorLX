@@ -1241,10 +1241,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
     connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         brushHardness_ = value / 100.0;
+        canvas_->setBrushTip(brushHardness_, brushOpacity_);
         canvas_->setHardnessRing(brushHardness_);
         QTimer::singleShot(900, canvas_, [this] { canvas_->setHardnessRing(std::nullopt); });
     });
-    connect(brushOpacityField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushOpacity_ = value / 100.0; });
+    connect(brushOpacityField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushOpacity_ = value / 100.0; canvas_->setBrushTip(brushHardness_, brushOpacity_); });
     connect(blurRadiusField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { blurRadius_ = value; });
     connect(brushSmoothingField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         brushSmoothing_ = value;
