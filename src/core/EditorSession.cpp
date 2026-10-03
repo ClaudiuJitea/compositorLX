@@ -767,6 +767,28 @@ static void rasterizeLayer(Layer &layer)
 bool EditorSession::invertActiveLayerPixels()
 {
     const Layer *layer = activeLayer();
+    // With the mask targeted, Invert inverts the mask (inside the selection, if any), folders' included (mac invertPixels).
+    if (layer && maskSelected_ && !layer->mask.isNull() && layer->maskEnabled) {
+        const int maskIndex = indexOf(layer->id);
+        QImage mask = layer->mask.convertToFormat(QImage::Format_Grayscale8);
+        if (document_->selection) {
+            const QImage selection = document_->selection->convertToFormat(QImage::Format_Grayscale8);
+            const QTransform toDocument = LayerRenderer::pixelToDocument(layer->maskPlacement.value_or(layer->transform), mask.size());
+            for (int y = 0; y < mask.height(); ++y) {
+                uchar *row = mask.scanLine(y);
+                for (int x = 0; x < mask.width(); ++x) {
+                    const QPointF at = toDocument.map(QPointF(x + .5, y + .5));
+                    const int sx = qFloor(at.x()), sy = qFloor(at.y());
+                    const int cov = QRect(QPoint(), selection.size()).contains(sx, sy) ? selection.constScanLine(sy)[sx] : 0;
+                    row[x] = uchar(row[x] + (255 - 2 * row[x]) * cov / 255);
+                }
+            }
+        } else {
+            for (int y = 0; y < mask.height(); ++y) { uchar *row = mask.scanLine(y); for (int x = 0; x < mask.width(); ++x) row[x] = uchar(255 - row[x]); }
+        }
+        if (mask == layer->mask.convertToFormat(QImage::Format_Grayscale8)) return false;
+        beginEdit(QStringLiteral("Invert")); document_->layers[maskIndex].mask = mask; endEdit(); return true;
+    }
     if (!layer || layer->group || layer->image.isNull()) return false;
     const int index = indexOf(layer->id);
     const QImage result = clippedPixels(layer->image, RasterOperations::inverted(layer->image), *layer, document_->selection);
@@ -3636,16 +3658,27 @@ void EditorSession::deleteIds(const QSet<QUuid> &ids, const QString &historyName
     if (!document_ || ids.isEmpty()) return;
     QSet<QUuid> removed = ids;
     for (const QUuid &id : ids) removed.unite(descendantIds(id));
-    int reference = document_->activeLayerId ? indexOf(*document_->activeLayerId) : -1;
+    const std::optional<QUuid> active = document_->activeLayerId;
+    const bool activeRemoved = active && removed.contains(*active);
+    // Deleting the active layer hands the selection to the layer that takes its place (mac finishDeletingLayer).
+    int reference = active ? indexOf(*active) : -1;
+    if (!activeRemoved) {
+        // Not the active layer that goes: it stays active, as it was.
+    } else {
+        for (int i = 0; i < document_->layers.size(); ++i) if (removed.contains(document_->layers.at(i).id)) { reference = std::min(reference, i); break; }
+    }
     beginEdit(historyName);
     for (int i = document_->layers.size() - 1; i >= 0; --i) if (removed.contains(document_->layers.at(i).id)) document_->layers.removeAt(i);
     for (Layer &layer : document_->layers) if (layer.maskSourceId && removed.contains(*layer.maskSourceId)) layer.maskSourceId.reset();
-    selectedLayerIds_.clear();
-    if (document_->layers.isEmpty()) document_->activeLayerId.reset();
-    else {
+    if (document_->layers.isEmpty()) { document_->activeLayerId.reset(); selectedLayerIds_.clear(); }
+    else if (activeRemoved || !active) {
+        selectedLayerIds_.clear();
         reference = std::clamp(reference, 0, int(document_->layers.size()) - 1);
         document_->activeLayerId = document_->layers.at(reference).id;
         selectedLayerIds_.insert(*document_->activeLayerId);
+    } else {
+        selectedLayerIds_.clear();
+        selectedLayerIds_.insert(*active);
     }
     endEdit();
 }
@@ -3730,11 +3763,15 @@ void EditorSession::setSelectedLayersOpacity(double opacity)
     QVector<int> changed;
     for (int i = 0; i < document_->layers.size(); ++i) {
         const Layer &layer = document_->layers.at(i);
-        if (ids.contains(layer.id) && !layer.group && !qFuzzyCompare(layer.opacity, opacity)) changed.push_back(i);
+        // A selected folder takes the value too, dimming its contents on top of their own opacity (mac 1.1.6).
+        if (ids.contains(layer.id) && !qFuzzyCompare(layer.opacity, opacity)) changed.push_back(i);
     }
     if (changed.isEmpty()) return;
     beginEdit(QStringLiteral("Layer Opacity"));
-    for (int index : changed) document_->layers[index].opacity = opacity;
+    for (int index : changed) {
+        if (document_->layers.at(index).group && opacity < 0.999999) document_->formatVersion = std::max(document_->formatVersion, 8);
+        document_->layers[index].opacity = opacity;
+    }
     endEdit();
 }
 
@@ -3791,119 +3828,12 @@ bool EditorSession::reorderLayers(const QVector<int> &topFirstRows, int destinat
     return true;
 }
 
-QVector<QUuid> EditorSession::copyableLayerIds() const
-{
-    if (!document_) return {};
-    QSet<QUuid> selected = selectedLayerIds_;
-    if (document_->activeLayerId) selected.insert(*document_->activeLayerId);
-    QSet<QUuid> nested;
-    for (const QUuid &id : std::as_const(selected)) nested |= descendantIds(id);
-    QVector<QUuid> ids;
-    for (const Layer &layer : document_->layers) if (selected.contains(layer.id) && !nested.contains(layer.id)) ids << layer.id;
-    return ids;
-}
-
-bool EditorSession::duplicateLayers(const QVector<QUuid> &ids, const QString &historyName)
-{
-    if (!document_ || ids.isEmpty()) return false;
-    // Roots in document order; each copy block goes right after its original's subtree. Later blocks first keeps indices valid.
-    QVector<QUuid> roots;
-    for (const Layer &layer : document_->layers) if (ids.contains(layer.id)) roots << layer.id;
-    if (roots.isEmpty()) return false;
-    qint64 added = 0, existing = 0;
-    for (const Layer &layer : std::as_const(document_->layers)) existing += qint64(layer.image.width()) * layer.image.height();
-    beginEdit(historyName);
-    QVector<QUuid> copies;
-    std::optional<QUuid> activeCopy;
-    const std::optional<QUuid> active = document_->activeLayerId;
-    for (int r = roots.size() - 1; r >= 0; --r) {
-        const int start = indexOf(roots[r]);
-        const QSet<QUuid> included = descendantIds(roots[r]) | QSet<QUuid>{roots[r]};
-        QVector<Layer> block;
-        int end = start;
-        // A folder's record sits above the layers it holds, so its subtree is gathered from the whole stack.
-        end = start;
-        for (int i = 0; i < document_->layers.size(); ++i) if (included.contains(document_->layers.at(i).id)) { block << document_->layers.at(i); end = std::max(end, i); }
-        QHash<QUuid, QUuid> mapping;
-        for (const Layer &layer : std::as_const(block)) { mapping.insert(layer.id, QUuid::createUuid()); added += qint64(layer.image.width()) * layer.image.height(); }
-        if (existing + added > 100000000LL) { added = 0; continue; }
-        for (Layer &layer : block) {
-            const QUuid old = layer.id; layer.id = mapping.value(old);
-            if (old == roots[r]) layer.name += QStringLiteral(" copy");
-            if (layer.parentId && mapping.contains(*layer.parentId)) layer.parentId = mapping.value(*layer.parentId);
-            if (layer.maskSourceId && mapping.contains(*layer.maskSourceId)) layer.maskSourceId = mapping.value(*layer.maskSourceId);
-        }
-        copies << mapping.value(roots[r]);
-        if (active && *active == roots[r]) activeCopy = mapping.value(roots[r]);
-        for (int i = 0; i < block.size(); ++i) document_->layers.insert(end + 1 + i, block.at(i));
-    }
-    if (copies.isEmpty()) { endEdit(); return false; }
-    selectLayers(QSet<QUuid>(copies.cbegin(), copies.cend()), activeCopy ? activeCopy : std::optional<QUuid>(copies.constLast()));
-    endEdit();
-    return true;
-}
-
-void EditorSession::duplicateActiveLayer()
-{
-    const Layer *active = activeLayer();
-    if (!active || active->group) return;
-    const int index = indexOf(active->id);
-    Layer copy = *active;
-    copy.id = QUuid::createUuid();
-    copy.name += QStringLiteral(" copy");
-    beginEdit(QStringLiteral("Duplicate Layer"));
-    document_->layers.insert(index + 1, copy);
-    selectLayer(copy.id);
-    endEdit();
-}
-
 bool EditorSession::canPlaceLayer(const QUuid &id, const std::optional<QUuid> &parent) const
 {
     if (indexOf(id) < 0) return false;
     if (!parent) return true;
     const int parentIndex = indexOf(*parent);
     return *parent != id && parentIndex >= 0 && document_->layers.at(parentIndex).group && !descendantIds(id).contains(*parent);
-}
-
-bool EditorSession::placeLayer(const QUuid &id, const std::optional<QUuid> &parent,
-                               const std::optional<QUuid> &above, bool atBottom)
-{
-    QSet<QUuid> carried = descendantIds(id); carried.insert(id);
-    if (!canPlaceLayer(id, parent) || (above && carried.contains(*above))) return false;
-    QVector<Layer> layers, block;
-    for (Layer layer : std::as_const(document_->layers)) {
-        if (carried.contains(layer.id)) { if (layer.id == id) layer.parentId = parent; block.push_back(std::move(layer)); }
-        else layers.push_back(std::move(layer));
-    }
-    int insertion = atBottom ? 0 : layers.size();
-    if (above) {
-        insertion = -1;
-        for (int i = 0; i < layers.size(); ++i) if (layers.at(i).id == *above && layers.at(i).parentId == parent) { insertion = i + 1; break; }
-        if (insertion < 0) return false;
-    }
-    for (int i = 0; i < block.size(); ++i) layers.insert(insertion + i, block.at(i));
-    if (layers == document_->layers) return false;
-    beginEdit(QStringLiteral("Move Layer"));
-    document_->layers = std::move(layers);
-    selectLayer(id);
-    endEdit();
-    return true;
-}
-
-bool EditorSession::duplicateLayer(const QUuid &id, const std::optional<QUuid> &parent,
-                                   const std::optional<QUuid> &above, bool atBottom)
-{
-    const int sourceIndex = indexOf(id);
-    if (!document_ || sourceIndex < 0 || document_->layers.at(sourceIndex).group || !canPlaceLayer(id, parent)) return false;
-    Layer copy = document_->layers.at(sourceIndex); copy.id = QUuid::createUuid(); copy.name += QStringLiteral(" copy"); copy.parentId = parent;
-    QVector<Layer> layers = document_->layers;
-    int insertion = atBottom ? 0 : layers.size();
-    if (above) {
-        insertion = -1;
-        for (int i = 0; i < layers.size(); ++i) if (layers.at(i).id == *above && layers.at(i).parentId == parent) { insertion = i + 1; break; }
-        if (insertion < 0) return false;
-    }
-    beginEdit(QStringLiteral("Duplicate Layer")); layers.insert(insertion, copy); document_->layers = std::move(layers); selectLayer(copy.id); endEdit(); return true;
 }
 
 bool EditorSession::moveActiveLayerOutOfGroup()
@@ -3913,24 +3843,6 @@ bool EditorSession::moveActiveLayerOutOfGroup()
     const Layer *group = nullptr; for (const Layer &candidate : document_->layers) if (candidate.id == parentId) { group = &candidate; break; }
     if (!group) return false;
     return placeLayer(id, group->parentId, group->id);
-}
-
-void EditorSession::groupSelectedLayers()
-{
-    if (!document_ || selectedLayerIds_.isEmpty() || document_->layers.size() >= 10000) return;
-    Layer group;
-    group.id = QUuid::createUuid();
-    group.name = nextName(QStringLiteral("Folder"));
-    group.group = true;
-    group.transform.size = document_->canvasSize;
-    int highest = -1;
-    for (int i = 0; i < document_->layers.size(); ++i) if (selectedLayerIds_.contains(document_->layers.at(i).id)) highest = i;
-    if (highest < 0) return;
-    beginEdit(QStringLiteral("Group Layers"));
-    document_->layers.insert(highest + 1, group);
-    for (Layer &layer : document_->layers) if (selectedLayerIds_.contains(layer.id)) layer.parentId = group.id;
-    selectLayer(group.id);
-    endEdit();
 }
 
 bool EditorSession::canUngroupLayers() const

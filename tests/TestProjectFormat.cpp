@@ -630,11 +630,11 @@ void TestProjectFormat::testFolderOpacityMultiplication()
 
     // 3. Decision verification: Overlapping opaque siblings inside dimmed folder (0.5).
     // Child 1 (Red) and Child 2 (Blue) occupy identical bounds (10x10).
-    // In CompositorLX isolated group surface compositing:
+    // Folders are pass-through (mac LayerOpacity): each layer is dimmed by the folder's opacity and drawn straight on:
     // Child 2 (Blue) completely occludes Child 1 (Red) inside the group before folder dimming.
     // The resulting composite has folder opacity (alpha ~ 128) and is PURE BLUE (red == 0).
     // (Note: In macOS pass-through compositing, Child 1 would show through Child 2, producing purple red > 0).
-    // CompositorLX intentionally retains standard isolated group surface compositing.
+    // CompositorLX matches that.
     {
         Document overlappingDoc;
         overlappingDoc.formatVersion = 8;
@@ -675,10 +675,10 @@ void TestProjectFormat::testFolderOpacityMultiplication()
         const QImage overlapRender = LayerRenderer::flattened(overlappingDoc);
 
         const QColor overlapPixel = overlapRender.pixelColor(5, 5);
-        QVERIFY2(overlapPixel.alpha() >= 125 && overlapPixel.alpha() <= 130, "Overlapping pixel alpha must be ~128 (50% folder opacity)");
-        // Decision assertion: Pure blue, zero red bleed!
-        QCOMPARE(overlapPixel.red(), 0);
-        QVERIFY2(overlapPixel.blue() >= 250, "Overlapping pixel blue channel must be full blue");
+        // Pass-through like macOS: each layer is dimmed on its own, the blue sits over the red: alpha 1 - 0.5 * 0.5.
+        QVERIFY2(std::abs(overlapPixel.alpha() - 191) <= 3, "Overlapping pixel alpha must be ~191 (two 50% layers)");
+        QVERIFY2(std::abs(overlapPixel.red() - 85) <= 4, "The red shows through the translucent blue");
+        QVERIFY2(std::abs(overlapPixel.blue() - 170) <= 4, "Blue is two thirds of the colour");
     }
 }
 
@@ -1559,25 +1559,17 @@ void TestProjectFormat::testHierarchicalGroupRendering()
     const QImage rendered = LayerRenderer::flattened(doc);
 
     // Checks:
-    // 1. (25, 25) is inside Folder 1.
-    // Red was inverted to Cyan (0, 255, 255) inside Folder 1.
-    // Folder 1 is 40% opacity over White backdrop (255, 255, 255).
-    // Blending 40% Cyan over 100% White:
-    // Red: 0 * 0.4 + 255 * 0.6 = 153.
-    // Green: 255 * 0.4 + 255 * 0.6 = 255.
-    // Blue: 255 * 0.4 + 255 * 0.6 = 255.
+    // Folders are pass-through (mac LayerOpacity): an adjustment inside Folder 1 acts on everything below it, the
+    // background included, at the folder's 40%.
+    // 1. (25, 25): red at 40% over white = (255,153,153); inverted at 40%: 0.6 * c + 0.4 * (255 - c) = (153,133,133).
     const QColor pFolder1 = rendered.pixelColor(25, 25);
-    QVERIFY2(std::abs(pFolder1.red() - 153) <= 4, qPrintable(QStringLiteral("Folder 1 inverted pixel red channel was %1, expected ~153").arg(pFolder1.red())));
-    QVERIFY2(std::abs(pFolder1.green() - 255) <= 2, qPrintable(QStringLiteral("Folder 1 green channel was %1, expected ~255").arg(pFolder1.green())));
-    QVERIFY2(std::abs(pFolder1.blue() - 255) <= 2, qPrintable(QStringLiteral("Folder 1 blue channel was %1, expected ~255").arg(pFolder1.blue())));
+    QVERIFY2(std::abs(pFolder1.red() - 153) <= 3, qPrintable(QStringLiteral("red was %1, expected ~153").arg(pFolder1.red())));
+    QVERIFY2(std::abs(pFolder1.green() - 133) <= 3, qPrintable(QStringLiteral("green was %1, expected ~133").arg(pFolder1.green())));
+    QVERIFY2(std::abs(pFolder1.blue() - 133) <= 3, qPrintable(QStringLiteral("blue was %1, expected ~133").arg(pFolder1.blue())));
 
-    // 2. (75, 25) is outside both Folder 1 layer1 and Folder 2 layer2.
-    // It should be pure White (255, 255, 255) from the Background layer!
-    // In flat compositing, Folder 1's Invert adjustment would have inverted the background to Black!
+    // 2. (75, 25): only the background, inverted at 40%: 0.6 * 255 = 153.
     const QColor pBg = rendered.pixelColor(75, 25);
-    QCOMPARE(pBg.red(), 255);
-    QCOMPARE(pBg.green(), 255);
-    QCOMPARE(pBg.blue(), 255);
+    QVERIFY2(std::abs(pBg.red() - 153) <= 3 && std::abs(pBg.green() - 153) <= 3 && std::abs(pBg.blue() - 153) <= 3, "the dimmed Invert reaches the backdrop");
 
     // 3. (25, 75) is inside Folder 2's unmasked half (x < 50, y >= 50).
     // Layer 2 is pure Blue. It is NOT affected by Folder 1's Invert!
@@ -1590,11 +1582,9 @@ void TestProjectFormat::testHierarchicalGroupRendering()
 
     // 4. (75, 75) is inside Folder 2's masked half (x >= 50, y >= 50).
     // Folder 2's mask hides Layer 2 here!
-    // So the White Background should show through (255, 255, 255).
+    // So the backdrop shows through, as Folder 1's dimmed Invert left it (153).
     const QColor pFolder2Masked = rendered.pixelColor(75, 75);
-    QCOMPARE(pFolder2Masked.red(), 255);
-    QCOMPARE(pFolder2Masked.green(), 255);
-    QCOMPARE(pFolder2Masked.blue(), 255);
+    QVERIFY2(std::abs(pFolder2Masked.red() - 153) <= 3 && std::abs(pFolder2Masked.green() - 153) <= 3 && std::abs(pFolder2Masked.blue() - 153) <= 3, "folder mask hides layer 2");
 
     // 5. Check writer validates legal version:
     // Trying to save this document declaring formatVersion 7 must fail because Folder 1 is dimmed (opacity 0.4 requires v8).
@@ -1769,12 +1759,12 @@ void TestProjectFormat::testHierarchicalNestedFoldersAndClipping()
     QCOMPARE(pYellow.green(), 240);
     QCOMPARE(pYellow.blue(), 0);
 
-    // Pixel (0, 0) is in Folder 1 (Green at 80% opacity over White):
-    // Must be green modulated over white, completely unaffected by Invert inside Nested Folder 1.1!
+    // Pixel (0, 0): green at 80% over white = (51,211,51), then the nested Invert acts on it at 0.8 * 0.5 = 40%
+    // (pass-through, as on macOS): 0.6 * c + 0.4 * (255 - c) = (112,144,112).
     const QColor pGreen = exportImg.pixelColor(0, 0);
-    QVERIFY2(std::abs(pGreen.red() - 51) <= 2, qPrintable(QStringLiteral("Expected ~51, got %1").arg(pGreen.red())));
-    QVERIFY2(std::abs(pGreen.green() - 211) <= 2, qPrintable(QStringLiteral("Expected ~211, got %1").arg(pGreen.green())));
-    QVERIFY2(std::abs(pGreen.blue() - 51) <= 2, qPrintable(QStringLiteral("Expected ~51, got %1").arg(pGreen.blue())));
+    QVERIFY2(std::abs(pGreen.red() - 112) <= 3, qPrintable(QStringLiteral("Expected ~112, got %1").arg(pGreen.red())));
+    QVERIFY2(std::abs(pGreen.green() - 144) <= 3, qPrintable(QStringLiteral("Expected ~211, got %1").arg(pGreen.green())));
+    QVERIFY2(std::abs(pGreen.blue() - 112) <= 3, qPrintable(QStringLiteral("Expected ~112, got %1").arg(pGreen.blue())));
 
     // Pixel (5, 5) is inside Nested Folder 1.1!
     // Base 1.1A is clipped by 1.1B (Red), which is inverted by 1.1C (Invert) to Cyan (0, 240, 240).

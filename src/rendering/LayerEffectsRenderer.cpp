@@ -44,7 +44,31 @@ void gaussianBlurFloats(std::vector<float> &buffer, int width, int height, doubl
 {
     if (sigma <= 0.0 || buffer.empty() || width <= 0 || height <= 0) return;
     sigma = std::clamp(sigma, 0.05, 500.0);
-    constexpr int passes = 3;
+    if (sigma <= 16.0) {
+        // A true Gaussian (edge pixels repeated, as Core Image's clamped blur does): three box passes have no tail, which
+        // lightens a glow's falloff by a few percent against the macOS render.
+        const int radius = std::max(1, int(std::ceil(sigma * 3.0)));
+        std::vector<float> kernel(size_t(radius) * 2 + 1);
+        double total = 0.0;
+        for (int i = -radius; i <= radius; ++i) { const double w = std::exp(-(i * i) / (2.0 * sigma * sigma)); kernel[size_t(i + radius)] = float(w); total += w; }
+        for (float &k : kernel) k = float(k / total);
+        std::vector<float> temp(buffer.size());
+        const auto sweep = [&](const float *src, float *dst, int lines, int count, int lineStep, int elementStep) {
+            for (int l = 0; l < lines; ++l) {
+                const int base = l * lineStep;
+                for (int i = 0; i < count; ++i) {
+                    double sum = 0.0;
+                    for (int k = -radius; k <= radius; ++k) sum += double(kernel[size_t(k + radius)]) * src[base + std::clamp(i + k, 0, count - 1) * elementStep];
+                    dst[base + i * elementStep] = float(sum);
+                }
+            }
+        };
+        sweep(buffer.data(), temp.data(), height, width, width, 1);
+        sweep(temp.data(), buffer.data(), width, height, 1, width);
+        return;
+    }
+    // Large sigmas: more box passes follow a Gaussian's tail closely (six stay within about a level of it).
+    const int passes = 6;
     const double ideal = std::sqrt(12.0 * sigma * sigma / passes + 1.0);
     int lower = int(std::floor(ideal));
     if (!(lower & 1)) --lower;

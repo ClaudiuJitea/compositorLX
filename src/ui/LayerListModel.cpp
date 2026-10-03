@@ -237,6 +237,10 @@ QVariant LayerListModel::data(const QModelIndex &index, int role) const
     if (role == Qt::UserRole + 4) return layer.maskSourceId.has_value();
     if (role == Qt::UserRole + 5) return !collapsed_.contains(layer.id);
     if (role == Qt::UserRole + 6) return maskAlone_ == std::optional<QUuid>(layer.id);
+    if (role == Qt::UserRole + 7) return !layer.mask.isNull() && !layer.maskEnabled;                       // disabled-mask mark
+    if (role == Qt::UserRole + 8) return !layer.mask.isNull() && !layer.group && layer.adjustment.isEmpty(); // link chain shown
+    if (role == Qt::UserRole + 9) return layer.maskLinked;
+    if (role == Qt::UserRole + 20) return layer.text.has_value();                                 // editable-text badge
     return {};
 }
 

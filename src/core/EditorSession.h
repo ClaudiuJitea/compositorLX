@@ -256,6 +256,12 @@ public:
     [[nodiscard]] bool canLinkMask(const QUuid &source, const QUuid &target) const;
     bool linkMask(const QUuid &source, const QUuid &target);
     bool toggleClippingMask(const QUuid &target);
+    [[nodiscard]] bool canToggleClippingMask(const QUuid &id) const;
+    // Layers and folders alike take a mask; one layer must be selected.
+    [[nodiscard]] bool canEditMask() const;
+    // With one layer's mask targeted only the mask is deleted, otherwise every selected layer (mac deleteLayerOrMask).
+    void deleteLayerOrMask();
+    bool cycleBlendMode(bool forward);
     void selectMaskTarget(bool mask);
     [[nodiscard]] bool isMaskSelected() const { return maskSelected_; }
     // Option-click on a mask thumbnail shows that mask alone on the canvas, in grayscale, for painting it with nothing
@@ -304,11 +310,10 @@ public:
     void moveActiveLayer(int offset);
     bool reorderLayers(const QVector<int> &topFirstRows, int destination);
     void duplicateActiveLayer();
-    // A copy of each layer (a folder with all it holds) as one undo step, each just above its original in the same folder;
-    // the copies end up selected (mac SelectionClipboard.swift duplicateLayers). Layers inside a listed folder come with it.
-    bool duplicateLayers(const QVector<QUuid> &ids, const QString &historyName = QStringLiteral("Duplicate Layer"));
-    // The selected layers Copy takes whole, in document order, leaving out any inside a selected folder.
-    [[nodiscard]] QVector<QUuid> copyableLayerIds() const;
+    // Every selected layer (a folder with all it holds) copied as one undo step; the copies end up selected.
+    bool duplicateLayers(const QVector<QUuid> &ids, const QString &editName = QStringLiteral("Duplicate Layer"));
+    // The layers Copy and Duplicate take whole, in document order, leaving out any inside a selected folder.
+    [[nodiscard]] QVector<QUuid> copiedLayerIds() const;
     [[nodiscard]] QSet<QUuid> descendantIds(const QUuid &id) const;
     [[nodiscard]] bool canPlaceLayer(const QUuid &id, const std::optional<QUuid> &parent) const;
     bool placeLayer(const QUuid &id, const std::optional<QUuid> &parent,
@@ -426,6 +431,7 @@ private:
     // side, then trims the empty padding again (mac PixelFilter.trimmed / FilterEdit.growForBlur).
     bool applySpreadingFilter(const QString &historyName, double margin, const std::function<QImage(const QImage &)> &filter);
     [[nodiscard]] int indexOf(const QUuid &id) const;
+    std::optional<QUuid> insertCopyOf(const QUuid &id);
     [[nodiscard]] QString nextName(const QString &base) const;
     [[nodiscard]] QSet<QUuid> selectedTransformLayerIds() const;
     void restore(const DocumentHistory::Snapshot &snapshot);

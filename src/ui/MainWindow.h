@@ -59,6 +59,7 @@ public:
     [[nodiscard]] LayerListModel *layerModel() const { return layerModel_; }
     [[nodiscard]] QListView *layerView() const { return layerView_; }
     [[nodiscard]] CanvasWidget *canvas() const { return canvas_; }
+    [[nodiscard]] QDoubleSpinBox *transformXField() const { return xField_; }
     [[nodiscard]] InlineTextEditor *inlineTextEditor() const;
     [[nodiscard]] CanvasRulerWidget *horizontalRuler() const { return horizontalRuler_; }
     [[nodiscard]] CanvasRulerWidget *verticalRuler() const { return verticalRuler_; }
@@ -71,6 +72,10 @@ public:
     [[nodiscard]] bool isMenuBarVisible() const;
     void updateMenuRestoreButton();
     void syncDocumentViews(bool compositeChanged = true);
+    // The Layers panel's right-click menu for the active layer (mac NativeLayerList.contextMenu), and the row selection a
+    // right-click makes first. Both are used by the panel and by tests.
+    void populateLayerContextMenu(QMenu &menu);
+    void selectRowForContextMenu(const QModelIndex &index);
     void updateRulerVisibility();
 
     [[nodiscard]] ScrubLabel *brushSizeLabel() const { return brushSizeLabel_; }
@@ -207,6 +212,8 @@ private:
     void cutPixels();
     void pastePixels();
     void layerViaCopy();
+    void copyWholeLayers();
+    bool pasteWholeLayers();
     void deleteLayersWithMaskChoice();
     void showAbout();
     void checkForUpdates();
@@ -218,7 +225,7 @@ private:
     void finishPendingCanvasEdits();
     void installTabCloseButton(int index);
     void installInNewTab(EditorSession session, const QString &title);
-    bool copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab);
+    bool copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab, const std::optional<QPointF> &point = std::nullopt);
 
     CanvasWidget *canvas_ = nullptr;
     CanvasRulerCornerWidget *rulerCorner_ = nullptr;
@@ -310,7 +317,6 @@ private:
     int pendingOpacityDigit_ = -1;
     qint64 pendingOpacityAt_ = 0;
     QImage clipboardImage_;
-    QVector<QUuid> copiedLayerIds_;   // Copy with no selection takes the layer itself; Paste brings it back whole (mac SelectionClipboard.swift)
     QPoint clipboardOrigin_;
     QTimer *autosaveTimer_ = nullptr;
     QVector<EditorSession> workspaceTabs_;

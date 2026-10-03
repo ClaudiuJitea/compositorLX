@@ -76,6 +76,7 @@ add_library(compositor_core
     src/core/DocumentHistory.cpp
     src/core/DocumentHistory.h
     src/core/EditorSession.cpp
+    src/core/EditorSessionLayers.cpp
     src/core/EditorSession.h
     src/core/ImageTrim.cpp
     src/core/ImageTrim.h
@@ -177,6 +178,7 @@ add_library(compositor_ui STATIC
     src/ui/LayerListModel.cpp
     src/ui/LayerListModel.h
     src/ui/MainWindow.cpp
+    src/ui/MainWindowLayerMenu.cpp
     src/ui/MainWindow.h
     src/ui/NumericScrub.cpp
     src/ui/NumericScrub.h
