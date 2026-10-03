@@ -125,6 +125,7 @@ static bool customMode(BlendMode mode)
         || mode == BlendMode::LinearLight
         || mode == BlendMode::PinLight
         || mode == BlendMode::HardMix
+        || mode == BlendMode::SoftLight
         || mode == BlendMode::Subtract
         || mode == BlendMode::Divide
         || mode == BlendMode::Hue
@@ -185,6 +186,17 @@ static std::array<double,3> blendColor(std::array<double,3> backdrop, std::array
         case BlendMode::HardMix:
             source[c] = (backdrop[c] + source[c] >= 1.0) ? 1.0 : 0.0;
             break;
+        case BlendMode::SoftLight: {
+            // Photoshop's / the PDF formula. QPainter's SoftLight runs up to ~25 levels lighter with a light source
+            // color, so the same layer would not match a Photoshop or macOS render (mac 5a8f6ce).
+            const double cb = backdrop[c], cs = source[c];
+            if (cs <= 0.5) source[c] = cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb);
+            else {
+                const double d = cb <= 0.25 ? ((16.0 * cb - 12.0) * cb + 4.0) * cb : std::sqrt(cb);
+                source[c] = cb + (2.0 * cs - 1.0) * (d - cb);
+            }
+            break;
+        }
         default:
             break;
         }

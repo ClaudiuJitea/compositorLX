@@ -673,7 +673,7 @@ std::optional<QJsonObject> parseLevelsAdjustment(const QByteArray &data)
         const double inWhite = double(u16FromBytes(data, base + 2));
         const double outBlack = double(u16FromBytes(data, base + 4));
         const double outWhite = double(u16FromBytes(data, base + 6));
-        const double gamma = double(u16FromBytes(data, base + 8)) / 256.0;
+        const double gamma = double(u16FromBytes(data, base + 8)) / 100.0;   // hundredths: 100 is 1.00 (mac 8c0417b)
         settings.ranges[size_t(ch)] = LevelRange{
             std::clamp(inBlack, 0.0, 255.0),
             std::clamp(gamma, 0.01, 9.99),
@@ -726,20 +726,32 @@ std::optional<QJsonObject> parseCurvesAdjustment(const QByteArray &data)
     return RasterOperations::curvesSettingsToJson(settings);
 }
 
+// Photoshop's 'hue2': a version, the Colorize switch and a pad byte, the Colorize hue/saturation/lightness, the
+// Master's, then for Reds through Magentas the band (where the range fades in, is full, and fades out, in degrees)
+// and its hue, saturation and lightness (mac 8c0417b).
 std::optional<QJsonObject> parseHueSaturationAdjustment(const QByteArray &data)
 {
-    if (data.size() < 4) return std::nullopt;
+    if (data.size() < 16) return std::nullopt;
     const bool colorize = (data[2] != 0);
     HueSaturationSettings settings;
     settings.colorize = colorize;
-    int offset = 4;
-    for (size_t r = 0; r < size_t(ColorRange::Count); ++r) {
-        if (offset + 6 > data.size()) break;
-        const qint16 hue = i16FromBytes(data, offset);
-        const qint16 sat = i16FromBytes(data, offset + 2);
-        const qint16 lit = i16FromBytes(data, offset + 4);
-        offset += 6;
-        settings.adjustments[r] = RangeAdjustment{double(hue), double(sat), double(lit)};
+    const auto values = [&](int offset) {
+        return RangeAdjustment{double(i16FromBytes(data, offset)), double(i16FromBytes(data, offset + 2)), double(i16FromBytes(data, offset + 4))};
+    };
+    // Colorize has values of its own; the Master applies otherwise.
+    settings.adjustments[size_t(ColorRange::Master)] = values(colorize ? 4 : 10);
+    if (!colorize) {
+        const auto degrees = [&](int at) {
+            double value = std::fmod(double(i16FromBytes(data, at)), 360.0);
+            return value < 0 ? value + 360.0 : value;
+        };
+        int offset = 16;
+        for (size_t r = size_t(ColorRange::Reds); r < size_t(ColorRange::Count); ++r) {
+            if (offset + 14 > data.size()) break;
+            settings.bands[r] = HueBand{degrees(offset), degrees(offset + 2), degrees(offset + 4), degrees(offset + 6)};
+            settings.adjustments[r] = values(offset + 8);
+            offset += 14;
+        }
     }
     return RasterOperations::hueSaturationSettingsToJson(settings);
 }
@@ -762,6 +774,30 @@ std::optional<QJsonObject> parseAdjustment(const QMap<QString, QByteArray> &extr
 }
 
 } // namespace
+
+std::optional<QJsonObject> PSDReader::levelsAdjustment(const QByteArray &data) { return parseLevelsAdjustment(data); }
+std::optional<QJsonObject> PSDReader::hueSaturationAdjustment(const QByteArray &data) { return parseHueSaturationAdjustment(data); }
+
+// A PSD layer mask on the layer's own pixel grid, as Compositor's masks are: the stored patch drawn where it sits on
+// the document, and Photoshop's default value everywhere else. The patch alone, stretched over the layer, would put
+// the mask in the wrong place. Adjustment layers and folders cover the canvas (mac 8c0417b).
+QImage PSDReader::maskOnLayerGrid(const QImage &patch, const QRectF &maskBounds, quint8 maskDefault,
+                                  const QRectF &layerPlacement, const QSize &layerGrid)
+{
+    if (layerGrid.width() < 1 || layerGrid.height() < 1 || layerPlacement.width() <= 0 || layerPlacement.height() <= 0
+        || maskBounds.width() <= 0 || maskBounds.height() <= 0) return patch;
+    const double sx = layerGrid.width() / layerPlacement.width(), sy = layerGrid.height() / layerPlacement.height();
+    const QRectF rect((maskBounds.x() - layerPlacement.x()) * sx, (maskBounds.y() - layerPlacement.y()) * sy,
+                      maskBounds.width() * sx, maskBounds.height() * sy);
+    if (rect.toAlignedRect() == QRect(QPoint(), layerGrid) && patch.size() == layerGrid) return patch;
+    QImage grid(layerGrid, QImage::Format_Grayscale8);
+    grid.fill(maskDefault);
+    QPainter painter(&grid);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    painter.drawImage(rect, patch.convertToFormat(QImage::Format_Grayscale8));
+    return grid;
+}
 
 bool PSDReader::matches(const QString &path)
 {
@@ -1621,7 +1657,12 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
         }
 
         if (!rawLayer.maskFromRender && !rawLayer.maskImage.isNull()) {
-            layer.mask = rawLayer.maskImage;
+            const bool covers = isGroup || layer.image.isNull();
+            layer.mask = PSDReader::maskOnLayerGrid(
+                rawLayer.maskImage,
+                QRectF(rawLayer.maskLeft, rawLayer.maskTop, double(rawLayer.maskRight) - rawLayer.maskLeft, double(rawLayer.maskBottom) - rawLayer.maskTop),
+                rawLayer.maskDefault, QRectF(layer.transform.origin, layer.transform.size),
+                covers ? QSize(canvasWidth, canvasHeight) : layer.image.size());
             layer.maskEnabled = !rawLayer.maskDisabled;
             layer.maskLinked = rawLayer.maskLinked;
         } else if (rawLayer.hasMask && rawLayer.maskImage.isNull()) {

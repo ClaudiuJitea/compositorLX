@@ -1,7 +1,9 @@
 // Behaviour ported from macOS 1.3.x-1.4.5 (see MAC_BASELINE). Expected values come from the mac tests where one exists.
 #include "core/CameraRaw.h"
 #include "core/Document.h"
+#include "io/PSDReader.h"
 #include "core/EditorSession.h"
+#include "rendering/LayerRenderer.h"
 #include "rendering/RasterOperations.h"
 
 #include <QtTest>
@@ -21,6 +23,14 @@ private slots:
     void curveDeepensColorLikePhotoshop();
     // fe7a83d: HueSaturationTests.positiveSaturationMatchesPhotoshop
     void positiveSaturationMatchesPhotoshop();
+    // 5a8f6ce / 6dc2219 / 8ab32c9: Soft Light matches Photoshop; every mode applies to adjustments and clipping stacks
+    void softLightMatchesPhotoshopFormula();
+    void adjustmentInBlendModeIsNotNormal();
+    void clippingStackBaseKeepsItsBlendMode();
+    // 8c0417b: PSDAdjustmentTests
+    void psdLevelsGammaIsInHundredths();
+    void psdHueSaturationReadsMasterAndEachRange();
+    void psdMaskPatchSitsWhereItIsOnTheCanvas();
     // 133c34a / b3419ab
     void inverseOfEverythingDeselects();
     void maskButtonRevealsOrHidesTheSelection();
@@ -125,6 +135,143 @@ void TestSyncRendering::maskButtonRevealsOrHidesTheSelection()
         QCOMPARE(outside, reveal ? 0 : 255);
         QVERIFY(!session.document()->selection.has_value());   // the selection is used up
     }
+}
+
+static Layer fullLayer(const QString &name, QColor color, int size = 4)
+{
+    Layer layer;
+    layer.id = QUuid::createUuid();
+    layer.name = name;
+    layer.transform.size = QSizeF(size, size);
+    layer.image = QImage(size, size, QImage::Format_RGBA8888_Premultiplied);
+    layer.image.fill(color);
+    return layer;
+}
+static Document blankDocument(int size = 4)
+{
+    Document doc;
+    doc.id = QUuid::createUuid();
+    doc.canvasSize = QSize(size, size);
+    doc.resolution = 72.0;
+    return doc;
+}
+
+void TestSyncRendering::softLightMatchesPhotoshopFormula()
+{
+    Document doc = blankDocument();
+    Layer top = fullLayer(QStringLiteral("Top"), QColor(204, 204, 204));
+    top.blendMode = BlendMode::SoftLight;
+    doc.layers = {fullLayer(QStringLiteral("Bottom"), QColor(153, 153, 153)), top};
+    // cb 0.6, cs 0.8: D = sqrt(0.6); result = 0.6 + 0.6 * (D - 0.6) = 0.7048 -> 180
+    QVERIFY(std::abs(LayerRenderer::flattened(doc).pixelColor(0, 0).red() - 180) <= 1);
+    doc.layers[1].image.fill(QColor(51, 51, 51));   // cs 0.2: 0.6 - 0.6 * 0.6 * 0.4 = 0.456 -> 116
+    QVERIFY(std::abs(LayerRenderer::flattened(doc).pixelColor(0, 0).red() - 116) <= 1);
+    doc.layers[1].image.fill(QColor(204, 204, 204, 0));   // transparent source leaves the backdrop untouched
+    QCOMPARE(LayerRenderer::flattened(doc).pixelColor(0, 0).red(), 153);
+}
+
+void TestSyncRendering::adjustmentInBlendModeIsNotNormal()
+{
+    Document doc = blankDocument();
+    Layer adjustment;
+    adjustment.id = QUuid::createUuid();
+    adjustment.name = QStringLiteral("Invert");
+    adjustment.transform.size = QSizeF(4, 4);
+    adjustment.adjustment = QJsonObject{{QStringLiteral("kind"), QStringLiteral("Invert")}};
+    adjustment.blendMode = BlendMode::LinearDodge;
+    doc.formatVersion = 9;
+    doc.layers = {fullLayer(QStringLiteral("Bottom"), QColor(102, 102, 102)), adjustment};
+    // Inverted 102 -> 153; Linear Dodge adds it to the backdrop: 0.4 + 0.6 = 1. Normal would leave 153.
+    QCOMPARE(LayerRenderer::flattened(doc).pixelColor(0, 0).red(), 255);
+}
+
+void TestSyncRendering::clippingStackBaseKeepsItsBlendMode()
+{
+    Document doc = blankDocument();
+    Layer base = fullLayer(QStringLiteral("Base"), QColor(204, 204, 204));
+    base.blendMode = BlendMode::LinearDodge;
+    Layer child = fullLayer(QStringLiteral("Child"), QColor(0, 0, 0, 0));
+    child.maskSourceId = base.id;
+    doc.layers = {fullLayer(QStringLiteral("Bottom"), QColor(102, 102, 102)), base, child};
+    QCOMPARE(LayerRenderer::flattened(doc).pixelColor(0, 0).red(), 255);   // not Normal's 204
+}
+
+static QByteArray shorts(const QVector<int> &values)
+{
+    QByteArray data;
+    for (const int value : values) { const quint16 bits = quint16(qint16(value)); data.append(char(bits >> 8)); data.append(char(bits & 0xFF)); }
+    return data;
+}
+
+void TestSyncRendering::psdLevelsGammaIsInHundredths()
+{
+    // RGB: input 2-254, gamma 1.00 (stored as 100); red, green and blue untouched; padded to Photoshop's 29 records.
+    QVector<int> values{2, 2, 254, 0, 255, 100};
+    for (int i = 0; i < 3; ++i) values += {0, 255, 0, 255, 100};
+    QByteArray data = shorts(values);
+    data.append(QByteArray(292 - data.size(), '\0'));
+    const auto json = PSDReader::levelsAdjustment(data);
+    QVERIFY(json.has_value());
+    const QJsonArray ranges = json->value(QStringLiteral("levels")).toObject().value(QStringLiteral("ranges")).toArray();
+    QCOMPARE(ranges.size(), 4);
+    const QJsonObject rgb = ranges.at(0).toObject();
+    QCOMPARE(rgb.value(QStringLiteral("black")).toDouble(), 2.0);
+    QCOMPARE(rgb.value(QStringLiteral("white")).toDouble(), 254.0);
+    for (const QJsonValue &range : ranges) QCOMPARE(range.toObject().value(QStringLiteral("gamma")).toDouble(), 1.0);
+}
+
+void TestSyncRendering::psdHueSaturationReadsMasterAndEachRange()
+{
+    // Version 2, Colorize off; Colorize values (ignored), Master +5/+4/0; Reds' band and -30 saturation, +10 light.
+    QByteArray data = shorts({2}) + QByteArray(2, '\0') + shorts({23, 25, 0, 5, 4, 0, 315, 345, 15, 45, 0, -30, 10});
+    data += shorts(QVector<int>(7 * 5, 0));
+    auto hsv = [](const QJsonObject &json) { return json.value(QStringLiteral("hsvSettings")).toObject(); };
+    auto adjustment = [&](const QJsonObject &json, const QString &name) {
+        const QJsonArray a = hsv(json).value(QStringLiteral("adjustments")).toArray();
+        for (int i = 0; i + 1 < a.size(); i += 2) if (a[i].toString() == name) return a[i + 1].toObject();
+        return QJsonObject();
+    };
+    auto json = PSDReader::hueSaturationAdjustment(data);
+    QVERIFY(json.has_value());
+    QVERIFY(!hsv(*json).value(QStringLiteral("colorize")).toBool());
+    QCOMPARE(adjustment(*json, QStringLiteral("Master")).value(QStringLiteral("hue")).toDouble(), 5.0);
+    QCOMPARE(adjustment(*json, QStringLiteral("Master")).value(QStringLiteral("saturation")).toDouble(), 4.0);
+    QCOMPARE(adjustment(*json, QStringLiteral("Reds")).value(QStringLiteral("saturation")).toDouble(), -30.0);
+    QCOMPARE(adjustment(*json, QStringLiteral("Reds")).value(QStringLiteral("lightness")).toDouble(), 10.0);
+    const QJsonArray bands = hsv(*json).value(QStringLiteral("bands")).toArray();
+    const QJsonObject reds = bands.at(3).toObject();   // [name, object] pairs: Master, Reds -> index 3
+    QCOMPARE(reds.value(QStringLiteral("falloffStart")).toDouble(), 315.0);
+    QCOMPARE(reds.value(QStringLiteral("rangeStart")).toDouble(), 345.0);
+    QCOMPARE(reds.value(QStringLiteral("rangeEnd")).toDouble(), 15.0);
+    QCOMPARE(reds.value(QStringLiteral("falloffEnd")).toDouble(), 45.0);
+
+    data[2] = 1;   // Colorize on: its own values apply.
+    json = PSDReader::hueSaturationAdjustment(data);
+    QVERIFY(json && hsv(*json).value(QStringLiteral("colorize")).toBool());
+    QCOMPARE(adjustment(*json, QStringLiteral("Master")).value(QStringLiteral("hue")).toDouble(), 23.0);
+    QCOMPARE(adjustment(*json, QStringLiteral("Master")).value(QStringLiteral("saturation")).toDouble(), 25.0);
+}
+
+void TestSyncRendering::psdMaskPatchSitsWhereItIsOnTheCanvas()
+{
+    // A 2x2 white patch at (3, 1) on a 6x4 canvas, black everywhere else, on a layer that covers the canvas: the patch
+    // must land at (3, 1), not stretch over the whole layer.
+    QImage patch(2, 2, QImage::Format_Grayscale8);
+    patch.fill(255);
+    const QImage mask = PSDReader::maskOnLayerGrid(patch, QRectF(3, 1, 2, 2), 0, QRectF(0, 0, 6, 4), QSize(6, 4));
+    QCOMPARE(mask.size(), QSize(6, 4));
+    QStringList rows;
+    for (int y = 0; y < 4; ++y) { QString row; for (int x = 0; x < 6; ++x) row += qGray(mask.pixel(x, y)) > 127 ? '#' : '.'; rows << row; }
+    QCOMPARE(rows, (QStringList{QStringLiteral("......"), QStringLiteral("...##."), QStringLiteral("...##."), QStringLiteral("......")}));
+    // A patch that already covers the layer's grid is returned as it is.
+    QImage full(6, 4, QImage::Format_Grayscale8);
+    full.fill(77);
+    QCOMPARE(PSDReader::maskOnLayerGrid(full, QRectF(0, 0, 6, 4), 255, QRectF(0, 0, 6, 4), QSize(6, 4)), full);
+    // A scaled-down layer: its grid is larger than its placement, so the patch is scaled into the grid.
+    const QImage scaled = PSDReader::maskOnLayerGrid(patch, QRectF(2, 0, 2, 2), 0, QRectF(0, 0, 4, 2), QSize(8, 4));
+    QCOMPARE(scaled.size(), QSize(8, 4));
+    QCOMPARE(qGray(scaled.pixel(5, 1)), 255);
+    QCOMPARE(qGray(scaled.pixel(1, 1)), 0);
 }
 
 QTEST_MAIN(TestSyncRendering)
