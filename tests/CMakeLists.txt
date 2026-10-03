@@ -54,3 +54,10 @@ target_compile_definitions(sync_rendering_tests PRIVATE
     FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
 add_test(NAME sync_rendering_tests COMMAND sync_rendering_tests -platform offscreen)
+
+add_executable(paint_tools_tests
+    TestPaintTools.cpp
+)
+target_include_directories(paint_tools_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(paint_tools_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME paint_tools_tests COMMAND paint_tools_tests -platform offscreen)

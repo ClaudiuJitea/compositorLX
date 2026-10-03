@@ -1856,9 +1856,12 @@ bool EditorSession::beginHealingStroke(const QPointF &documentPoint, double diam
     return beginBrushStroke(documentPoint, Qt::transparent, diameter, hardness, opacity, false, std::nullopt, mode, seed);
 }
 
-bool EditorSession::beginBlurStroke(const QPointF &documentPoint, double diameter, double hardness, double opacity)
+bool EditorSession::beginBlurStroke(const QPointF &documentPoint, double diameter, double hardness, double opacity, double radius)
 {
-    return beginBrushStroke(documentPoint, Qt::transparent, diameter, hardness, opacity, false, std::nullopt, 3, 0);
+    if (!std::isfinite(radius)) return false;
+    if (!beginBrushStroke(documentPoint, Qt::transparent, diameter, hardness, opacity, false, std::nullopt, 3, 0)) return false;
+    brush_->blurRadius = std::clamp(radius, .5, 50.0);
+    return true;
 }
 
 bool EditorSession::beginWarpStroke(const QPointF &documentPoint, int mode, double diameter, double hardness, double strength)
@@ -1874,11 +1877,11 @@ bool EditorSession::beginWarpStroke(const QPointF &documentPoint, int mode, doub
     if (mode == 1) {
         const double scale = std::max(1e-9, (layer->transform.size.width() / original.width() + layer->transform.size.height() / original.height()) / 2.0);
         const int radius = std::max(1, qCeil(diameter / scale / 2)); const int side = radius * 2 + 1;
-        warp_->carried.fill(0, side * side * 4); const int cx = qRound(pixel->x()), cy = qRound(pixel->y());
+        warp_->carried.fill(0, qint64(side) * side * 4); const int cx = qRound(pixel->x()), cy = qRound(pixel->y());
         for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx) {
             const int x = cx + dx, y = cy + dy; if (!QRect(QPoint(), original.size()).contains(x, y)) continue;
-            const uchar *source = original.constScanLine(y) + x * 4; const int target = ((dy + radius) * side + dx + radius) * 4;
-            for (int c = 0; c < 4; ++c) warp_->carried[target + c] = source[c];
+            const uchar *source = original.constScanLine(y) + x * 4; const qint64 target = (qint64(dy + radius) * side + dx + radius) * 4;
+            for (int c = 0; c < 4; ++c) warp_->carried[target + c] = char(source[c]);
         }
     }
     return true;
@@ -2006,41 +2009,90 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
 {
     if (warp_ && document_) {
         const int index = indexOf(warp_->layerId); if (index < 0) return;
-        Layer &layer = document_->layers[index]; const auto target = documentToPixel(layer, documentPoint, warp_->working.size()); if (!target) return;
-        const double scale = std::max(1e-9, (layer.transform.size.width() / warp_->working.width() + layer.transform.size.height() / warp_->working.height()) / 2.0);
+        Layer &layer = document_->layers[index]; if (layer.image.format() != warp_->original.format() || layer.image.size() != warp_->original.size()) layer.image = warp_->original; QImage &working = layer.image; const auto target = documentToPixel(layer, documentPoint, warp_->original.size()); if (!target) return;
+        const double scale = std::max(1e-9, (layer.transform.size.width() / warp_->original.width() + layer.transform.size.height() / warp_->original.height()) / 2.0);
         const double radiusValue = std::max(1.0, warp_->diameter / scale / 2.0); const int radius = qCeil(radiusValue);
         const double distance = QLineF(warp_->previousPixel, *target).length();
-        const double spacing = std::max(1.0, radiusValue * (warp_->mode == 1 ? .16 : .05));
+        // Smudge dabs come about a canvas pixel apart (a little more on a brush over 200 wide), so the steps run
+        // together into one smear rather than a row of echoes; Liquify's come a twentieth of the radius apart.
+        const double spacing = warp_->mode == 1 ? std::max(1.0, std::max(1.0, warp_->diameter * .005) / scale) : std::max(1.0, radiusValue * .05);
         if (distance < spacing) return;
         const int steps = qCeil(distance / spacing);
         QPointF previous = warp_->previousPixel;
+        constexpr int tileSide = 64, falloffSize = 4096;
+        const QImage &source = warp_->original;
+        const QSize bounds = working.size();
+        // The dab's falloff by squared distance from its centre, looked up rather than worked out per pixel.
+        std::array<float, falloffSize + 1> falloff{};
+        for (int i = 0; i <= falloffSize; ++i) {
+            const double u = std::sqrt(double(i) / falloffSize);
+            if (u >= 1) falloff[i] = 0; else if (u <= warp_->hardness) falloff[i] = 1;
+            else { const double t = (1 - u) / (1 - warp_->hardness); falloff[i] = float(t * t * (3 - 2 * t)); }
+        }
+        const double falloffScale = falloffSize / (radiusValue * radiusValue);
+        const auto span = [&](int dy) { return int(std::sqrt(std::max(0.0, radiusValue * radiusValue - double(dy) * dy))); };
         for (int step = 1; step <= steps; ++step) {
             const QPointF center = warp_->previousPixel + (*target - warp_->previousPixel) * (double(step) / steps);
-            QImage before = warp_->working;
-            const auto weight = [&](double dx, double dy) { const double u = std::hypot(dx, dy) / radiusValue; if (u >= 1) return 0.0; if (u <= warp_->hardness) return 1.0; const double t = (1-u)/(1-warp_->hardness); return t*t*(3-2*t); };
             const int cx = qRound(center.x()), cy = qRound(center.y());
             if (warp_->mode == 1) {
-                const int side = radius * 2 + 1;
-                for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx) {
-                    const int x = cx + dx, y = cy + dy; if (!QRect(QPoint(), before.size()).contains(x, y)) continue;
-                    const double w = weight(dx, dy); if (w <= 0) continue;
-                    uchar *out = warp_->working.scanLine(y) + x*4; const int carried = ((dy+radius)*side+dx+radius)*4;
-                    for (int c=0;c<4;++c) { const double under=out[c], painted=under+(warp_->carried[carried+c]-under)*w; out[c]=uchar(std::clamp(qRound(painted),0,255)); warp_->carried[carried+c]=float(painted+(warp_->carried[carried+c]-painted)*warp_->strength); }
+                // What was under the brush at the last dab, laid down here at the smudge's strength, and carried on
+                // in turn: nothing older, which would stamp a ghost copy of it at every dab.
+                const qint64 side = radius * 2 + 1; const float strength = float(warp_->strength);
+                for (int dy = std::max(-radius, -cy); dy <= radius && cy + dy < bounds.height(); ++dy) {
+                    const int reach = span(dy); uchar *line = working.scanLine(cy + dy);
+                    for (int dx = std::max(-reach, -cx); dx <= reach && cx + dx < bounds.width(); ++dx) {
+                        const float w = falloff[std::min(falloffSize, int((dx * dx + dy * dy) * falloffScale))] * strength; if (w <= 0) continue;
+                        uchar *out = line + (cx + dx) * 4; char *held = warp_->carried.data() + ((dy + radius) * side + dx + radius) * 4;
+                        for (int c = 0; c < 4; ++c) { const float under = out[c], painted = under + (uchar(held[c]) - under) * w; out[c] = uchar(std::clamp(int(painted + .5f), 0, 255)); held[c] = char(out[c]); }
+                    }
                 }
             } else {
+                // Each dab moves the offsets, and the pixels under it are drawn once from the untouched layer, so a
+                // long stroke does not soften them a little with every dab.
                 const QPointF movement = (center - previous) * warp_->strength;
-                for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx) {
-                    const int x = cx + dx, y = cy + dy; if (!QRect(QPoint(), before.size()).contains(x, y)) continue;
-                    const double w = weight(dx, dy); if (w <= 0) continue;
-                    const double sx = std::clamp(x - movement.x()*w, 0.0, double(before.width()-1)), sy = std::clamp(y - movement.y()*w, 0.0, double(before.height()-1));
-                    const int x0=qFloor(sx), y0=qFloor(sy), x1=std::min(x0+1,before.width()-1), y1=std::min(y0+1,before.height()-1); const double fx=sx-x0, fy=sy-y0;
-                    uchar *out=warp_->working.scanLine(y)+x*4; const uchar *a=before.constScanLine(y0)+x0*4,*b=before.constScanLine(y0)+x1*4,*c=before.constScanLine(y1)+x0*4,*d=before.constScanLine(y1)+x1*4;
-                    for(int channel=0;channel<4;++channel) out[channel]=uchar(std::clamp(qRound((a[channel]*(1-fx)+b[channel]*fx)*(1-fy)+(c[channel]*(1-fx)+d[channel]*fx)*fy),0,255));
+                const int margin = qCeil(std::hypot(movement.x(), movement.y())) + 2;
+                const QRect box = QRect(cx - radius, cy - radius, radius * 2 + 1, radius * 2 + 1).intersected(QRect(QPoint(), bounds));
+                if (!box.isEmpty()) {
+                    const QRect area = box.adjusted(-margin, -margin, margin, margin).intersected(QRect(QPoint(), bounds));
+                    const int areaWidth = area.width();
+                    QVector<float> old(qsizetype(areaWidth) * area.height() * 2, 0.0f);
+                    for (int ty = area.top() / tileSide; ty <= area.bottom() / tileSide; ++ty) for (int tx = area.left() / tileSide; tx <= area.right() / tileSide; ++tx) {
+                        const auto tile = warp_->offsets.constFind((qint64(ty) << 32) | tx); if (tile == warp_->offsets.constEnd()) continue;
+                        const QRect part = QRect(tx * tileSide, ty * tileSide, tileSide, tileSide).intersected(area);
+                        for (int y = part.top(); y <= part.bottom(); ++y)
+                            std::copy_n(tile->constData() + ((y - ty * tileSide) * tileSide + part.left() - tx * tileSide) * 2, part.width() * 2,
+                                        old.data() + (qsizetype(y - area.top()) * areaWidth + part.left() - area.left()) * 2);
+                    }
+                    for (int y = box.top(); y <= box.bottom(); ++y) {
+                        const int dy = y - cy, reach = span(dy); float *store = nullptr; int storeTile = -1;
+                        uchar *out = working.scanLine(y);
+                        for (int x = std::max(box.left(), cx - reach); x <= std::min(box.right(), cx + reach); ++x) {
+                            const double w = falloff[std::min(falloffSize, int(((x - cx) * (x - cx) + dy * dy) * falloffScale))]; if (w <= 0) continue;
+                            const double qx = std::clamp(x - movement.x()*w, double(area.left()), double(area.right())), qy = std::clamp(y - movement.y()*w, double(area.top()), double(area.bottom()));
+                            const int ax = qFloor(qx) - area.left(), ay = qFloor(qy) - area.top(), bx = std::min(ax + 1, areaWidth - 1), by = std::min(ay + 1, area.height() - 1); const double fx = qx - qFloor(qx), fy = qy - qFloor(qy);
+                            const float *p00 = old.constData() + (qsizetype(ay) * areaWidth + ax) * 2, *p10 = old.constData() + (qsizetype(ay) * areaWidth + bx) * 2;
+                            const float *p01 = old.constData() + (qsizetype(by) * areaWidth + ax) * 2, *p11 = old.constData() + (qsizetype(by) * areaWidth + bx) * 2;
+                            double offset[2];
+                            for (int k = 0; k < 2; ++k) offset[k] = (p00[k]*(1-fx) + p10[k]*fx)*(1-fy) + (p01[k]*(1-fx) + p11[k]*fx)*fy;
+                            offset[0] -= movement.x()*w; offset[1] -= movement.y()*w;
+                            if (x / tileSide != storeTile) {
+                                storeTile = x / tileSide;
+                                QVector<float> &tile = warp_->offsets[(qint64(y / tileSide) << 32) | storeTile];
+                                if (tile.isEmpty()) tile.fill(0.0f, tileSide * tileSide * 2);
+                                store = tile.data() + (y % tileSide) * tileSide * 2 - storeTile * tileSide * 2;
+                            }
+                            store[x * 2] = float(offset[0]); store[x * 2 + 1] = float(offset[1]);
+                            const double sx = std::clamp(x + offset[0], 0.0, double(bounds.width()-1)), sy = std::clamp(y + offset[1], 0.0, double(bounds.height()-1));
+                            const int x0=qFloor(sx), y0=qFloor(sy), x1=std::min(x0+1,bounds.width()-1), y1=std::min(y0+1,bounds.height()-1); const double gx=sx-x0, gy=sy-y0;
+                            const uchar *a=source.constScanLine(y0)+x0*4,*b=source.constScanLine(y0)+x1*4,*c=source.constScanLine(y1)+x0*4,*d=source.constScanLine(y1)+x1*4;
+                            for(int channel=0;channel<4;++channel) out[x*4+channel]=uchar(std::clamp(qRound((a[channel]*(1-gx)+b[channel]*gx)*(1-gy)+(c[channel]*(1-gx)+d[channel]*gx)*gy),0,255));
+                        }
+                    }
                 }
             }
             stampBrushCoverage(warp_->coverage, center, radiusValue + 2, 1); previous = center;
         }
-        warp_->previousPixel = *target; layer.image = warp_->working; warp_->changed = warp_->working != warp_->original; return;
+        warp_->previousPixel = *target; warp_->changed = true; return;
     }
     if (!brush_ || !document_) return;
     const int index = indexOf(brush_->layerId);
@@ -2117,7 +2169,7 @@ bool EditorSession::endBrushStroke()
         const int index = document_ ? indexOf(warp_->layerId) : -1;
         if (index >= 0) {
             Layer &layer = document_->layers[index]; const QImage selection = selectionCoverageForLayer(layer, warp_->original.size(), document_->selection); QImage result = warp_->original;
-            for (int y=0;y<result.height();++y) { uchar *out=result.scanLine(y); const uchar *changed=warp_->working.constScanLine(y),*coverage=warp_->coverage.constScanLine(y),*clip=selection.constScanLine(y); for(int x=0;x<result.width();++x) {
+            for (int y=0;y<result.height();++y) { uchar *out=result.scanLine(y); const uchar *changed=layer.image.constScanLine(y),*coverage=warp_->coverage.constScanLine(y),*clip=selection.constScanLine(y); for(int x=0;x<result.width();++x) {
                 const int amount=(int(coverage[x])*clip[x]+127)/255, inverse=255-amount; for(int c=0;c<4;++c) out[x*4+c]=uchar((int(out[x*4+c])*inverse+int(changed[x*4+c])*amount+127)/255);
             } }
             layer.image=result; warp_->changed=result!=warp_->original; if (warp_->changed) rasterizeLayer(layer);
@@ -2166,12 +2218,29 @@ bool EditorSession::endBrushStroke()
             const QImage &selection = brush_->selectionCoverage;
             if (!selection.isNull()) for (int y = 0; y < coverage.height(); ++y) { uchar *out = coverage.scanLine(y); const uchar *clip = selection.constScanLine(y); for (int x = 0; x < coverage.width(); ++x) out[x] = uchar((int(out[x]) * clip[x] + 127) / 255); }
             if (brush_->healMode == 3) {
-                const QImage blurred = RasterOperations::gaussianBlur(brush_->original, std::clamp(brush_->diameter / 10.0, 1.0, 30.0));
+                // Only the pieces the brush reached are softened, at the layer's own resolution: the canvas radius
+                // carried into its pixels, within a budget of several canvases (past it the sample is made coarser).
                 QImage result = brush_->original;
-                for (int y = 0; y < result.height(); ++y) { uchar *out = result.scanLine(y); const uchar *base = brush_->original.constScanLine(y), *soft = blurred.constScanLine(y), *mask = coverage.constScanLine(y); for (int x = 0; x < result.width(); ++x) {
-                    const int amount = qRound(mask[x] * brush_->opacity), inverse = 255 - amount;
-                    for (int c = 0; c < 4; ++c) out[x * 4 + c] = uchar((int(base[x * 4 + c]) * inverse + int(soft[x * 4 + c]) * amount + 127) / 255);
-                } }
+                int left = coverage.width(), top = coverage.height(), right = -1, bottom = -1;
+                for (int y = 0; y < coverage.height(); ++y) { const uchar *row = coverage.constScanLine(y); for (int x = 0; x < coverage.width(); ++x) if (row[x]) { left = std::min(left, x); right = std::max(right, x); top = std::min(top, y); bottom = y; } }
+                if (right >= left) {
+                    const double perPixel = std::max(1e-9, (layer.transform.size.width() / brush_->original.width() + layer.transform.size.height() / brush_->original.height()) / 2.0);
+                    const double sigma = std::clamp(brush_->blurRadius, .5, 50.0) / perPixel;
+                    const int margin = qCeil(3 * sigma);
+                    const QRect region = QRect(QPoint(left, top), QPoint(right, bottom)).adjusted(-margin, -margin, margin, margin).intersected(QRect(QPoint(), brush_->original.size()));
+                    const qint64 budget = std::max<qint64>(4 * qint64(document_->canvasSize.width()) * document_->canvasSize.height(), 4000000);
+                    const double shrink = std::max(1.0, std::sqrt(double(qint64(region.width()) * region.height()) / budget));
+                    QImage piece = brush_->original.copy(region), soft;
+                    if (shrink > 1.0) {
+                        const QSize coarse(std::max(1, qRound(region.width() / shrink)), std::max(1, qRound(region.height() / shrink)));
+                        soft = RasterOperations::gaussianBlur(piece.scaled(coarse, Qt::IgnoreAspectRatio, Qt::SmoothTransformation), sigma / shrink)
+                                   .scaled(region.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                    } else soft = RasterOperations::gaussianBlur(piece, sigma);
+                    for (int y = top; y <= bottom; ++y) { uchar *out = result.scanLine(y); const uchar *base = brush_->original.constScanLine(y), *mask = coverage.constScanLine(y), *blurred = soft.constScanLine(y - region.top()); for (int x = left; x <= right; ++x) {
+                        const int amount = qRound(mask[x] * brush_->opacity), inverse = 255 - amount; const uchar *sample = blurred + (x - region.left()) * 4;
+                        for (int c = 0; c < 4; ++c) out[x * 4 + c] = uchar((int(base[x * 4 + c]) * inverse + int(sample[c]) * amount + 127) / 255);
+                    } }
+                }
                 layer.image = result; brush_->changed = result != brush_->original; if (brush_->changed) rasterizeLayer(layer);
             } else {
                 const auto healed = RasterOperations::spotHeal(brush_->original, coverage, brush_->opacity, brush_->healMode, brush_->effectSeed);
