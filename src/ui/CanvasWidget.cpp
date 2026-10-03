@@ -1522,7 +1522,11 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
         }
         selectionCurrent_ = snapSelectionMoveEnd(end, event->modifiers());
         snapGuideX_.reset(); snapGuideY_.reset();
-        const QPoint offset = selectionCurrent_ - selectionAnchor_; if (!offset.isNull()) emit selectionMoveRequested(offset);
+        const QPoint offset = selectionCurrent_ - selectionAnchor_;
+        if (!offset.isNull()) emit selectionMoveRequested(offset);
+        // A click inside the selection without a drag selects afresh from that pixel with the Wand and deselects otherwise (mac).
+        else if (tool_ == Tool::Wand) { if (wandMode_ == WandMode::Object) emit objectSelectionRequested(selectionAnchor_, 0); else emit magicWandRequested(selectionAnchor_, 0); }
+        else emit rectangularSelectionRequested(QRect(), 0);
         update(); event->accept(); return;
     }
     if (selectionDragging_ && event->button() == Qt::LeftButton) {

@@ -3542,7 +3542,9 @@ bool EditorSession::duplicateLayers(const QVector<QUuid> &ids, const QString &hi
         const QSet<QUuid> included = descendantIds(roots[r]) | QSet<QUuid>{roots[r]};
         QVector<Layer> block;
         int end = start;
-        for (int i = start; i < document_->layers.size(); ++i) if (included.contains(document_->layers.at(i).id)) { block << document_->layers.at(i); end = i; }
+        // A folder's record sits above the layers it holds, so its subtree is gathered from the whole stack.
+        end = start;
+        for (int i = 0; i < document_->layers.size(); ++i) if (included.contains(document_->layers.at(i).id)) { block << document_->layers.at(i); end = std::max(end, i); }
         QHash<QUuid, QUuid> mapping;
         for (const Layer &layer : std::as_const(block)) { mapping.insert(layer.id, QUuid::createUuid()); added += qint64(layer.image.width()) * layer.image.height(); }
         if (existing + added > 100000000LL) { added = 0; continue; }

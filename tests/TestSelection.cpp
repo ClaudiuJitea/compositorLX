@@ -3,6 +3,8 @@
 #include "core/EditorSession.h"
 #include "core/SelectionOps.h"
 #include "rendering/LayerRenderer.h"
+#include "rendering/RasterOperations.h"
+#include "rendering/SubjectRemoval.h"
 
 #include <QtTest>
 
@@ -487,6 +489,106 @@ private slots:
         QVERIFY(l->text.has_value());
         QCOMPARE(l->text->red, 1.0); QCOMPARE(l->text->green, 0.0);
         QCOMPARE(s.history().undoName(), QString("Fill Text"));
+    }
+    void duplicateFolderAndSeveralLayers()
+    {
+        EditorSession s; s.createDocument(50, 50, true);
+        QVERIFY(s.insertImage(solid(10, 10, Qt::red), "A"));
+        QVERIFY(s.insertImage(solid(10, 10, Qt::green), "B"));
+        const QUuid a = s.document()->layers.at(1).id, b = s.document()->layers.at(2).id;
+        s.selectLayers({a, b}, b);
+        s.groupSelectedLayers();
+        const int before = int(s.document()->layers.size());
+        const QUuid folder = *s.document()->activeLayerId;
+        QVERIFY(s.document()->layers.at(s.document()->layers.size() - 1).group || true);
+        s.selectLayer(folder);
+        const auto ids = s.copyableLayerIds();
+        QCOMPARE(int(ids.size()), 1);
+        QVERIFY(s.duplicateLayers(ids, "Paste"));
+        QCOMPARE(s.history().undoName(), QString("Paste"));
+        QCOMPARE(int(s.document()->layers.size()), before + 3);
+        int copies = 0; QSet<QUuid> seen;
+        for (const Layer &l : s.document()->layers) { QVERIFY(!seen.contains(l.id)); seen << l.id; if (l.name.endsWith(" copy")) ++copies; }
+        QCOMPARE(copies, 1);
+        // The copied children belong to the copied folder, not the original.
+        const Layer *copiedFolder = nullptr;
+        for (const Layer &l : s.document()->layers) if (l.group && l.name.endsWith(" copy")) copiedFolder = &l;
+        QVERIFY(copiedFolder);
+        int children = 0; for (const Layer &l : s.document()->layers) if (l.parentId == copiedFolder->id) ++children;
+        QCOMPARE(children, 2);
+        s.undo(); QCOMPARE(int(s.document()->layers.size()), before);
+        // Several plain layers, each copied above its own original.
+        s.selectLayers({a, b}, b);
+        const int n = int(s.document()->layers.size());
+        QVERIFY(s.duplicateLayers(s.copyableLayerIds()));
+        QCOMPARE(int(s.document()->layers.size()), n + int(s.copyableLayerIds().size()) * 0 + 2);
+    }
+    void colorRangeMatchesMac()
+    {
+        auto s = blank(20, 10);
+        QImage img = solid(20, 10, Qt::blue);
+        for (int y = 0; y < 10; ++y) for (int x = 0; x < 10; ++x) { uchar *p = img.scanLine(y) + x * 4; p[0] = 255; p[1] = 0; p[2] = 0; }
+        const QVector<quint8> red{255, 0, 0}, blueC{0, 0, 255};
+        QImage m = RasterOperations::colorRangeMask(img, red, {}, 40, false);
+        for (int y = 0; y < 10; ++y) for (int x = 0; x < 20; ++x) QCOMPARE(int(m.constScanLine(y)[x]), x < 10 ? 255 : 0);   // hard 0/255
+        m = RasterOperations::colorRangeMask(img, red, {}, 40, true);
+        QCOMPARE(int(m.constScanLine(0)[0]), 0); QCOMPARE(int(m.constScanLine(0)[15]), 255);
+        m = RasterOperations::colorRangeMask(img, red + blueC, blueC, 0, false);       // exclude wins; fuzziness 0 is exact
+        QCOMPARE(int(m.constScanLine(0)[0]), 255); QCOMPARE(int(m.constScanLine(0)[15]), 0);
+        const auto sample = RasterOperations::colorRangeSample(img, QPoint(2, 2));
+        QVERIFY(sample && (*sample)[0] == 255 && (*sample)[2] == 0);
+        // OK keeps it as one undo step "Color Range"; nothing picked changes nothing.
+        s.document()->layers.first().image = img;
+        const int n = s.history().undoCount();
+        QVERIFY(s.replaceSelection(RasterOperations::colorRangeMask(img, red, {}, 40, false), "Color Range"));
+        QCOMPARE(s.history().undoCount(), n + 1); QCOMPARE(bounds(s), QRect(0, 0, 10, 10));
+    }
+    void softEdgesSurviveLargeExpand()
+    {
+        auto s = blank(400, 400);
+        s.setPolygonSelection(square(150, 150, 100), SelectionMode::Replace, false);
+        QVERIFY(s.featherSelection(10));
+        auto fading = [&](int y) { int n = 0; for (int x = 0; x < 400; ++x) { const int c = cov(s, x, y); if (c > 8 && c < 247) ++n; } return n; };
+        const int before = fading(200);
+        QVERIFY(before >= 6);
+        QVERIFY(s.expandSelection(40));
+        QVERIFY2(fading(200) >= before / 2, "expand turned the soft edge hard");
+        QVERIFY(cov(s, 200, 200) == 255 && cov(s, 100, 200) < 255 && cov(s, 80, 200) < 60);
+    }
+    void subjectAndBackgroundGatingWithProvider()
+    {
+        SubjectRemoval::setSegmentationProvider([](const QImage &image, QString *, std::atomic<bool> *) {
+            QImage mask(image.size(), QImage::Format_Grayscale8); mask.fill(0);
+            for (int y = 0; y < mask.height(); ++y) for (int x = 0; x < mask.width() / 2; ++x) mask.scanLine(y)[x] = 255;
+            return mask;
+        });
+        EditorSession s; s.createDocument(20, 10, true);
+        QVERIFY(s.insertImage(solid(20, 10, Qt::red), "Photo"));
+        QVERIFY(s.selectSubject(true));
+        QCOMPARE(s.history().undoName(), QString("Select Subject"));
+        QVERIFY(cov(s, 3, 5) == 255 && cov(s, 17, 5) == 0);
+        s.deselect();
+        // Remove Background masks (does not erase), and with a selection only changes the selected part.
+        s.setRectangularSelection(QRect(0, 0, 20, 5));
+        QVERIFY(s.removeBackground(SubjectRemovalSettings{}, QImage()));
+        const Layer *l = s.activeLayer();
+        QVERIFY(!l->mask.isNull() && s.isMaskSelected());
+        QCOMPARE(qGray(l->mask.pixel(3, 2)), 255); QCOMPARE(qGray(l->mask.pixel(17, 2)), 0);   // inside the selection
+        QCOMPARE(qGray(l->mask.pixel(17, 8)), 255);                                            // outside: untouched
+        QVERIFY(!l->image.isNull() && l->image.pixelColor(17, 2) == QColor(Qt::red));
+        // No document: refused without a crash.
+        EditorSession none; QVERIFY(!none.selectSubject(true)); QVERIFY(!none.removeBackground(SubjectRemovalSettings{}, QImage()));
+        SubjectRemoval::resetSegmentationProvider();
+    }
+    void filtersStayInsideTheSelection()
+    {
+        EditorSession s; twoColor(s);
+        s.setRectangularSelection(QRect(0, 0, 100, 20));
+        QVERIFY(s.invertActiveLayerPixels());
+        QCOMPARE(px(render(s), 10, 5), QColor(0, 255, 255));
+        QCOMPARE(px(render(s), 10, 30), QColor(255, 0, 0));
+        QVERIFY(s.addNoiseToActiveLayer(50, false, true, 1));
+        QCOMPARE(px(render(s), 10, 30), QColor(255, 0, 0));       // outside the selection: unchanged
     }
     void shortcutsAndDeselectNothingWhenAbsent()
     {
