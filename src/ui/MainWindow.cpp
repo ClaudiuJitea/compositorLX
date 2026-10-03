@@ -5128,6 +5128,19 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
     session_.beginEdit(photoshopOnly ? QStringLiteral("Import Photoshop File") : QStringLiteral("Import Images"));
     for (const QString &path : paths) {
         if (RawImporter::matches(path)) {
+            // The size is checked against what the document already holds before any develop work (mac drainImports).
+            int rawWidth = 0, rawHeight = 0;
+            if (!RawImporter::pixelSize(path, rawWidth, rawHeight)) {
+                failures << tr("%1: The image could not be read. It may be damaged or unavailable.").arg(QFileInfo(path).fileName());
+                continue;
+            }
+            qint64 used = 0;
+            if (document_) for (const Layer &l : document_->layers) used += qint64(l.image.width()) * l.image.height() + qint64(l.mask.width()) * l.mask.height();
+            if (rawWidth > DocumentLimits::maxSide || rawHeight > DocumentLimits::maxSide || qint64(rawWidth) * rawHeight > DocumentLimits::documentPixelBudget() - used) {
+                failures << tr("%1: This import exceeds the current %2-megapixel document budget or %3-pixel side limit.")
+                    .arg(QFileInfo(path).fileName()).arg(DocumentLimits::documentBudgetMegapixels()).arg(DocumentLimits::maxSide);
+                continue;
+            }
             RawDevelopDialog dialog(this, path);
             if (dialog.exec() == QDialog::Accepted) {
                 QImage img = dialog.developedImage();

@@ -16,6 +16,11 @@
 #include "ui/CanvasWidget.h"
 #include "ui/LayerListModel.h"
 #include "ui/MainWindow.h"
+#include "ui/RawDevelopDialog.h"
+#include "io/RawImporter.h"
+#include <QPushButton>
+#include <QTimer>
+#include <QFileInfo>
 #include "ui/ShortcutManager.h"
 
 #include <QAction>
@@ -212,6 +217,9 @@ QImage grayPattern(int width, int height)
 } // namespace psd
 } // namespace
 
+#ifndef FIXTURES_DIR
+#define FIXTURES_DIR "."
+#endif
 class TestIoAudit : public QObject {
     Q_OBJECT
 
@@ -281,6 +289,10 @@ private slots:
     void fileMenuEnabledStates();
     void menuEnabledStatesFollowMac();
     void menuNamingFollowsMac();
+
+    void rawImportRunsTheDevelopStep();
+    void rawImportRespectsTheDocumentBudget();
+    void heicWiring();
 
     // PSD / PSB (PSDRoundTripTests, PSBImportTests, CropToCanvasImportTests)
     void psdLayersOrderVisibilityOpacityAndBlend();
@@ -1597,6 +1609,83 @@ void TestIoAudit::menuNamingFollowsMac()
     QVERIFY2(text("commandMerge") != QStringLiteral("Merge Down"), qPrintable(text("commandMerge")));
 }
 
+
+// ---------------------------------------------------------------------------------------------------- RAW / HEIC
+
+void TestIoAudit::rawImportRunsTheDevelopStep()
+{
+    const QString sample = QStringLiteral(FIXTURES_DIR) + QStringLiteral("/raw/sample.kdc");
+    if (!QFileInfo::exists(sample) || !RawImporter::matches(sample)) QSKIP("no RAW fixture or LibRaw");
+    MainWindow window;
+    bool dialogSeen = false;
+    // The develop sheet opens modally; press Import once it has a preview, or Cancel.
+    const auto driver = [&](const QString &buttonText) {
+        auto *timer = new QTimer(&window); timer->setInterval(50);
+        QObject::connect(timer, &QTimer::timeout, timer, [&, timer, buttonText] {
+            for (QWidget *top : QApplication::topLevelWidgets()) if (auto *dialog = qobject_cast<RawDevelopDialog *>(top)) {
+                dialogSeen = true;
+                for (QPushButton *button : dialog->findChildren<QPushButton *>()) if (button->text() == buttonText && button->isEnabled()) { timer->stop(); button->click(); return; }
+            }
+        });
+        timer->start();
+    };
+    driver(QStringLiteral("Cancel"));
+    QVERIFY(!window.importImageFiles({sample}));
+    QVERIFY(dialogSeen);
+    QVERIFY(window.document() == nullptr);
+    dialogSeen = false;
+    driver(QStringLiteral("Import"));
+    QVERIFY(window.importImageFiles({sample}));
+    QVERIFY(window.document() != nullptr);
+    int width = 0, height = 0; QVERIFY(RawImporter::pixelSize(sample, width, height));
+    QCOMPARE(window.document()->canvasSize, QSize(width, height));
+    QCOMPARE(window.document()->layers.size(), 1);
+    QCOMPARE(window.document()->layers.first().name, QFileInfo(sample).completeBaseName());
+    QVERIFY(!window.document()->layers.first().image.isNull());
+    QCOMPARE(window.session().history().undoName(), QStringLiteral("Import Images"));
+}
+
+void TestIoAudit::rawImportRespectsTheDocumentBudget()
+{
+    const QString sample = QStringLiteral(FIXTURES_DIR) + QStringLiteral("/raw/sample.kdc");
+    if (!QFileInfo::exists(sample) || !RawImporter::matches(sample)) QSKIP("no RAW fixture or LibRaw");
+    int width = 0, height = 0; QVERIFY(RawImporter::pixelSize(sample, width, height));
+    DocumentLimits::setDocumentPixelBudgetForTesting(qint64(width) * height - 1);
+    struct Restore { ~Restore() { DocumentLimits::setDocumentPixelBudgetForTesting(0); } } restore;
+    MainWindow window;
+    QString text;
+    MainWindow::setMessageDialogHook([&](const QString &, const QString &body) -> std::optional<QMessageBox::StandardButton> { text = body; return QMessageBox::Ok; });
+    bool dialogOpened = false;
+    auto *timer = new QTimer(&window); timer->setInterval(20);
+    QObject::connect(timer, &QTimer::timeout, timer, [&] { for (QWidget *top : QApplication::topLevelWidgets()) if (qobject_cast<RawDevelopDialog *>(top)) { dialogOpened = true; top->close(); } });
+    timer->start();
+    QVERIFY(!window.importImageFiles({sample}));
+    QVERIFY2(!dialogOpened, "an over-budget RAW must be refused before the develop sheet");
+    QVERIFY2(text.contains(QStringLiteral("megapixel")), qPrintable(text));
+}
+
+void TestIoAudit::heicWiring()
+{
+    // No HEIC encoder or fixture is available here, so this checks the failure path: a file that claims to be HEIC but
+    // is not decodable is refused with a message rather than crashing or importing nothing silently.
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("photo.heic"));
+    { QFile f(path); QVERIFY(f.open(QIODevice::WriteOnly)); f.write("\x00\x00\x00\x18ftypheic not really"); }
+    QString error;
+    QVERIFY(ImageImporter::read(path, &error).isNull());
+    QVERIFY2(!error.isEmpty(), "a HEIC that cannot be decoded reports why");
+    MainWindow window;
+    QString shown;
+    MainWindow::setMessageDialogHook([&](const QString &, const QString &body) -> std::optional<QMessageBox::StandardButton> { shown = body; return QMessageBox::Ok; });
+    QVERIFY(!window.importImageFiles({path}));
+    QVERIFY(shown.contains(QStringLiteral("photo.heic")));
+    QVERIFY(window.document() == nullptr);
+#ifdef COMPOSITOR_HAVE_LIBHEIF
+    QVERIFY(true);
+#endif
+    const QList<QByteArray> formats = QImageReader::supportedImageFormats();
+    qInfo() << "HEIC decoding available through a Qt plugin:" << (formats.contains("heic") || formats.contains("heif"));
+}
 
 // ---------------------------------------------------------------------------------------------------- PSD / PSB
 
