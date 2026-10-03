@@ -5,7 +5,10 @@
 #include "ui/MainWindow.h"
 
 #include <QApplication>
+#include <QAction>
+#include <QDialog>
 #include <QDir>
+#include <QTimer>
 #include <QAbstractItemView>
 #include <QPainter>
 #include <QTest>
@@ -82,5 +85,22 @@ int main(int argc, char **argv)
     window.syncDocumentViews();
     if (0 < buttons.size()) buttons.at(0)->click();
     grab(QStringLiteral("layers-effects-text"));
+    // Dialogs: open each through its menu action, grab it while it runs, close it.
+    for (const Layer &layer : s.document()->layers) if (layer.name == QLatin1String("Sky")) { s.selectLayer(layer.id); s.selectMaskTarget(false); break; }
+    s.deselect();
+    window.syncDocumentViews();
+    const char *dialogs[] = {"commandGridSettings", "commandColorRange", "cmdDither", "cmdLevels", "cmdHueSaturation", "cmdGaussianBlur", "cmdCameraRaw", "cmdBlackWhite"};
+    for (const char *name : dialogs) {
+        QAction *action = window.findChild<QAction *>(QLatin1String(name));
+        if (!action) { qWarning() << "no action" << name; continue; }
+        QTimer::singleShot(1200, [&, name] {
+            QWidget *dialog = nullptr;
+            for (QWidget *top : QApplication::topLevelWidgets()) if (top->isVisible() && top != &window && qobject_cast<QDialog *>(top)) dialog = top;
+            if (dialog) { QTest::qWait(300);
+            else qWarning() << "no dialog for" << name;
+        });
+        action->trigger();
+        QApplication::processEvents();
+    }
     return 0;
 }

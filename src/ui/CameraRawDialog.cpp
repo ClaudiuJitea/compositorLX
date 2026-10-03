@@ -21,6 +21,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QComboBox>
+#include <QListWidget>
 #include <QMouseEvent>
 #include <algorithm>
 #include <cmath>
@@ -150,7 +151,7 @@ CameraRawDialog::CameraRawDialog(QWidget *parent, EditorSession &session, const 
     : QDialog(parent), session_(session), layerId_(layerId), onPreview_(std::move(onPreview))
 {
     setWindowTitle(tr("Camera Raw Filter"));
-    resize(480, 680);
+    resize(620, 700);
 
     if (auto doc = session_.document()) {
         for (const Layer &layer : doc->layers) {
@@ -245,7 +246,24 @@ void CameraRawDialog::setupUi()
         tabWidget_->addTab(page, tabs[i].first);
     }
 
-    mainLayout->addWidget(tabWidget_, 1);
+    // Ten sections do not fit a tab strip (Optics, Geometry and Calibration hid behind scroll arrows): a list on the left,
+    // the tab widget's own strip hidden. The list and the pages stay in step both ways.
+    tabWidget_->setObjectName(QStringLiteral("cameraRawTabs"));
+    tabWidget_->tabBar()->hide();
+    auto *sections = new QListWidget(this);
+    sections->setObjectName(QStringLiteral("cameraRawSections"));
+    sections->setFixedWidth(104);
+    sections->setFrameShape(QFrame::NoFrame);
+    sections->setFocusPolicy(Qt::NoFocus);
+    for (int i = 0; i < tabWidget_->count(); ++i) sections->addItem(tabWidget_->tabText(i));
+    connect(sections, &QListWidget::currentRowChanged, tabWidget_, [this](int row) { if (row >= 0) tabWidget_->setCurrentIndex(row); });
+    connect(tabWidget_, &QTabWidget::currentChanged, sections, [sections](int index) { const QSignalBlocker block(sections); sections->setCurrentRow(index); });
+    sections->setCurrentRow(tabWidget_->currentIndex());
+    auto *body = new QHBoxLayout();
+    body->setSpacing(8);
+    body->addWidget(sections);
+    body->addWidget(tabWidget_, 1);
+    mainLayout->addLayout(body, 1);
 
     auto *bottomLayout = new QHBoxLayout();
     previewBox_ = new QCheckBox(tr("Preview"), this);

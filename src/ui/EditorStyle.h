@@ -186,15 +186,22 @@ inline QString editorStyleSheet()
         }
         QPushButton[primary="true"]:enabled { background: #236fcb; border-color: #2d7ddd; }
         QWidget#transformBar QCheckBox { spacing: 5px; color: #dedee1; }
-        QWidget#transformBar QCheckBox::indicator { width: 13px; height: 13px; }
+        QWidget#transformBar QCheckBox::indicator { width: 14px; height: 14px; }
         QToolButton#transformRatioLock { padding: 0; border-radius: 6px; }
         QToolButton#transformRatioLock:checked { background: #244b72; border-color: #3978b4; }
         QToolButton#transformRatioLock:checked:hover { background: #2b5883; }
         QLabel#sectionTitle { font-weight: 600; color: #eeeeef; }
         QLabel#mutedLabel { color: #787a7e; }
+        QTabWidget#cameraRawTabs::pane { border: 0; background: transparent; }
+        QListWidget#cameraRawSections { background: #1f1f22; border: 1px solid #343438; border-radius: 8px; padding: 4px; outline: 0; }
+        QListWidget#cameraRawSections::item { color: #b9bbc1; padding: 7px 10px; border-radius: 5px; }
+        QListWidget#cameraRawSections::item:hover { background: #2a2a2e; color: #e6e7ea; }
+        QListWidget#cameraRawSections::item:selected { background: #2b4a70; color: #ffffff; }
         QCheckBox { spacing: 6px; }
         QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #62656a; border-radius: 3px; background: #303033; }
-        QCheckBox::indicator:checked { background: #1678e8; border-color: #2288f3; image: none; }
+        QCheckBox::indicator:checked { background: #1678e8; border-color: #2288f3; image: url(:/icons/check.svg); }
+        QCheckBox::indicator:checked:disabled { background: #3a4f68; border-color: #3f536b; }
+        QCheckBox::indicator:hover:!checked { border-color: #8a8d93; }
         QPushButton, QToolButton, QComboBox, QDoubleSpinBox, QSpinBox { background: #333335; border: 1px solid #464649; border-radius: 6px; min-height: 27px; color: #ebebed; }
         QPushButton { padding: 0 11px; }
         QPushButton:hover, QToolButton:hover, QComboBox:hover { background: #3d3d40; }
