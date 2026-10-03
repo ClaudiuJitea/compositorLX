@@ -1146,38 +1146,77 @@ bool EditorSession::addShape(const QRectF &rect, const QColor &fill, const QColo
     return addShape(ellipse ? ShapeKind::Ellipse : ShapeKind::Rectangle, rect, fill, stroke, strokeWidth, cornerRadius);
 }
 
+namespace {
+int textAlignmentIndex(TextAlignment alignment) { return alignment == TextAlignment::Center ? 1 : alignment == TextAlignment::Right ? 2 : 0; }
+
+QFont textBaseFont(const TextStyle &style, int pixelSize, bool bold, bool italic, bool underline)
+{
+    QFont font(style.fontName); font.setPixelSize(pixelSize); font.setBold(bold); font.setItalic(italic); font.setUnderline(underline);
+    return font;
+}
+
+QJsonObject textShapeMetadata(const TextStyle &style, int pixelSize, bool bold, bool italic, bool underline, bool areaText, const QSize &size)
+{
+    return {{QStringLiteral("kind"), QStringLiteral("Text")}, {QStringLiteral("text"), style.content},
+        {QStringLiteral("fontFamily"), style.fontName}, {QStringLiteral("pixelSize"), pixelSize},
+        {QStringLiteral("bold"), bold}, {QStringLiteral("italic"), italic}, {QStringLiteral("underline"), underline},
+        {QStringLiteral("alignment"), textAlignmentIndex(style.alignment)}, {QStringLiteral("areaText"), areaText},
+        {QStringLiteral("fill"), QColor::fromRgbF(style.red, style.green, style.blue).name(QColor::HexArgb)},
+        {QStringLiteral("baseWidth"), size.width()}, {QStringLiteral("baseHeight"), size.height()}};
+}
+
+// Runs that do not fit the content are dropped rather than rendered or saved out of place.
+void sanitizeTextRuns(TextStyle &style)
+{
+    if (!style.colorRunsAreValid()) style.colorRuns.reset();
+    if (!style.fontRunsAreValid()) style.fontRuns.reset();
+}
+
+TextStyle flatTextStyle(const QString &text, const QString &fontFamily, int pixelSize, int alignment, const QColor &color,
+                        double tracking, double leading)
+{
+    TextStyle ts;
+    ts.content = text;
+    ts.fontName = fontFamily;
+    ts.fontSize = double(pixelSize);
+    ts.red = color.redF();
+    ts.green = color.greenF();
+    ts.blue = color.blueF();
+    ts.alignment = (alignment == 1 ? TextAlignment::Center : alignment == 2 ? TextAlignment::Right : TextAlignment::Left);
+    ts.tracking = tracking;
+    ts.leading = leading;
+    return ts;
+}
+} // namespace
+
 bool EditorSession::addText(const QString &text, const QRectF &input, const QString &fontFamily,
                             int pixelSize, bool bold, bool italic, bool underline, int alignment, const QColor &color, bool areaText,
                             double tracking, double leading)
 {
-    const QRectF box = input.normalized();
-    if (!document_ || text.trimmed().isEmpty() || !std::isfinite(box.x()) || !std::isfinite(box.y())
-        || pixelSize < 4 || pixelSize > 1000 || !color.isValid()) return false;
-    QFont font(fontFamily); font.setPixelSize(pixelSize); font.setBold(bold); font.setItalic(italic); font.setUnderline(underline);
-    if (tracking != 0.0) font.setLetterSpacing(QFont::AbsoluteSpacing, tracking);
-    const QImage image = renderText(text, QSize(qCeil(box.width()), qCeil(box.height())), font, color, alignment, areaText, tracking, leading);
+    if (!color.isValid()) return false;
+    return addText(flatTextStyle(text, QFont(fontFamily).family(), pixelSize, alignment, color, tracking, leading), input, bold, italic, underline, areaText);
+}
+
+bool EditorSession::addText(const TextStyle &input, const QRectF &boxInput, bool bold, bool italic, bool underline, bool areaText)
+{
+    TextStyle ts = input;
+    sanitizeTextRuns(ts);
+    const int pixelSize = qRound(ts.fontSize);
+    const QRectF box = boxInput.normalized();
+    if (!document_ || ts.content.trimmed().isEmpty() || !std::isfinite(box.x()) || !std::isfinite(box.y())
+        || pixelSize < 4 || pixelSize > 1000) return false;
+    const QImage image = renderText(ts, QSize(qCeil(box.width()), qCeil(box.height())), textBaseFont(ts, pixelSize, bold, italic, underline),
+                                    textAlignmentIndex(ts.alignment), areaText);
     if (image.isNull()) return false;
     const QSize size = image.size();
     beginEdit(QStringLiteral("Text"));
     if (!insertPixelLayer(image, box.topLeft(), nextName(QStringLiteral("Text")), QStringLiteral("Text"), false)) { endEdit(); return false; }
     if (Layer *layer = activeLayer()) {
-        layer->shape = {{QStringLiteral("kind"), QStringLiteral("Text")}, {QStringLiteral("text"), text},
-            {QStringLiteral("fontFamily"), font.family()}, {QStringLiteral("pixelSize"), pixelSize},
-            {QStringLiteral("bold"), bold}, {QStringLiteral("italic"), italic}, {QStringLiteral("underline"), underline},
-            {QStringLiteral("alignment"), alignment}, {QStringLiteral("areaText"), areaText}, {QStringLiteral("fill"), color.name(QColor::HexArgb)},
-            {QStringLiteral("baseWidth"), size.width()}, {QStringLiteral("baseHeight"), size.height()}};
-        TextStyle ts;
-        ts.content = text;
-        ts.fontName = font.family();
+        layer->shape = textShapeMetadata(ts, pixelSize, bold, italic, underline, areaText, size);
         ts.fontSize = double(pixelSize);
-        ts.red = color.redF();
-        ts.green = color.greenF();
-        ts.blue = color.blueF();
-        ts.alignment = (alignment == 1 ? TextAlignment::Center : alignment == 2 ? TextAlignment::Right : TextAlignment::Left);
-        ts.tracking = tracking;
-        ts.leading = leading;
-        if (areaText) ts.boxSize = QSizeF(size.width(), size.height());
+        if (areaText) ts.boxSize = QSizeF(size.width(), size.height()); else ts.boxSize.reset();
         layer->text = ts;
+        if (ts.requiredFormatVersion() > 1) document_->formatVersion = std::max(document_->formatVersion, ts.requiredFormatVersion());
     }
     endEdit();
     return true;
@@ -1187,39 +1226,61 @@ bool EditorSession::updateText(const QUuid &id, const QString &text, const QRect
                                int pixelSize, bool bold, bool italic, bool underline, int alignment, const QColor &color, bool areaText,
                                double tracking, double leading)
 {
+    if (!document_ || !color.isValid()) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    TextStyle ts = flatTextStyle(text, QFont(fontFamily).family(), pixelSize, alignment, color, tracking, leading);
+    // The flat arguments describe one color and one face. Keep the layer's per-letter runs through the edit unless
+    // those arguments changed the base color or face, which restyles the whole text.
+    if (const std::optional<TextStyle> &old = document_->layers[index].text; old && (old->colorRuns || old->fontRuns)) {
+        TextStyle kept = *old;
+        int prefix = 0;
+        const int limit = std::min<int>(old->content.size(), text.size());
+        while (prefix < limit && old->content.at(prefix) == text.at(prefix)) ++prefix;
+        int suffix = 0;
+        while (suffix < limit - prefix && old->content.at(old->content.size() - 1 - suffix) == text.at(text.size() - 1 - suffix)) ++suffix;
+        kept.replaceCharacters(prefix, int(old->content.size()) - prefix - suffix, int(text.size()) - prefix - suffix);
+        kept.content = text;
+        const QColor oldColor = QColor::fromRgbF(old->red, old->green, old->blue);
+        if (oldColor != color) kept.setColor({color.redF(), color.greenF(), color.blueF()}, 0, 0);
+        if (old->fontName != ts.fontName) kept.setFont(ts.fontName, 0, 0);
+        kept.fontSize = ts.fontSize; kept.alignment = ts.alignment; kept.tracking = tracking; kept.leading = leading;
+        ts = kept;
+    }
+    return updateText(id, ts, input, bold, italic, underline, areaText);
+}
+
+bool EditorSession::updateText(const QUuid &id, const TextStyle &input, const QRectF &boxInput, bool bold, bool italic, bool underline, bool areaText)
+{
     if (!document_) return false;
     const int index = indexOf(id);
     if (index < 0) return false;
-    Layer &layer = document_->layers[index];
-    if (layer.shape.value(QStringLiteral("kind")).toString() != QStringLiteral("Text") && !layer.text.has_value()) return false;
-    const QRectF box = input.normalized();
-    if (text.trimmed().isEmpty() || box.width() < 1 || box.height() < 1 || pixelSize < 4 || pixelSize > 1000 || !color.isValid()) return false;
-    QFont font(fontFamily); font.setPixelSize(pixelSize); font.setBold(bold); font.setItalic(italic); font.setUnderline(underline);
-    if (tracking != 0.0) font.setLetterSpacing(QFont::AbsoluteSpacing, tracking);
-    const QImage image = renderText(text, QSize(qCeil(box.width()), qCeil(box.height())), font, color, alignment, areaText, tracking, leading);
+    {
+        const Layer &existing = document_->layers.at(index);
+        if (existing.shape.value(QStringLiteral("kind")).toString() != QStringLiteral("Text") && !existing.text.has_value()) return false;
+    }
+    TextStyle ts = input;
+    sanitizeTextRuns(ts);
+    const int pixelSize = qRound(ts.fontSize);
+    const QRectF box = boxInput.normalized();
+    if (ts.content.trimmed().isEmpty() || box.width() < 1 || box.height() < 1 || pixelSize < 4 || pixelSize > 1000) return false;
+    const QImage image = renderText(ts, QSize(qCeil(box.width()), qCeil(box.height())), textBaseFont(ts, pixelSize, bold, italic, underline),
+                                    textAlignmentIndex(ts.alignment), areaText);
     if (image.isNull()) return false;
     const QSize size = image.size();
     beginEdit(QStringLiteral("Edit Text"));
+    // Taken after beginEdit: a reference from before it would write into the buffer the history snapshot shares.
+    Layer &layer = document_->layers[index];
     if (!layer.mask.isNull() && !layer.maskPlacement) layer.maskPlacement = layer.transform;
     layer.image = image;
     layer.transform.origin = box.topLeft();
     layer.transform.size = size;
-    layer.shape = {{QStringLiteral("kind"), QStringLiteral("Text")}, {QStringLiteral("text"), text}, {QStringLiteral("fontFamily"), font.family()},
-        {QStringLiteral("pixelSize"), pixelSize}, {QStringLiteral("bold"), bold}, {QStringLiteral("italic"), italic}, {QStringLiteral("underline"), underline},
-        {QStringLiteral("alignment"), alignment}, {QStringLiteral("areaText"), areaText}, {QStringLiteral("fill"), color.name(QColor::HexArgb)},
-        {QStringLiteral("baseWidth"), size.width()}, {QStringLiteral("baseHeight"), size.height()}};
-    TextStyle ts;
-    ts.content = text;
-    ts.fontName = font.family();
+    layer.shape = textShapeMetadata(ts, pixelSize, bold, italic, underline, areaText, size);
     ts.fontSize = double(pixelSize);
-    ts.red = color.redF();
-    ts.green = color.greenF();
-    ts.blue = color.blueF();
-    ts.alignment = (alignment == 1 ? TextAlignment::Center : alignment == 2 ? TextAlignment::Right : TextAlignment::Left);
-    ts.tracking = tracking;
-    ts.leading = leading;
-    if (areaText) ts.boxSize = QSizeF(size.width(), size.height());
+    if (areaText) ts.boxSize = QSizeF(size.width(), size.height()); else ts.boxSize.reset();
     layer.text = ts;
+    // Per-letter colors and faces need a project format that can carry them; undo restores the older version.
+    if (ts.requiredFormatVersion() > 1) document_->formatVersion = std::max(document_->formatVersion, ts.requiredFormatVersion());
     endEdit();
     return true;
 }
@@ -1248,35 +1309,34 @@ void EditorSession::redrawSelectedShapes()
         painter.setRenderHint(QPainter::Antialiasing);
 
         if (isText) {
-            QString content;
-            QString fontName;
+            TextStyle style;
+            style.content.clear();
+            style.red = style.green = style.blue = 0.0;
             int pixelSize = 48;
             bool bold = false, italic = false, underline = false;
             int alignment = 0;
             bool areaText = false;
-            QColor textColor(Qt::black);
 
             if (layer.text) {
-                content = layer.text->content;
-                fontName = layer.text->fontName;
+                style = *layer.text;
                 pixelSize = qRound(layer.text->fontSize);
-                alignment = (layer.text->alignment == TextAlignment::Center ? 1 : layer.text->alignment == TextAlignment::Right ? 2 : 0);
-                textColor = QColor::fromRgbF(layer.text->red, layer.text->green, layer.text->blue);
+                alignment = textAlignmentIndex(layer.text->alignment);
                 areaText = layer.text->boxSize.has_value();
             } else {
-                content = layer.shape.value(QStringLiteral("text")).toString();
-                fontName = layer.shape.value(QStringLiteral("fontFamily")).toString();
+                style.content = layer.shape.value(QStringLiteral("text")).toString();
+                style.fontName = layer.shape.value(QStringLiteral("fontFamily")).toString();
                 pixelSize = layer.shape.value(QStringLiteral("pixelSize")).toInt(48);
-                bold = layer.shape.value(QStringLiteral("bold")).toBool();
-                italic = layer.shape.value(QStringLiteral("italic")).toBool();
-                underline = layer.shape.value(QStringLiteral("underline")).toBool();
                 alignment = layer.shape.value(QStringLiteral("alignment")).toInt();
                 areaText = layer.shape.value(QStringLiteral("areaText")).toBool();
-                textColor = QColor(layer.shape.value(QStringLiteral("fill")).toString());
+                QColor textColor(layer.shape.value(QStringLiteral("fill")).toString());
                 if (!textColor.isValid()) textColor = Qt::black;
+                style.red = textColor.redF(); style.green = textColor.greenF(); style.blue = textColor.blueF();
             }
+            bold = layer.shape.value(QStringLiteral("bold")).toBool();
+            italic = layer.shape.value(QStringLiteral("italic")).toBool();
+            underline = layer.shape.value(QStringLiteral("underline")).toBool();
 
-            QFont font(fontName);
+            QFont font(style.fontName);
             font.setBold(bold); font.setItalic(italic); font.setUnderline(underline);
 
             if (areaText) {
@@ -1294,10 +1354,7 @@ void EditorSession::redrawSelectedShapes()
                 font.setPixelSize(scaledSize);
             }
 
-            const double tracking = layer.text ? layer.text->tracking : 0.0;
-            const double leading = layer.text ? layer.text->leading : 0.0;
-            if (tracking != 0.0) font.setLetterSpacing(QFont::AbsoluteSpacing, tracking);
-            painter.drawImage(QPoint(), renderText(content, QSize(width, height), font, textColor, alignment, areaText, tracking, leading));
+            painter.drawImage(QPoint(), renderText(style, QSize(width, height), font, alignment, areaText));
         } else if (kindStr == QStringLiteral("Line") || (layer.shapeStyle && layer.shapeStyle->kind == ShapeKind::Line)) {
             double thickness = 2.0;
             QPointF startUnit(0.0, 0.0);
