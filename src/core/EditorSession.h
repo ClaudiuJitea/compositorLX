@@ -283,6 +283,11 @@ public:
     void moveActiveLayer(int offset);
     bool reorderLayers(const QVector<int> &topFirstRows, int destination);
     void duplicateActiveLayer();
+    // A copy of each layer (a folder with all it holds) as one undo step, each just above its original in the same folder;
+    // the copies end up selected (mac SelectionClipboard.swift duplicateLayers). Layers inside a listed folder come with it.
+    bool duplicateLayers(const QVector<QUuid> &ids, const QString &historyName = QStringLiteral("Duplicate Layer"));
+    // The selected layers Copy takes whole, in document order, leaving out any inside a selected folder.
+    [[nodiscard]] QVector<QUuid> copyableLayerIds() const;
     [[nodiscard]] QSet<QUuid> descendantIds(const QUuid &id) const;
     [[nodiscard]] bool canPlaceLayer(const QUuid &id, const std::optional<QUuid> &parent) const;
     bool placeLayer(const QUuid &id, const std::optional<QUuid> &parent,

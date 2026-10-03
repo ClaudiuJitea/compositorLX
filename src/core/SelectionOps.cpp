@@ -1,4 +1,5 @@
 #include "core/SelectionOps.h"
+#include "rendering/RasterOperations.h"
 
 #include <algorithm>
 #include <cmath>
@@ -169,6 +170,25 @@ std::vector<float> distanceToFeature(const QImage &featureMask, bool ringIsFeatu
 constexpr int exactRadiusLimit = 24;
 
 // Larger radii: distance transform of the half-selected level set, with a one-pixel anti-aliased rim.
+// How soft the edge of a mask is, as the Feather amount that would give it: the fading pixels per boundary pixel,
+// spread over the roughly four standard deviations a Gaussian edge takes. 0 for a hard or merely anti-aliased edge.
+double edgeSoftness(const QImage &input)
+{
+    long fading = 0, boundary = 0;
+    for (int y = 0; y < input.height(); ++y) {
+        const uchar *row = input.constScanLine(y);
+        for (int x = 0; x < input.width(); ++x) {
+            if (row[x] > 8 && row[x] < 247) ++fading;
+            const bool on = row[x] >= 128;
+            if (on && (x == 0 || row[x - 1] < 128 || (y > 0 && input.constScanLine(y - 1)[x] < 128))) ++boundary;
+        }
+    }
+    const double width = boundary ? double(fading) / double(boundary) : 0;
+    return width > 2.5 ? width / 2.0 : 0;
+}
+
+// Larger radii: distance transform of the half-selected level set, with a one-pixel anti-aliased rim; a soft edge is
+// given back to the grown shape (mac keeps the outline's feather through Expand and Contract).
 QImage largeDilate(const QImage &input, int radius, bool outsideSelected)
 {
     QImage features(input.size(), QImage::Format_Grayscale8);
@@ -176,6 +196,7 @@ QImage largeDilate(const QImage &input, int radius, bool outsideSelected)
         const uchar *in = input.constScanLine(y); uchar *out = features.scanLine(y);
         for (int x = 0; x < input.width(); ++x) out[x] = in[x] >= 128 ? 255 : 0;
     }
+    const double softness = edgeSoftness(input);
     const std::vector<float> distance = distanceToFeature(features, outsideSelected);
     QImage result = input;
     result.detach();
@@ -183,10 +204,11 @@ QImage largeDilate(const QImage &input, int radius, bool outsideSelected)
         uchar *out = result.scanLine(y);
         for (int x = 0; x < input.width(); ++x) {
             const float reach = std::clamp(float(radius) + 1.0f - distance[size_t(y) * input.width() + x], 0.0f, 1.0f);
-            out[x] = std::max(out[x], uchar(std::lround(reach * 255.0f)));
+            const uchar grown = uchar(std::lround(reach * 255.0f));
+            out[x] = softness > 0 ? (input.constScanLine(y)[x] >= 128 ? uchar(255) : grown) : std::max(out[x], grown);
         }
     }
-    return result;
+    return softness > 0 ? RasterOperations::featherMask(result, softness) : result;
 }
 
 } // namespace

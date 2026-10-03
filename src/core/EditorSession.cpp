@@ -3512,6 +3512,56 @@ bool EditorSession::reorderLayers(const QVector<int> &topFirstRows, int destinat
     return true;
 }
 
+QVector<QUuid> EditorSession::copyableLayerIds() const
+{
+    if (!document_) return {};
+    QSet<QUuid> selected = selectedLayerIds_;
+    if (document_->activeLayerId) selected.insert(*document_->activeLayerId);
+    QSet<QUuid> nested;
+    for (const QUuid &id : std::as_const(selected)) nested |= descendantIds(id);
+    QVector<QUuid> ids;
+    for (const Layer &layer : document_->layers) if (selected.contains(layer.id) && !nested.contains(layer.id)) ids << layer.id;
+    return ids;
+}
+
+bool EditorSession::duplicateLayers(const QVector<QUuid> &ids, const QString &historyName)
+{
+    if (!document_ || ids.isEmpty()) return false;
+    // Roots in document order; each copy block goes right after its original's subtree. Later blocks first keeps indices valid.
+    QVector<QUuid> roots;
+    for (const Layer &layer : document_->layers) if (ids.contains(layer.id)) roots << layer.id;
+    if (roots.isEmpty()) return false;
+    qint64 added = 0, existing = 0;
+    for (const Layer &layer : std::as_const(document_->layers)) existing += qint64(layer.image.width()) * layer.image.height();
+    beginEdit(historyName);
+    QVector<QUuid> copies;
+    std::optional<QUuid> activeCopy;
+    const std::optional<QUuid> active = document_->activeLayerId;
+    for (int r = roots.size() - 1; r >= 0; --r) {
+        const int start = indexOf(roots[r]);
+        const QSet<QUuid> included = descendantIds(roots[r]) | QSet<QUuid>{roots[r]};
+        QVector<Layer> block;
+        int end = start;
+        for (int i = start; i < document_->layers.size(); ++i) if (included.contains(document_->layers.at(i).id)) { block << document_->layers.at(i); end = i; }
+        QHash<QUuid, QUuid> mapping;
+        for (const Layer &layer : std::as_const(block)) { mapping.insert(layer.id, QUuid::createUuid()); added += qint64(layer.image.width()) * layer.image.height(); }
+        if (existing + added > 100000000LL) { added = 0; continue; }
+        for (Layer &layer : block) {
+            const QUuid old = layer.id; layer.id = mapping.value(old);
+            if (old == roots[r]) layer.name += QStringLiteral(" copy");
+            if (layer.parentId && mapping.contains(*layer.parentId)) layer.parentId = mapping.value(*layer.parentId);
+            if (layer.maskSourceId && mapping.contains(*layer.maskSourceId)) layer.maskSourceId = mapping.value(*layer.maskSourceId);
+        }
+        copies << mapping.value(roots[r]);
+        if (active && *active == roots[r]) activeCopy = mapping.value(roots[r]);
+        for (int i = 0; i < block.size(); ++i) document_->layers.insert(end + 1 + i, block.at(i));
+    }
+    if (copies.isEmpty()) { endEdit(); return false; }
+    selectLayers(QSet<QUuid>(copies.cbegin(), copies.cend()), activeCopy ? activeCopy : std::optional<QUuid>(copies.constLast()));
+    endEdit();
+    return true;
+}
+
 void EditorSession::duplicateActiveLayer()
 {
     const Layer *active = activeLayer();

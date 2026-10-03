@@ -80,6 +80,37 @@ static int effectiveSelectionMode(Qt::KeyboardModifiers modifiers, int chosen)
     return SelectionOps::modeForModifiers(modifiers.testFlag(Qt::ShiftModifier), modifiers.testFlag(Qt::AltModifier), chosen);
 }
 
+static QCursor selectionCursor(int mode)
+{
+    static QCursor cursors[3];
+    static bool made = false;
+    if (!made) {
+        for (int m = 0; m < 3; ++m) {
+            QPixmap pixmap(32, 32); pixmap.fill(Qt::transparent);
+            QPainter p(&pixmap);
+            for (const QColor &color : {QColor(Qt::white), QColor(Qt::black)}) {
+                p.setPen(QPen(color, color == Qt::white ? 3 : 1));
+                p.drawLine(4, 12, 20, 12); p.drawLine(12, 4, 12, 20);
+                if (m > 0) { p.drawLine(22, 24, 30, 24); if (m == 1) p.drawLine(26, 20, 26, 28); }
+            }
+            p.end();
+            cursors[m] = QCursor(pixmap, 12, 12);
+        }
+        made = true;
+    }
+    return cursors[std::clamp(mode, 0, 2)];
+}
+
+void CanvasWidget::refreshSelectionCursor()
+{
+    if (tool_ != Tool::Marquee && tool_ != Tool::Lasso && tool_ != Tool::Wand) return;
+    const Qt::KeyboardModifiers held = QGuiApplication::queryKeyboardModifiers();
+    if (cursorDocument_ && document_ && document_->selection && held.testFlag(Qt::ControlModifier)) return;
+    const int mode = selectionDragging_ || !lassoPoints_.isEmpty() ? (tool_ == Tool::Lasso ? lassoMode_ : selectionDragMode_)
+                                                                    : effectiveSelectionMode(held, selectionMode_);
+    setCursor(selectionCursor(mode));
+}
+
 // The Marquee's box: whole pixels, exclusive of the far edge; Shift (pressed afresh) squares it.
 QRect CanvasWidget::marqueeRect(Qt::KeyboardModifiers modifiers) const
 {
@@ -1384,7 +1415,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
             && document_->selection->convertToFormat(QImage::Format_Grayscale8).constScanLine(point.y())[point.x()] > 0;
         if (insideSelection && event->modifiers().testFlag(Qt::ControlModifier))
             setCursor(event->modifiers().testFlag(Qt::AltModifier) ? Qt::DragCopyCursor : Qt::SizeAllCursor);
-        else setCursor(Qt::CrossCursor);
+        else refreshSelectionCursor();
     } else if (tool_ == Tool::Gradient || tool_ == Tool::Shape || tool_ == Tool::Clone) setCursor(Qt::CrossCursor);
     else if (tool_ == Tool::Crop && document_) {
         const QRectF crop = cropRect_.value_or(QRectF(QPointF(), QSizeF(document_->canvasSize))).normalized();
@@ -1663,7 +1694,7 @@ void CanvasWidget::keyPressEvent(QKeyEvent *event)
                 renderDirty_ = true; update(); emit layerTransformChanged(); emit layerTransformFinished(); event->accept(); return;
             }
         }
-        if (document_ && document_->selection && selectionMode_ == 0
+        if (document_ && document_->selection
             && !(effectiveModifiers & (Qt::ControlModifier | Qt::AltModifier))
             && (tool_ == Tool::Marquee || tool_ == Tool::Lasso || tool_ == Tool::Wand)) {
             emit selectionMoveRequested(delta.toPoint()); event->accept(); return;

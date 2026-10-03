@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "core/SelectionOps.h"
 #include "io/ImageExporter.h"
 
 #include "io/ProjectReader.h"
@@ -3237,7 +3238,7 @@ void MainWindow::copyPixels(bool merged)
         clipboardOrigin_ = {};
         QGuiApplication::clipboard()->setImage(clipboardImage_);
     }
-    if (wholeLayer) copiedLayerIds_ = {active->id};
+    if (wholeLayer) copiedLayerIds_ = session_.copyableLayerIds();
     statusHint_->setText(merged ? tr("Copied merged pixels") : wholeLayer ? tr("Copied layer") : tr("Copied pixels"));
 }
 
@@ -3255,9 +3256,8 @@ void MainWindow::pastePixels()
     if (image.isNull()) return;
     const bool ours = !clipboardImage_.isNull() && image == clipboardImage_;
     if (ours && !copiedLayerIds_.isEmpty()) {
-        const QUuid id = copiedLayerIds_.constFirst();
-        const bool here = std::any_of(document_->layers.cbegin(), document_->layers.cend(), [&](const Layer &l) { return l.id == id; });
-        if (here) { session_.selectLayer(id); session_.duplicateActiveLayer(); syncDocumentViews(); return; }
+        const bool here = std::any_of(document_->layers.cbegin(), document_->layers.cend(), [&](const Layer &l) { return copiedLayerIds_.contains(l.id); });
+        if (here) { if (session_.duplicateLayers(copiedLayerIds_, tr("Paste"))) syncDocumentViews(); return; }
         if (copyLayersToTab(copiedLayerIds_, currentTab_, false)) return;
         return;
     }
@@ -3271,7 +3271,7 @@ void MainWindow::pastePixels()
 void MainWindow::layerViaCopy()
 {
     if (!document_) return;
-    if (!document_->selection) { session_.duplicateActiveLayer(); syncDocumentViews(); return; }
+    if (!document_->selection) { if (!session_.duplicateLayers(session_.copyableLayerIds())) session_.duplicateActiveLayer(); syncDocumentViews(); return; }
     const auto copied = session_.copiedPixels(false);
     if (copied && session_.insertPixelLayer(copied->first, copied->second, QString(),
                                             QStringLiteral("Layer via Copy"))) syncDocumentViews();
@@ -6751,6 +6751,15 @@ void MainWindow::syncHeldModifiers()
 {
     auto *autoSelect = findChild<QCheckBox *>(QStringLiteral("transformAutoSelect"));
     auto *lock = findChild<QToolButton *>(QStringLiteral("transformRatioLock"));
+    // Held Shift (add) and Option (subtract) show on the Marquee/Lasso/Magic mode control and cursor as they are held.
+    if (auto *modeControl = findChild<SegmentedControl *>(QStringLiteral("selectionMode")); modeControl && canvas_) {
+        const QWidget *editing = QApplication::focusWidget();
+        const bool field = editing && (qobject_cast<const QLineEdit *>(editing) || qobject_cast<const QAbstractSpinBox *>(editing));
+        const Qt::KeyboardModifiers keys = field ? Qt::KeyboardModifiers() : QApplication::queryKeyboardModifiers();
+        const int shown = SelectionOps::modeForModifiers(keys.testFlag(Qt::ShiftModifier), keys.testFlag(Qt::AltModifier), canvas_->chosenSelectionMode());
+        if (modeControl->currentIndex() != shown) { const QSignalBlocker blocker(modeControl); modeControl->setCurrentIndex(shown); }
+        canvas_->refreshSelectionCursor();
+    }
     if (!autoSelect || !lock) return;
     const QWidget *focus = QApplication::focusWidget();
     const bool typing = focus && (qobject_cast<const QLineEdit *>(focus) || qobject_cast<const QAbstractSpinBox *>(focus) || qobject_cast<const QTextEdit *>(focus) || qobject_cast<const QPlainTextEdit *>(focus));

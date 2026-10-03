@@ -79,6 +79,10 @@ public:
     void setMarqueeElliptical(bool enabled) { if (ellipticalMarquee_ == enabled) return; ellipticalMarquee_ = enabled; emit marqueeKindChanged(enabled); update(); }
     void setPolygonalLasso(bool enabled) { if (polygonalLasso_ == enabled) return; polygonalLasso_ = enabled; lassoPoints_.clear(); selectionDragging_ = false; emit lassoKindChanged(enabled); update(); }
     [[nodiscard]] bool isPolygonalLasso() const { return polygonalLasso_; }
+    [[nodiscard]] int chosenSelectionMode() const { return selectionMode_; }
+    // The cursor advertises the mode the next outline will have: a drag in progress keeps its own, otherwise the held
+    // Shift (add) / Option (subtract) or the options-bar choice (mac EditorCanvas lassoCursor).
+    void refreshSelectionCursor();
     [[nodiscard]] WandMode wandMode() const { return wandMode_; }
     void setWandMode(WandMode mode) {
         if (wandMode_ == mode) return;
