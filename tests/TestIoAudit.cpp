@@ -167,6 +167,7 @@ private slots:
     void shortcutConflictsAndPersistence();
     void menuStructureMatchesMac();
     void fileMenuEnabledStates();
+    void zzDumpMenus();
 
     // docs/writing-comp-files.md
     void handWrittenMinimalManifestOpens();
@@ -1379,6 +1380,28 @@ void TestIoAudit::fileMenuEnabledStates()
     QVERIFY(enabled("commandExportJpeg"));
     // Copy Merged needs a selection over visible pixels: with none the Mac menu item is disabled too.
     QVERIFY(!enabled("commandCopyMerged"));
+}
+
+static void dumpMenu(QMenu *menu, const QString &prefix, QStringList &out)
+{
+    for (QAction *a : menu->actions()) {
+        if (a->isSeparator()) continue;
+        if (a->menu()) { emit a->menu()->aboutToShow(); dumpMenu(a->menu(), prefix + a->text() + QStringLiteral(">"), out); continue; }
+        out << QStringLiteral("%1%2 [%3] %4").arg(prefix, a->text(), a->shortcut().toString(), a->isEnabled() ? QStringLiteral("on") : QStringLiteral("off"));
+    }
+}
+void TestIoAudit::zzDumpMenus()
+{
+    MainWindow window;
+    const auto dump = [&](const char *label) {
+        QStringList out;
+        for (QAction *top : window.menuBar()->actions()) if (top->menu()) { emit top->menu()->aboutToShow(); dumpMenu(top->menu(), top->text() + QStringLiteral(": "), out); }
+        QFile f(QStringLiteral("/tmp/claude-1000/menus_%1.txt").arg(QLatin1String(label))); f.open(QIODevice::WriteOnly); f.write(out.join(QLatin1Char('\n')).toUtf8());
+    };
+    dump("nodoc");
+    window.session().createDocument(40, 40, true); window.syncDocumentViews(); dump("blank");
+    window.session().insertImage(solid(40, 40, Qt::red), QStringLiteral("Img")); window.syncDocumentViews(); dump("image");
+    window.session().setRectangularSelection(QRect(5, 5, 10, 10)); window.syncDocumentViews(); dump("selection");
 }
 
 // ---------------------------------------------------------------------------------------------------- agent contract
