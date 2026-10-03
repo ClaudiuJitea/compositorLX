@@ -1619,6 +1619,11 @@ MainWindow::MainWindow(QWidget *parent)
                     syncDocumentViews();
                 });
             }
+        } else if (session_.canUngroupLayers()) {
+            auto *groupAct = menu.addAction(tr("Group Selected Layers"));
+            connect(groupAct, &QAction::triggered, this, [this] { session_.groupSelectedLayers(); syncDocumentViews(); });
+            auto *ungroupAct = menu.addAction(tr("Ungroup Layers"));
+            connect(ungroupAct, &QAction::triggered, this, [this] { session_.ungroupLayers(); syncDocumentViews(); });
         } else if (session_.canEditEffects()) {
             auto *effectsAct = menu.addAction(tr("Layer Effects…"));
             connect(effectsAct, &QAction::triggered, this, [this]() {
@@ -2358,6 +2363,9 @@ void MainWindow::createActions()
     connect(newLayerAction, &QAction::triggered, this, [this] { session_.addBlankLayer(); syncDocumentViews(); });
     connect(newGroupAction, &QAction::triggered, this, [this] { session_.addGroup(); syncDocumentViews(); });
     auto *groupLayers = layerMenuActions->addAction(tr("Group Selected Layers")); groupLayers->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
+    auto *ungroupLayers = layerMenuActions->addAction(tr("Ungroup Layers")); ungroupLayers->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
+    ungroupLayers->setObjectName(QStringLiteral("commandUngroupLayers"));
+    connect(ungroupLayers, &QAction::triggered, this, [this] { session_.ungroupLayers(); syncDocumentViews(); });
     auto *moveOut = layerMenuActions->addAction(tr("Move Out of Folder"));
     auto *renameLayer = layerMenuActions->addAction(tr("Rename Layer…"));
     auto *toggleVisibility = layerMenuActions->addAction(tr("Show/Hide Layer"));
@@ -2889,6 +2897,7 @@ void MainWindow::createActions()
 
     sm.registerAction(QStringLiteral("Menus:New Blank Layer"), newLayerAction);
     sm.registerAction(QStringLiteral("Menus:Group Layers"), groupLayers);
+    sm.registerAction(QStringLiteral("Menus:Ungroup Layers"), ungroupLayers);
     sm.registerAction(QStringLiteral("Menus:Merge Layers"), merge);
     sm.registerAction(QStringLiteral("Menus:Move Layer Up"), moveUp);
     sm.registerAction(QStringLiteral("Menus:Move Layer Down"), moveDown);
@@ -2961,7 +2970,7 @@ void MainWindow::createActions()
     sm.apply();
 
     addAction(contentFill); addAction(transformSelection); addAction(fillForeground); addAction(fillBackground);
-    addAction(groupLayers); addAction(moveUp); addAction(moveDown);
+    addAction(groupLayers); addAction(ungroupLayers); addAction(moveUp); addAction(moveDown);
     addAction(fit); addAction(actual); addAction(zoomIn); addAction(zoomOut);
 }
 
@@ -5819,7 +5828,7 @@ void MainWindow::updateCommandStates()
     enabled("commandPaste", text || !clipboardImage_.isNull() || !QGuiApplication::clipboard()->image().isNull());
     enabled("commandDuplicate", hasActive && (hasSelection ? canCopy : !active->group)); enabled("commandDelete", text || hasActive || selectedEffect_.has_value());
     enabled("commandTransform", hasSelection ? canCopy : canTransformLayer);
-    enabled("commandNewLayer", hasDocument); enabled("commandNewFolder", hasDocument); enabled("commandGroupLayers", hasDocument);
+    enabled("commandNewLayer", hasDocument); enabled("commandNewFolder", hasDocument); enabled("commandGroupLayers", hasDocument); enabled("commandUngroupLayers", hasDocument && session_.canUngroupLayers());
     enabled("commandMoveOut", active && active->parentId.has_value()); enabled("commandRenameLayer", hasActive); enabled("commandVisibility", hasActive);
     enabled("commandMerge", session_.canMergeLayers()); enabled("commandMoveUp", session_.canMoveActiveLayer(1)); enabled("commandMoveDown", session_.canMoveActiveLayer(-1));
     enabled("commandNewAdjustment", hasDocument); enabled("commandEditAdjustment", active && !active->adjustment.isEmpty() && active->adjustment.value(QStringLiteral("kind")).toString() != QStringLiteral("Invert"));

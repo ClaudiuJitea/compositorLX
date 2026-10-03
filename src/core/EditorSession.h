@@ -245,6 +245,9 @@ public:
     bool updateAdjustment(const QUuid &id, const QJsonObject &settings, const QString &historyName = QStringLiteral("Edit Adjustment"));
     bool previewAdjustment(const QUuid &id, const QJsonObject &settings);
     void groupSelectedLayers();
+    // The active layer must be a folder, so there is something to unwrap.
+    [[nodiscard]] bool canUngroupLayers() const;
+    void ungroupLayers();
     void deleteActiveLayer();
     void deleteSelectedLayers();
     void deleteSelectedLayers(bool bakeLiveMasks);

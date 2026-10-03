@@ -32,6 +32,10 @@ private slots:
     void psdHueSaturationReadsMasterAndEachRange();
     void psdMaskPatchSitsWhereItIsOnTheCanvas();
     void paintRefusalsExplainThemselves();
+    // 1318f1e: GroupTests.ungroup*
+    void ungroupRestoresChildrenAtTheFoldersSpotAndUndoes();
+    void ungroupPreservesClippingBetweenTwoOfAFoldersOwnChildren();
+    void ungroupingReleasesClippingThatNoLongerMakesSense();
     // 133c34a / b3419ab
     void inverseOfEverythingDeselects();
     void maskButtonRevealsOrHidesTheSelection();
@@ -290,6 +294,93 @@ void TestSyncRendering::paintRefusalsExplainThemselves()
     QVERIFY(session.paintRefusal().contains(QStringLiteral("hidden")));
     session.activeLayer()->visible = true;
     QVERIFY(session.paintRefusal().isEmpty());
+}
+
+static QVector<QUuid> ids(const EditorSession &session)
+{
+    QVector<QUuid> out;
+    for (const Layer &l : session.document()->layers) out << l.id;
+    return out;
+}
+static const Layer &layerById(const EditorSession &session, const QUuid &id)
+{
+    for (const Layer &l : session.document()->layers) if (l.id == id) return l;
+    static Layer none; return none;
+}
+
+void TestSyncRendering::ungroupRestoresChildrenAtTheFoldersSpotAndUndoes()
+{
+    EditorSession session;
+    session.createDocument(100, 100);
+    session.addBlankLayer();
+    const QUuid below = *session.document()->activeLayerId;
+    QVERIFY2(!session.canUngroupLayers(), "a plain layer has nothing to unwrap");
+    session.addGroup();
+    const QUuid group = *session.document()->activeLayerId;
+    session.addBlankLayer();
+    const QUuid childA = *session.document()->activeLayerId;
+    session.addBlankLayer();
+    const QUuid childB = *session.document()->activeLayerId;
+    session.selectLayer(std::nullopt);
+    session.addBlankLayer();
+    const QUuid above = *session.document()->activeLayerId;
+    QCOMPARE(layerById(session, childA).parentId, std::optional<QUuid>(group));
+    QCOMPARE(layerById(session, childB).parentId, std::optional<QUuid>(group));
+
+    session.selectLayer(group);
+    QVERIFY(session.canUngroupLayers());
+    const int undoCount = session.history().undoCount();
+    session.ungroupLayers();
+    const auto order = ids(session);
+    QVERIFY2(!order.contains(group), "the folder itself goes");
+    QVERIFY(!layerById(session, childA).parentId && !layerById(session, childB).parentId);
+    QVERIFY(order.indexOf(below) < order.indexOf(childA));
+    QVERIFY(order.indexOf(childA) < order.indexOf(childB));
+    QVERIFY(order.indexOf(childB) < order.indexOf(above));
+    QCOMPARE(session.selectedLayerIds(), (QSet<QUuid>{childA, childB}));
+    QCOMPARE(session.history().undoCount(), undoCount + 1);
+    QCOMPARE(session.history().undoName(), QStringLiteral("Ungroup Layers"));
+
+    session.undo();
+    QCOMPARE(layerById(session, childA).parentId, std::optional<QUuid>(group));
+    QVERIFY(layerById(session, group).group);
+    session.redo();
+    QCOMPARE(session.document()->layers.size(), 4);
+}
+
+void TestSyncRendering::ungroupPreservesClippingBetweenTwoOfAFoldersOwnChildren()
+{
+    EditorSession session;
+    session.createDocument(100, 100);
+    session.addBlankLayer();
+    const QUuid base = *session.document()->activeLayerId;
+    session.addBlankLayer();
+    const QUuid clipped = *session.document()->activeLayerId;
+    session.document()->layers[session.document()->layers.size() - 1].maskSourceId = base;
+    session.selectLayers({base, clipped}, base);
+    session.groupSelectedLayers();
+    session.ungroupLayers();
+    QCOMPARE(layerById(session, clipped).maskSourceId, std::optional<QUuid>(base));
+}
+
+void TestSyncRendering::ungroupingReleasesClippingThatNoLongerMakesSense()
+{
+    EditorSession session;
+    session.createDocument(100, 100);
+    session.addBlankLayer();
+    const QUuid outsideBase = *session.document()->activeLayerId;
+    session.addBlankLayer();
+    const QUuid between = *session.document()->activeLayerId;
+    session.addBlankLayer();
+    const QUuid childSource = *session.document()->activeLayerId;
+    session.document()->layers[session.document()->layers.size() - 1].maskSourceId = outsideBase;
+    session.selectLayer(childSource);
+    session.groupSelectedLayers();
+    const QUuid group = *session.document()->activeLayerId;
+    QCOMPARE(layerById(session, childSource).parentId, std::optional<QUuid>(group));
+    session.ungroupLayers();
+    QCOMPARE(ids(session), (QVector<QUuid>{outsideBase, between, childSource}));
+    QVERIFY(!layerById(session, childSource).maskSourceId);   // no longer next to its base, so the clip goes
 }
 
 QTEST_MAIN(TestSyncRendering)

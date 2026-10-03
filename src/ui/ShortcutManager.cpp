@@ -403,6 +403,7 @@ void ShortcutManager::initDefinitions()
     addEntry(QStringLiteral("Duplicate / Layer via Copy"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_J));
     addEntry(QStringLiteral("Toggle Clipping Mask"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_G));
     addEntry(QStringLiteral("Group Layers"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_G));
+    addEntry(QStringLiteral("Ungroup Layers"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
     addEntry(QStringLiteral("New Blank Layer"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N));
     addEntry(QStringLiteral("Move Layer Up"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_BracketRight));
     addEntry(QStringLiteral("Move Layer Down"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_BracketLeft));

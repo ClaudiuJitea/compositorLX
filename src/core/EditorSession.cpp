@@ -3368,6 +3368,52 @@ void EditorSession::groupSelectedLayers()
     endEdit();
 }
 
+bool EditorSession::canUngroupLayers() const
+{
+    const Layer *layer = activeLayer();
+    return document_ && layer && layer->group;
+}
+
+// Reverses Group Layers (mac 1318f1e): the folder's direct children take its place among its own siblings, in the
+// order they had inside it, and the folder goes. Its own opacity, blend mode, mask and effects go with it, as
+// Photoshop's Ungroup does. Clipping between two of its own layers survives; clipping that no longer makes sense
+// (a clipped layer whose base is no longer its sibling right below it) is released.
+void EditorSession::ungroupLayers()
+{
+    if (!canUngroupLayers()) return;
+    const QUuid groupId = *document_->activeLayerId;
+    const int groupIndex = indexOf(groupId);
+    if (groupIndex < 0) return;
+    const std::optional<QUuid> newParent = document_->layers.at(groupIndex).parentId;
+    QVector<Layer> layers;
+    QSet<QUuid> childIds;
+    std::optional<QUuid> firstChild;
+    QVector<Layer> children;
+    for (const Layer &layer : document_->layers) if (layer.parentId == groupId) children.append(layer);
+    for (Layer &child : children) { child.parentId = newParent; childIds.insert(child.id); if (!firstChild) firstChild = child.id; }
+    for (const Layer &layer : document_->layers) {
+        if (layer.id == groupId) layers += children;           // spliced in where the folder sat
+        else if (!childIds.contains(layer.id)) layers.append(layer);
+    }
+    // Release clipping that no longer makes sense: a clipped layer stays clipped only when every sibling between it and
+    // its base (in the same folder) is clipped to that base too.
+    for (int i = 0; i < layers.size(); ++i) {
+        Layer &layer = layers[i];
+        if (!layer.maskSourceId) continue;
+        bool keep = false;
+        for (int j = i - 1; j >= 0; --j) {
+            if (layers.at(j).parentId != layer.parentId) continue;
+            if (layers.at(j).id == *layer.maskSourceId) { keep = !layers.at(j).maskSourceId; break; }
+            if (layers.at(j).maskSourceId != layer.maskSourceId) break;
+        }
+        if (!keep) layer.maskSourceId.reset();
+    }
+    beginEdit(QStringLiteral("Ungroup Layers"));
+    document_->layers = layers;
+    selectLayers(childIds, firstChild);
+    endEdit();
+}
+
 bool EditorSession::canEditEffects() const
 {
     if (!document_ || !document_->activeLayerId) return false;
