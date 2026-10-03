@@ -476,6 +476,14 @@ struct TextStyle {
         bool operator==(const Rgb &) const = default;
     };
 
+    // Swift's Character.isNewline: LF, VT, FF, CR, NEL, LS, PS (mac rejects a face name containing any of them).
+    [[nodiscard]] static bool hasNewline(const QString &text) {
+        for (const QChar c : text) {
+            const ushort u = c.unicode();
+            if (u == 0x0A || u == 0x0B || u == 0x0C || u == 0x0D || u == 0x85 || u == 0x2028 || u == 0x2029) return true;
+        }
+        return false;
+    }
     [[nodiscard]] bool colorRunsAreValid() const {
         if (!colorRuns) return true;
         if (colorRuns->isEmpty()) return false;
@@ -493,7 +501,7 @@ struct TextStyle {
         qint64 end = 0;
         for (const TextFontRun &run : *fontRuns) {
             if (run.location < end || run.length <= 0) return false;
-            if (run.fontName.isEmpty() || run.fontName.size() > 200 || run.fontName.contains(QLatin1Char('\n')) || run.fontName.contains(QLatin1Char('\r'))) return false;
+            if (run.fontName.isEmpty() || run.fontName.size() > 200 || hasNewline(run.fontName)) return false;
             end = qint64(run.location) + run.length;
         }
         return end <= content.size();
@@ -533,7 +541,7 @@ struct TextStyle {
         setUnitColors(units);
     }
     void setFont(const QString &name, int start, int length) {
-        if (name.isEmpty() || name.size() > 200 || name.contains(QLatin1Char('\n')) || name.contains(QLatin1Char('\r'))) return;
+        if (name.isEmpty() || name.size() > 200 || hasNewline(name)) return;
         const int count = content.size();
         start = std::clamp(start, 0, count);
         const int end = std::clamp(start + length, start, count);

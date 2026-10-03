@@ -456,8 +456,9 @@ private:
     bool locksGuides_ = false;
     bool showsRulers_ = false;
     bool showsGrid_ = false;
-    LayoutGrid layoutGrid_;
-    GridAppearance gridAppearance_;
+    // The grid is how the app shows every project, not part of one: shared by all sessions (tabs), set in Grid Settings.
+    static inline LayoutGrid layoutGrid_;
+    static inline GridAppearance gridAppearance_;
     bool snapEnabled_ = true;
     bool snapToGuides_ = true;
     bool snapToGrid_ = true;

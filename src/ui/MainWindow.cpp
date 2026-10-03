@@ -1764,7 +1764,7 @@ MainWindow::MainWindow(QWidget *parent)
             auto *groupAct = menu.addAction(tr("Group Selected Layers"));
             connect(groupAct, &QAction::triggered, this, [this] { session_.groupSelectedLayers(); syncDocumentViews(); });
             auto *ungroupAct = menu.addAction(tr("Ungroup Layers"));
-            connect(ungroupAct, &QAction::triggered, this, [this] { session_.ungroupLayers(); syncDocumentViews(); });
+            connect(ungroupAct, &QAction::triggered, this, [this] { if (transformOriginalDocument_) finishPersistentTransform(true); session_.ungroupLayers(); syncDocumentViews(); });
         } else if (session_.canEditEffects()) {
             auto *effectsAct = menu.addAction(tr("Layer Effects…"));
             connect(effectsAct, &QAction::triggered, this, [this]() {
@@ -2592,7 +2592,7 @@ void MainWindow::createActions()
     auto *groupLayers = layerMenuActions->addAction(tr("Group Selected Layers")); groupLayers->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
     auto *ungroupLayers = layerMenuActions->addAction(tr("Ungroup Layers")); ungroupLayers->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
     ungroupLayers->setObjectName(QStringLiteral("commandUngroupLayers"));
-    connect(ungroupLayers, &QAction::triggered, this, [this] { session_.ungroupLayers(); syncDocumentViews(); });
+    connect(ungroupLayers, &QAction::triggered, this, [this] { if (transformOriginalDocument_) finishPersistentTransform(true); session_.ungroupLayers(); syncDocumentViews(); });
     auto *moveOut = layerMenuActions->addAction(tr("Move Out of Folder"));
     auto *renameLayer = layerMenuActions->addAction(tr("Rename Layer…"));
     auto *toggleVisibility = layerMenuActions->addAction(tr("Show/Hide Layer"));
@@ -5365,9 +5365,13 @@ QFuture<ProjectWriter::SaveResult> MainWindow::saveProjectAsync(int tabIndex, bo
     return future;
 }
 
-void MainWindow::onSaveCompleted(int capturedTabIndex, const QUuid &capturedDocId, const QString &capturedOriginalPath, const QString &capturedDestination, const QUuid &capturedRevision, bool isSaveAs, const ProjectWriter::SaveResult &result, bool isAutosave)
+void MainWindow::onSaveCompleted(int capturedTabIndexHint, const QUuid &capturedDocId, const QString &capturedOriginalPath, const QString &capturedDestination, const QUuid &capturedRevision, bool isSaveAs, const ProjectWriter::SaveResult &result, bool isAutosave)
 {
     Q_UNUSED(isSaveAs);
+    // The tab may have been dragged to another place (or another closed) while the save ran: find it by its document.
+    int capturedTabIndex = capturedTabIndexHint;
+    for (int i = 0; i < workspaceTabs_.size(); ++i)
+        if (workspaceTabs_[i].hasDocument() && workspaceTabs_[i].document()->id == capturedDocId) { capturedTabIndex = i; break; }
     const bool tabMatches = (capturedTabIndex >= 0 && capturedTabIndex < workspaceTabs_.size()
         && workspaceTabs_[capturedTabIndex].hasDocument()
         && workspaceTabs_[capturedTabIndex].document()->id == capturedDocId
@@ -5963,9 +5967,13 @@ void MainWindow::exportPng(bool jpegDefault)
             if (zoom) return *zoom;
             return previewImage.isNull() ? 1.0 : std::min(double(preview->width() - 2) / image.width(), double(preview->height() - 2) / image.height());
         };
+        // A zoomed copy of the whole image has to fit in memory and in a widget (about 32,000 px): past 16,384 px a side or
+        // 64 megapixels the steps stop, however far the image could be zoomed.
+        const double maxZoom = std::max(1.0, std::min({8.0, 16384.0 / std::max(1, std::max(image.width(), image.height())),
+                                                        std::sqrt(64e6 / (double(std::max(1, image.width())) * std::max(1, image.height())))}));
         const auto stepFrom = [&](int direction) -> std::optional<double> {
             const double now = shownZoom();
-            if (direction > 0) { for (double s : zoomSteps) if (s > now * 1.001) return s; }
+            if (direction > 0) { for (double s : zoomSteps) if (s > now * 1.001 && s <= maxZoom * 1.001) return s; }
             else { for (int i = 5; i >= 0; --i) if (zoomSteps[i] < now * 0.999) return zoomSteps[i]; }
             return std::nullopt;
         };
@@ -6295,6 +6303,9 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
     }
     session_.beginEdit(copied.size() > 1 ? tr("Copy Layers from Project") : tr("Copy Layer from Project"));
     session_.document()->layers += copied;
+    // Copied layers may need a newer format than this project was saved as (text runs, folders, masks, adjustments).
+    if (session_.document()->formatVersion != 0)   // 0 means "work it out from the content"
+        session_.document()->formatVersion = std::max(session_.document()->formatVersion, ProjectWriter::minimumRequiredVersion(*session_.document()));
     const QUuid primary = mapping.value(ids.constFirst(), copied.constLast().id);
     session_.selectLayer(primary);
     session_.endEdit();

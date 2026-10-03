@@ -2,6 +2,7 @@
 #include "core/CameraRaw.h"
 #include "core/Document.h"
 #include "io/PSDReader.h"
+#include "io/ProjectWriter.h"
 #include "core/EditorSession.h"
 #include "rendering/LayerRenderer.h"
 #include "rendering/RasterOperations.h"
@@ -47,6 +48,10 @@ private slots:
     void gridSnapFollowsTheGridSettings();
     // b3419ab: MaskAloneTests
     void maskAloneFollowsTheTargetAndTheActiveLayer();
+    // Review findings
+    void psdLevelsAreNormalizedLikeMac();
+    void minimumRequiredVersionCoversPastedContent();
+    void textRunValidationMatchesMacNewlines();
     // 1318f1e: GroupTests.ungroup*
     void ungroupRestoresChildrenAtTheFoldersSpotAndUndoes();
     void ungroupPreservesClippingBetweenTwoOfAFoldersOwnChildren();
@@ -610,6 +615,48 @@ void TestSyncRendering::maskAloneFollowsTheTargetAndTheActiveLayer()
     QVERIFY(!session.maskAloneLayerId());
     session.toggleMaskAlone(second);                      // a layer without a mask has nothing to show alone
     QVERIFY(!session.maskAloneLayerId());
+}
+
+void TestSyncRendering::psdLevelsAreNormalizedLikeMac()
+{
+    // Input black == white (255/255) and a gamma of 0.05 would make macOS refuse the saved project: they are normalized.
+    QVector<int> values{255, 255, 0, 255, 5};
+    for (int i = 0; i < 3; ++i) values += {0, 255, 0, 255, 100};
+    QByteArray data = shorts(values);
+    data.append(QByteArray(292 - data.size(), '\0'));
+    const auto json = PSDReader::levelsAdjustment(data);
+    QVERIFY(json.has_value());
+    const QJsonObject rgb = json->value(QStringLiteral("levels")).toObject().value(QStringLiteral("ranges")).toArray().at(0).toObject();
+    QVERIFY(rgb.value(QStringLiteral("white")).toDouble() >= rgb.value(QStringLiteral("black")).toDouble() + 1);
+    QVERIFY(rgb.value(QStringLiteral("black")).toDouble() <= 254);
+    QVERIFY(rgb.value(QStringLiteral("gamma")).toDouble() >= 0.1);
+    LevelRange r{300, 0.01, 5, -4, 999};
+    QCOMPARE(r.normalized(), (LevelRange{254, 0.1, 255, 0, 255}));
+}
+
+void TestSyncRendering::minimumRequiredVersionCoversPastedContent()
+{
+    Document doc = blankDocument();
+    doc.formatVersion = 9;
+    Layer text = fullLayer(QStringLiteral("Text"), Qt::black);
+    text.text = TextStyle{};
+    text.text->content = QStringLiteral("Hello");
+    text.text->setFont(QStringLiteral("Courier"), 1, 2);
+    doc.layers = {text};
+    QCOMPARE(ProjectWriter::minimumRequiredVersion(doc), 11);   // copy it into a v9 tab and the tab must become v11
+    QCOMPARE(ProjectWriter::computeTargetVersion(doc), 9);       // while a save of the stale version is still refused
+}
+
+void TestSyncRendering::textRunValidationMatchesMacNewlines()
+{
+    TextStyle t;
+    t.content = QStringLiteral("Hello");
+    for (const ushort c : {0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029}) {
+        t.fontRuns = QVector<TextFontRun>{{0, 2, QStringLiteral("Cou") + QChar(c) + QStringLiteral("rier")}};
+        QVERIFY2(!t.isValid(), "a newline in a face name must be rejected");
+    }
+    t.fontRuns = QVector<TextFontRun>{{0, 2, QStringLiteral("Courier")}};
+    QVERIFY(t.isValid());
 }
 
 QTEST_MAIN(TestSyncRendering)

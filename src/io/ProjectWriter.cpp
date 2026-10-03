@@ -342,7 +342,7 @@ ProjectWriteError::ProjectWriteError(const QString &message, bool isConflict)
 {
 }
 
-int ProjectWriter::computeTargetVersion(const Document &document)
+int ProjectWriter::minimumRequiredVersion(const Document &document)
 {
     int minRequired = 1;
     for (const Layer &layer : document.layers) {
@@ -363,7 +363,12 @@ int ProjectWriter::computeTargetVersion(const Document &document)
         if (layer.text) minRequired = std::max(minRequired, layer.text->requiredFormatVersion());
     }
     if (!document.guides.isEmpty()) minRequired = std::max(minRequired, 8);
+    return minRequired;
+}
 
+int ProjectWriter::computeTargetVersion(const Document &document)
+{
+    const int minRequired = minimumRequiredVersion(document);
     return (document.formatVersion >= 1 && document.formatVersion <= 11)
                ? document.formatVersion
                : std::max(minRequired, 9);

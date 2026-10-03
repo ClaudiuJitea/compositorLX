@@ -78,6 +78,9 @@ public:
                                        SaveFaultInjection fault = SaveFaultInjection::None);
     static bool recoverInterruptedPackage(const QString &projectDirectory);
     [[nodiscard]] static int computeTargetVersion(const Document &document);
+    // The lowest format version that can carry everything in `document`, whatever version it was loaded as. Code that
+    // brings content into a document (copying layers between tabs) raises `formatVersion` to at least this.
+    [[nodiscard]] static int minimumRequiredVersion(const Document &document);
 };
 
 } // namespace compositor

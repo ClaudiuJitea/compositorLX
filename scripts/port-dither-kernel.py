@@ -43,6 +43,8 @@ while i < len(lines):
     out.append(f"{indent}BANDS_END")
     i += 1; calls += 1
 src = "\n".join(out).replace("__block ", "")
+# Several bands may report failure at once: make that write atomic (all writers store 1).
+src = src.replace("failed = 1;", '_Pragma("omp atomic write") failed = 1;')
 if calls != 3 or "^(" in src or "dispatch" in src:
     sys.exit(f"unexpected DitherPixels.c shape ({calls} in_bands calls); update scripts/port-dither-kernel.py")
 open(path, "w").write(src)

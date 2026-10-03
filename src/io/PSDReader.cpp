@@ -680,7 +680,7 @@ std::optional<QJsonObject> parseLevelsAdjustment(const QByteArray &data)
             std::clamp(inWhite, 0.0, 255.0),
             std::clamp(outBlack, 0.0, 255.0),
             std::clamp(outWhite, 0.0, 255.0)
-        };
+        }.normalized();
     }
     return RasterOperations::levelsSettingsToJson(settings);
 }
@@ -1643,7 +1643,8 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
             layer.opacity = std::clamp((double(rawLayer.opacity) / 255.0) * (double(rawLayer.fill) / 255.0), 0.0, 1.0);
         }
 
-        if (isGroup) {
+        // Folders and adjustment layers cover the canvas, whatever bounds their record carries (as mac's builder does).
+        if (isGroup || kind == PSDLayerKind::Adjustment) {
             layer.transform.origin = QPointF(0, 0);
             layer.transform.size = QSizeF(canvasWidth, canvasHeight);
         } else {

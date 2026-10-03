@@ -739,7 +739,8 @@ std::optional<QImage> RasterOperations::spotHeal(const QImage &image, const QIma
 QJsonObject RasterOperations::levelsSettingsToJson(const LevelsSettings &settings)
 {
     QJsonArray ranges;
-    for (const LevelRange &range : settings.ranges) {
+    for (const LevelRange &unnormalized : settings.ranges) {
+        const LevelRange range = unnormalized.normalized();   // never write what macOS would refuse to open
         ranges.append(QJsonObject{
             {QStringLiteral("black"), range.black},
             {QStringLiteral("gamma"), range.gamma},

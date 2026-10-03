@@ -206,7 +206,7 @@ int dither_apply(uint8_t *rgba, size_t width, size_t height, size_t stride, cons
         int failed = 0;
         BANDS_BEGIN(lines, firstLine, lastLine)
             float *scan = malloc(width * sizeof(float) * (size_t)planes);
-            if (!scan) { failed = 1; continue; }
+            if (!scan) { _Pragma("omp atomic write") failed = 1; continue; }
             for (size_t line = firstLine; line < lastLine; ++line) {
                 size_t top = line * spacing;
                 size_t bottom = top + spacing < height ? top + spacing : height;

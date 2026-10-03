@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cmath>
+#include <algorithm>
+
 #include <QImage>
 #include <QPoint>
 #include <QJsonObject>
@@ -14,6 +17,17 @@ enum class CameraRawClipping;
 
 struct LevelRange {
     double black = 0, gamma = 1, white = 255, outputBlack = 0, outputWhite = 255;
+    // What the macOS app accepts in a project (LevelRange.normalized): it rejects a file whose ranges differ from these.
+    [[nodiscard]] LevelRange normalized() const {
+        const auto clamp = [](double n, double lo, double hi, double fallback) { return std::isfinite(n) ? std::min(hi, std::max(lo, n)) : fallback; };
+        LevelRange r = *this;
+        r.black = clamp(black, 0, 254, 0);
+        r.white = clamp(white, r.black + 1, 255, 255);
+        r.gamma = clamp(gamma, 0.1, 9.99, 1);
+        r.outputBlack = clamp(outputBlack, 0, 255, 0);
+        r.outputWhite = clamp(outputWhite, 0, 255, 255);
+        return r;
+    }
     bool operator==(const LevelRange &) const = default;
 };
 

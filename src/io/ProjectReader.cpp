@@ -398,7 +398,7 @@ std::optional<TextStyle> parseText(const QJsonObject &obj, int version)
     if (obj.contains(QStringLiteral("boxSize"))) {
         text.boxSize = parseSize(obj.value(QStringLiteral("boxSize")), QStringLiteral("boxSize"));
     }
-    if (obj.contains(QStringLiteral("colorRuns"))) {
+    if (obj.contains(QStringLiteral("colorRuns")) && !obj.value(QStringLiteral("colorRuns")).isNull()) {
         if (version < 10) invalid(QStringLiteral("text colorRuns require format version 10 or later"));
         const QJsonValue value = obj.value(QStringLiteral("colorRuns"));
         if (!value.isArray()) invalid(QStringLiteral("text colorRuns must be an array"));
@@ -417,7 +417,7 @@ std::optional<TextStyle> parseText(const QJsonObject &obj, int version)
         }
         text.colorRuns = runs;
     }
-    if (obj.contains(QStringLiteral("fontRuns"))) {
+    if (obj.contains(QStringLiteral("fontRuns")) && !obj.value(QStringLiteral("fontRuns")).isNull()) {
         if (version < 11) invalid(QStringLiteral("text fontRuns require format version 11 or later"));
         const QJsonValue value = obj.value(QStringLiteral("fontRuns"));
         if (!value.isArray()) invalid(QStringLiteral("text fontRuns must be an array"));
