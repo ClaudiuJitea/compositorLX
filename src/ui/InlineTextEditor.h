@@ -56,6 +56,7 @@ public:
     bool areaText = true;
     double tracking = 0.0;
     double leading = 0.0;
+    double fontSize = 48.0;   // in layer pixels; a leading of 0 is Auto, 120% of it
 
     void syncCanvasGeometry()
     {
@@ -63,10 +64,15 @@ public:
         auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
         const qreal zoom = canvas ? canvas->zoom() : 1.0;
         const QRect geometry = canvas ? canvas->widgetRectForDocumentRect(canvasBox).toAlignedRect() : canvasBox.toAlignedRect();
-        const QMargins margins(qRound(4 * zoom), qRound(3 * zoom), qRound(4 * zoom), qRound(3 * zoom));
+        // The letters sit kTextPadding inside the box, as in the layer raster; a fixed line height puts the first baseline
+        // a little off where the document would, which the top margin makes up.
+        const double lineHeight = document()->firstBlock().blockFormat().lineHeight();
+        const double shift = lineHeight > 0 ? baselineShift(*document(), lineHeight) : 0.0;
+        const QMargins margins(qRound(kTextPadding * zoom), std::max(0, qRound(kTextPadding * zoom + shift)),
+                               qRound(kTextPadding * zoom), qRound(kTextPadding * zoom));
         if (viewportMargins() != margins) setViewportMargins(margins);
         setGeometry(geometry);
-        const int wrapWidth = std::max(1, qRound((canvasBox.width() - 8) * zoom));
+        const int wrapWidth = std::max(1, qRound((canvasBox.width() - 2 * kTextPadding) * zoom));
         if (areaText && lineWrapColumnOrWidth() != wrapWidth) setLineWrapColumnOrWidth(wrapWidth);
     }
 
@@ -75,9 +81,11 @@ public:
         if (areaText || wasResized_ || finishing_) return;
         auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
         const qreal zoom = canvas ? canvas->zoom() : 1.0;
-        const QSizeF content = document()->size();
-        canvasBox.setSize(QSizeF(std::max(40.0, document()->idealWidth() / zoom + 8),
-                                 std::max(20.0, content.height() / zoom + 6)));
+        const double lineHeight = std::max(1.0, document()->firstBlock().blockFormat().lineHeight());
+        // The text measures in the document's (zoomed) pixels; the padding is in layer pixels.
+        const double width = (document()->idealWidth() + std::max(1, document()->defaultFont().pixelSize()) * 0.1) / zoom + 2 * kTextPadding;
+        const double height = std::max(document()->size().height() / zoom, lineHeight / zoom) + 2 * kTextPadding;
+        canvasBox.setSize(QSizeF(std::max(16.0, std::ceil(width)), std::max(16.0, std::ceil(height))));
         syncCanvasGeometry();
     }
 
@@ -245,9 +253,11 @@ public:
         applySpacing();
     }
 
+    // Up closes the lines up, down opens them out, counting from whatever Auto works out to (as macOS does).
     void adjustLeading(double delta)
     {
-        leading = std::max(0.0, leading + delta);
+        const double current = textLineHeight(fontSize, leading);
+        leading = delta < 0 ? std::max(1.0, current + delta) : std::min(5000.0, current + delta);
         if (leadingAdjusted) leadingAdjusted(delta);
         applySpacing();
     }
@@ -264,9 +274,7 @@ public:
         cursor.select(QTextCursor::Document);
 
         QTextBlockFormat blockFormat;
-        if (leading > 0.0) {
-            blockFormat.setLineHeight(leading * zoom, QTextBlockFormat::MinimumHeight);
-        }
+        blockFormat.setLineHeight(textLineHeight(fontSize, leading) * zoom, QTextBlockFormat::FixedHeight);
         cursor.mergeBlockFormat(blockFormat);
 
         growPointText();

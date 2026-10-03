@@ -11069,7 +11069,7 @@ void TestProjectFormat::testSection10RemappableKeyboardShortcuts()
         QCOMPARE(editor->tracking, 0.0);
 
         // Alt+Up decrements leading by 1 (line height closes up)
-        editor->adjustLeading(20.0); // start at 20
+        editor->leading = 20.0; // start at 20
         QCOMPARE(editor->leading, 20.0);
         QTest::keyClick(editor, Qt::Key_Up, Qt::AltModifier);
         QCOMPARE(editor->leading, 19.0);
@@ -11129,7 +11129,7 @@ void TestProjectFormat::testSection10RemappableKeyboardShortcuts()
         editor = window.inlineTextEditor();
         QVERIFY(editor);
         QCOMPARE(editor->tracking, 0.0);
-        editor->adjustLeading(50.0);
+        editor->leading = 50.0;
 
         // Stale Alt+Left suppressed -> tracking stays 0
         QTest::keyClick(editor, Qt::Key_Left, Qt::AltModifier);

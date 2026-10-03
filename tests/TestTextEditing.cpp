@@ -333,7 +333,8 @@ void TestTextEditing::packageRoundTripAfterEditing()
     const TextStyle &text = *reloaded.layers.at(0).text;
     QCOMPARE(text.colorAt(0).r, 1.0);
     QCOMPARE(text.fontNameAt(8), QStringLiteral("Courier"));
-    QVERIFY(text.uniformFontName(0, 5) == QStringLiteral("DejaVu Sans"));
+    // Bold is part of the face name, as on macOS: it survives the save instead of living in unsaved metadata.
+    QCOMPARE(text.uniformFontName(0, 5), QStringLiteral("DejaVuSans-Bold"));
 }
 
 void TestTextEditing::filtersWaitForTextEditing()
