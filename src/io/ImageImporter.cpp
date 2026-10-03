@@ -1,10 +1,12 @@
 #include "io/ImageImporter.h"
 #include "io/SvgImporter.h"
+#include "core/DocumentLimits.h"
 
 #include <QColorSpace>
 #include <QFileInfo>
 #include <QFile>
 #include <QImageReader>
+#include <algorithm>
 
 #ifdef COMPOSITOR_HAVE_LIBHEIF
 #include <libheif/heif.h>
@@ -15,10 +17,18 @@ namespace compositor {
 QImage ImageImporter::read(const QString &path, QString *error)
 {
     if (SvgImporter::matches(path)) {
-        return SvgImporter::read(path, std::nullopt, 100000000LL, error);
+        return SvgImporter::read(path, std::nullopt, DocumentLimits::documentPixelBudget(), error);
     }
 
     QImageReader reader(path); reader.setAutoTransform(true);
+    reader.setAllocationLimit(int(std::min<qint64>(2047, DocumentLimits::documentPixelBudget() * 4 / (1024 * 1024)) + 1));
+    // The Mac importer takes JPEG, PNG, HEIC and TIFF (plus PSD, SVG and RAW through their own paths); Qt would also
+    // decode GIF, BMP, WebP and more, which the Mac refuses.
+    const QByteArray format = reader.format();
+    if (!format.isEmpty() && !QList<QByteArray>{"png", "jpeg", "jpg", "tiff", "tif", "heic", "heif"}.contains(format)) {
+        if (error) *error = QStringLiteral("Choose a JPEG, PNG, HEIC, TIFF, or Photoshop (PSD) file.");
+        return {};
+    }
     QImage image = reader.read();
 #ifdef COMPOSITOR_HAVE_LIBHEIF
     const QString suffix = QFileInfo(path).suffix().toLower();
@@ -40,7 +50,7 @@ QImage ImageImporter::read(const QString &path, QString *error)
     }
 #endif
     if (image.isNull()) { if (error && error->isEmpty()) *error = reader.errorString(); return {}; }
-    if (image.width() > 30000 || image.height() > 30000 || qint64(image.width()) * image.height() > 100000000LL) {
+    if (image.width() > 30000 || image.height() > 30000 || qint64(image.width()) * image.height() > DocumentLimits::documentPixelBudget()) {
         if (error) *error = QStringLiteral("unsupported dimensions");
         return {};
     }

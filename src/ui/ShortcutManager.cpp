@@ -102,7 +102,8 @@ QString ShortcutManager::validate(const QMap<QString, QKeySequence> &candidateOv
         }
 
         // Reserved system shortcuts
-        if (chord == QKeySequence(Qt::CTRL | Qt::Key_Q) || chord == QKeySequence(Qt::CTRL | Qt::Key_Comma)) {
+        if (chord == QKeySequence(Qt::CTRL | Qt::Key_Q) || chord == QKeySequence(Qt::CTRL | Qt::Key_Comma)
+            || chord == QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_M)) {
             return QStringLiteral("%1 is reserved by macOS.").arg(chord.toString(QKeySequence::NativeText));
         }
 

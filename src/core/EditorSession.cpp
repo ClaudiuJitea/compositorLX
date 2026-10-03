@@ -111,8 +111,10 @@ bool EditorSession::insertImage(const QImage &image, const QString &name, const 
             used += qint64(layer.mask.width()) * layer.mask.height();
         }
     }
-    if (qint64(image.width()) * image.height() > 100000000LL - used) return false;
+    if (qint64(image.width()) * image.height() > DocumentLimits::documentPixelBudget() - used) return false;
     beginEdit(QStringLiteral("Import Image"));
+    // With no document the image decides the canvas, so a drop point means nothing yet (mac importImages).
+    const std::optional<QPointF> placement = document_ ? center : std::nullopt;
     if (!document_) {
         document_ = std::make_shared<Document>();
         document_->formatVersion = 9;
@@ -125,7 +127,7 @@ bool EditorSession::insertImage(const QImage &image, const QString &name, const 
     layer.name = name.trimmed().isEmpty() ? nextName(QStringLiteral("Layer")) : name.trimmed();
     layer.image = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     layer.transform.size = image.size();
-    const QPointF target = center.value_or(QPointF(document_->canvasSize.width() / 2.0, document_->canvasSize.height() / 2.0));
+    const QPointF target = placement.value_or(QPointF(document_->canvasSize.width() / 2.0, document_->canvasSize.height() / 2.0));
     layer.transform.origin = QPointF(std::floor(target.x() - image.width() / 2.0), std::floor(target.y() - image.height() / 2.0));
     if (const Layer *active = activeLayer()) layer.parentId = active->group ? document_->activeLayerId : active->parentId;
     document_->layers.push_back(layer);
@@ -143,7 +145,7 @@ bool EditorSession::insertSvg(const QString &path, const std::optional<QPointF> 
             if (!l.mask.isNull()) usedPixels += (qint64(l.mask.width()) * l.mask.height());
         }
     }
-    const qint64 remaining = std::max(0LL, 100000000LL - usedPixels);
+    const qint64 remaining = std::max(0LL, DocumentLimits::documentPixelBudget() - usedPixels);
     const std::optional<QSize> fitting = document_ ? std::make_optional(document_->canvasSize) : std::nullopt;
     const QImage image = SvgImporter::read(path, fitting, remaining, error);
     if (image.isNull()) return false;
@@ -180,7 +182,7 @@ bool EditorSession::insertPhotoshop(const PSDImportResult &imported, const QStri
         if (!l.image.isNull()) usedPixels += (qint64(l.image.width()) * l.image.height());
         if (!l.mask.isNull()) usedPixels += (qint64(l.mask.width()) * l.mask.height());
     }
-    if (usedPixels > 100000000LL) {
+    if (usedPixels > DocumentLimits::documentPixelBudget()) {
         if (error) *error = QStringLiteral("The image is too large to import.");
         return false;
     }
@@ -3266,7 +3268,7 @@ static QImage rasterizedScaled(const QImage &source, const LayerTransform &trans
 bool EditorSession::resizeImage(const QSize &size, double resolution, Sampling sampling)
 {
     if (!document_ || !validDocumentSize(size) || !std::isfinite(resolution) || resolution < 1 || resolution > 9600
-        || qint64(size.width()) * size.height() > 100000000LL) return false;
+        || qint64(size.width()) * size.height() > DocumentLimits::maxSurfacePixels) return false;
     const QSize old = document_->canvasSize;
     if (size == old && qFuzzyCompare(resolution, document_->resolution)) return false;
     const double sx = double(size.width()) / old.width(), sy = double(size.height()) / old.height();

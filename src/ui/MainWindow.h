@@ -52,6 +52,8 @@ public:
 
     bool openProject(const QString &path);
     bool importImageFiles(const QStringList &paths, const std::optional<QPointF> &center = std::nullopt);
+    // Dropped or handed-in files: one project at most, opened first, then the images (mac ProjectController.receive).
+    bool receiveFiles(const QStringList &paths, const std::optional<QPointF> &point = std::nullopt);
 
     [[nodiscard]] EditorSession &session() { return session_; }
     [[nodiscard]] const EditorSession &session() const { return session_; }
@@ -153,6 +155,10 @@ public:
     [[nodiscard]] ProjectWatcher *tabWatcher(int tabIndex) const;
     void noteRecentProject(const QString &path);
     [[nodiscard]] QStringList recentProjects() const;
+    // File > Open Recent: the projects still on disk, newest first (mac RecentProjects).
+    [[nodiscard]] QStringList existingRecentProjects() const;
+    void clearRecentProjects();
+    [[nodiscard]] QMenu *openRecentMenu() const { return openRecentMenu_; }
     [[nodiscard]] QString recoveryPath(int tabIndex = -1) const;
     [[nodiscard]] QString recoveryDirectory() const;
     void removeRecovery(int tabIndex = -1);
@@ -353,6 +359,8 @@ private:
     void cancelActiveSelectionTask();
     QToolButton *menuRestoreButton_ = nullptr;
     QMenu *quickFileMenu_ = nullptr;
+    QMenu *openRecentMenu_ = nullptr;
+    void rebuildOpenRecentMenu();
 
     QVector<QPointer<ProjectWatcher>> tabWatchers_;
     QVector<std::optional<ProjectDigest>> tabDigests_;

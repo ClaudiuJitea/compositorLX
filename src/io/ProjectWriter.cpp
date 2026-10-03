@@ -517,8 +517,8 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
         }
     }
 
-    if (totalImagePixels > 100000000LL) fail(QStringLiteral("the image pixel limit is exceeded"));
-    if (totalMaskPixels > 100000000LL) fail(QStringLiteral("the mask pixel limit is exceeded"));
+    if (totalImagePixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the image pixel limit is exceeded"));
+    if (totalMaskPixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the mask pixel limit is exceeded"));
 
     const QFileInfo destinationInfo(projectDirectory);
     QDir parent = destinationInfo.absoluteDir();
@@ -581,7 +581,7 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
         // Save image if present
         if (!layer.image.isNull() && !layer.group) {
             totalImagePixels += qint64(layer.image.width()) * layer.image.height();
-            if (totalImagePixels > 100000000LL) fail(QStringLiteral("the image pixel limit is exceeded"));
+            if (totalImagePixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the image pixel limit is exceeded"));
             const QString fileName = uuid(layer.id) + QStringLiteral(".png");
             if (!layer.image.save(root.filePath(QStringLiteral("images/") + fileName), "PNG")) {
                 fail(QStringLiteral("a layer image could not be encoded"));
@@ -593,7 +593,7 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
         const bool canHaveMask = !layer.mask.isNull() && (targetVersion >= 6 || (targetVersion >= 4 && !layer.group));
         if (canHaveMask) {
             totalMaskPixels += qint64(layer.mask.width()) * layer.mask.height();
-            if (totalMaskPixels > 100000000LL) fail(QStringLiteral("the mask pixel limit is exceeded"));
+            if (totalMaskPixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the mask pixel limit is exceeded"));
             const QString maskFileName = uuid(layer.id) + QStringLiteral(".mask.png");
             if (!layer.mask.save(root.filePath(QStringLiteral("images/") + maskFileName), "PNG")) {
                 fail(QStringLiteral("a layer mask could not be encoded"));

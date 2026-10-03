@@ -87,6 +87,7 @@ add_library(compositor_core
     src/core/ColorPalette.cpp
     src/core/ColorPalette.h
     src/core/EditorSessionPaint.cpp
+    src/core/DocumentLimits.h
     src/io/ProjectReader.cpp
     src/io/ProjectReader.h
     src/io/ProjectWriter.cpp

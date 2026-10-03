@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/DocumentLimits.h"
+
 #include <QImage>
 #include <QJsonObject>
 #include <QPainter>

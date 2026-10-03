@@ -7,6 +7,6 @@ Exec=compositor-lx %F
 Icon=compositor-lx
 Terminal=false
 Categories=Graphics;2DGraphics;RasterGraphics;Photography;
-MimeType=image/png;image/jpeg;image/tiff;image/heic;image/heif;
+MimeType=image/png;image/jpeg;image/tiff;image/heic;image/heif;image/svg+xml;image/vnd.adobe.photoshop;image/x-psd;image/x-dcraw;
 StartupNotify=true
 Keywords=image;photo;layers;compositor;paint;

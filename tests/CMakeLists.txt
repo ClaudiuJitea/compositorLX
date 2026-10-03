@@ -127,3 +127,10 @@ target_compile_definitions(text_layer_tests PRIVATE
     FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
 add_test(NAME text_layer_tests COMMAND text_layer_tests -platform offscreen)
+add_executable(io_audit_tests
+    TestIoAudit.cpp
+)
+target_include_directories(io_audit_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(io_audit_tests PRIVATE compositor_ui Qt6::Test)
+target_compile_definitions(io_audit_tests PRIVATE FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+add_test(NAME io_audit_tests COMMAND io_audit_tests -platform offscreen)

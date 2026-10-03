@@ -5634,6 +5634,9 @@ struct TestPSDFixture {
 
 void TestProjectFormat::testSection7PSDImport()
 {
+    // The document budget scales with memory now; pin it to the old 100 MP so the over-budget paths run cheaply.
+    DocumentLimits::setDocumentPixelBudgetForTesting(100000000LL);
+    struct Restore { ~Restore() { DocumentLimits::setDocumentPixelBudgetForTesting(0); } } restoreBudget;
     // 1. Signature and matching
     {
         TestPSDFixture fix;

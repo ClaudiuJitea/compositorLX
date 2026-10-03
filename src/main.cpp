@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
     parser.addVersionOption();
     QCommandLineOption subjectModelCheck(QStringLiteral("check-subject-model"), QStringLiteral("Validate the bundled foreground-removal model and exit."));
     parser.addOption(subjectModelCheck);
-    parser.addPositionalArgument(QStringLiteral("project"), QStringLiteral("A .comp project directory to open."));
+    parser.addPositionalArgument(QStringLiteral("files"), QStringLiteral("A .comp project directory to open, or images to import."));
     parser.process(application);
 
     if (parser.isSet(subjectModelCheck)) {
@@ -54,6 +54,6 @@ int main(int argc, char *argv[])
 
     compositor::MainWindow window;
     window.show();
-    if (!parser.positionalArguments().isEmpty()) window.openProject(parser.positionalArguments().constFirst());
+    if (!parser.positionalArguments().isEmpty()) window.receiveFiles(parser.positionalArguments());
     return application.exec();
 }
