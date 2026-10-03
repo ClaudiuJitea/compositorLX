@@ -3,6 +3,7 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <atomic>
 
 #if defined(Q_OS_UNIX)
 #include <unistd.h>
@@ -42,10 +43,15 @@ inline constexpr qint64 pixelBudgetForMemory(qint64 physicalMemory)
 }
 
 /// Total imported raster one document may hold, summed across every layer and (separately) every mask.
+inline std::atomic<qint64> &budgetOverride() { static std::atomic<qint64> value{0}; return value; }
+/// Tests pin the budget to exercise the over-budget paths without allocating gigabytes; 0 restores the real one.
+inline void setDocumentPixelBudgetForTesting(qint64 pixels) { budgetOverride() = pixels; }
+
 inline qint64 documentPixelBudget()
 {
     static const qint64 budget = pixelBudgetForMemory(physicalMemoryBytes());
-    return budget;
+    const qint64 forced = budgetOverride().load();
+    return forced > 0 ? forced : budget;
 }
 
 inline int documentBudgetMegapixels() { return int(documentPixelBudget() / 1000000); }
