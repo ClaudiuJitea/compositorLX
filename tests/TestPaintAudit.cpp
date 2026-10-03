@@ -414,6 +414,32 @@ private slots:
         QTest::keyClick(window.canvas(), Qt::Key_X);
         QVERIFY(s.maskPaintWhite()); QVERIFY(fg->styleSheet().contains("#ffffff"));
     }
+    // Growth for erase, blur and heal strokes: the same mechanism as paint, and nothing is left behind when nothing changes.
+    void blurAcrossALayerEdgeSpillsOutsideAndGrowsTheLayer()
+    {
+        EditorSession s; s.createDocument(100, 100);
+        QImage image(20, 20, QImage::Format_RGBA8888_Premultiplied); image.fill(Qt::red);
+        QVERIFY(s.insertImage(image, "Patch", QPointF(50, 50)));
+        const QRectF box(s.activeLayer()->transform.origin, s.activeLayer()->transform.size);
+        QVERIFY(s.beginBlurStroke(QPointF(box.right(), 50), 40, 1, 1, 8)); s.continueBrushStroke(QPointF(box.right(), 52)); QVERIFY(s.endBrushStroke());
+        QVERIFY(alphaAt(s, int(box.right()) + 3, 50) > 0);
+        QVERIFY(s.activeLayer()->image.width() > 20);
+        QCOMPARE(px(s, int(box.left()) + 1, int(box.top()) + 1).red(), 255);
+    }
+    void eraseAndHealOutsideTheLayerLeaveItAlone()
+    {
+        EditorSession s; s.createDocument(100, 100);
+        QImage image(20, 20, QImage::Format_RGBA8888_Premultiplied); image.fill(Qt::red);
+        QVERIFY(s.insertImage(image, "Patch", QPointF(50, 50)));
+        const Layer before = *s.activeLayer(); const int undo = s.history().undoCount();
+        QVERIFY(s.beginBrushStroke(QPointF(90, 90), Qt::black, 10, 1, 1, true)); s.endBrushStroke();
+        QVERIFY(*s.activeLayer() == before); QCOMPARE(s.history().undoCount(), undo);
+        s.beginHealingStroke(QPointF(90, 90), 10, 1, 1, 0, 1); s.endBrushStroke();
+        QVERIFY(*s.activeLayer() == before); QCOMPARE(s.history().undoCount(), undo);
+        // erasing across the edge still erases inside
+        QVERIFY(s.beginBrushStroke(QPointF(50, 50), Qt::black, 10, 1, 1, true)); s.endBrushStroke();
+        QCOMPARE(alphaAt(s, 50, 50), 0); QCOMPARE(s.activeLayer()->image.size(), QSize(20, 20));
+    }
     // SpotHealingTests (all modes) and CloneStampTests
     static QImage blemished()
     {
