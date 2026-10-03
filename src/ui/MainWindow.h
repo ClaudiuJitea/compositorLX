@@ -307,6 +307,7 @@ private:
     QColor foregroundColor_ = QColor(22, 134, 232);
     QColor backgroundColor_ = QColor(31, 15, 11);
     QImage clipboardImage_;
+    QVector<QUuid> copiedLayerIds_;   // Copy with no selection takes the layer itself; Paste brings it back whole (mac SelectionClipboard.swift)
     QPoint clipboardOrigin_;
     QTimer *autosaveTimer_ = nullptr;
     QVector<EditorSession> workspaceTabs_;
