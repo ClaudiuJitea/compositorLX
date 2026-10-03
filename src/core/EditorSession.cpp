@@ -1507,19 +1507,15 @@ bool EditorSession::applyGrain(double amount, double size, double roughness, qui
 bool EditorSession::applyGaussianBlur(double radius)
 {
     const Layer *layer = activeLayer(); if (!layer || layer->group || layer->image.isNull() || radius < .1 || radius > 250) return false;
-    const int index = indexOf(layer->id);
-    const QImage result = clippedPixels(layer->image, RasterOperations::gaussianBlur(layer->image, radius), *layer, document_->selection);
-    if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Gaussian Blur")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
+    return applySpreadingFilter(QStringLiteral("Gaussian Blur"), std::ceil(radius * 3 + 2),
+                                [radius](const QImage &image) { return RasterOperations::gaussianBlur(image, radius); });
 }
 
 bool EditorSession::applyMotionBlur(double angleDegrees, double distance)
 {
     const Layer *layer = activeLayer(); if (!layer || layer->group || layer->image.isNull() || angleDegrees < -90 || angleDegrees > 90 || distance < 1 || distance > 2000) return false;
-    const int index = indexOf(layer->id);
-    const QImage result = clippedPixels(layer->image, RasterOperations::motionBlur(layer->image, angleDegrees, distance), *layer, document_->selection);
-    if (result == layer->image) return false;
-    beginEdit(QStringLiteral("Motion Blur")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
+    return applySpreadingFilter(QStringLiteral("Motion Blur"), std::ceil(distance / 2 + 2),
+                                [angleDegrees, distance](const QImage &image) { return RasterOperations::motionBlur(image, angleDegrees, distance); });
 }
 
 bool EditorSession::applyBlackWhite(const float *weights, bool tint, double tintHue, double tintSaturation)
@@ -1602,11 +1598,16 @@ bool EditorSession::applyBloomGlow(double amount, double radius)
 {
     const Layer *layer = activeLayer();
     if (!layer || layer->group || layer->image.isNull() || amount <= 0 || radius <= 0) return false;
+    return applySpreadingFilter(QStringLiteral("Bloom / Glow"), std::ceil(radius * 3.0 + 2.0),
+                                [amount, radius](const QImage &image) { return RasterOperations::bloomGlow(image, amount, radius); });
+}
+
+bool EditorSession::applySpreadingFilter(const QString &historyName, double margin, const std::function<QImage(const QImage &)> &filter)
+{
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || layer->image.isNull()) return false;
     const int index = indexOf(layer->id);
     if (index < 0) return false;
-
-    // 1. Calculate blur margin: radius * 3 + 2 matching macOS Filters.swift:377
-    const double margin = std::ceil(radius * 3.0 + 2.0);
     const QRectF bounds(0, 0, layer->image.width(), layer->image.height());
     const QRectF extent = bounds.adjusted(-margin, -margin, margin, margin);
     const int grownWidth = qRound(extent.width());
@@ -1634,8 +1635,8 @@ bool EditorSession::applyBloomGlow(double amount, double radius)
     grownTransform.origin = QPointF(centerInDoc.x() - grownTransform.size.width() / 2.0,
                                     centerInDoc.y() - grownTransform.size.height() / 2.0);
 
-    // 4. Run Bloom / Glow on grown image
-    const QImage bloomed = RasterOperations::bloomGlow(grown, amount, radius);
+    // 4. Run the filter on the grown image
+    const QImage bloomed = filter(grown);
 
     // 5. Apply selection clipping
     Layer grownLayer = *layer;
@@ -1682,7 +1683,7 @@ bool EditorSession::applyBloomGlow(double amount, double radius)
     }
 
     // 8. Commit
-    beginEdit(QStringLiteral("Bloom / Glow"));
+    beginEdit(historyName);
     Layer &dst = document_->layers[index];
     dst.image = finalImage;
     dst.transform = finalTransform;
@@ -2428,9 +2429,32 @@ bool EditorSession::invertLayerMask()
 {
     const Layer *layer = activeLayer(); if (!layer || layer->mask.isNull()) return false;
     const int index = indexOf(layer->id);
-    QImage mask = layer->mask.convertToFormat(QImage::Format_Grayscale8);
-    for (int y = 0; y < mask.height(); ++y) { uchar *row = mask.scanLine(y); for (int x = 0; x < mask.width(); ++x) row[x] = uchar(255 - row[x]); }
-    beginEdit(QStringLiteral("Invert")); document_->layers[index].mask = mask; endEdit(); return true;
+    // A selection limits the invert (mac invertPixels on a mask); a uniform 1 x 1 mask is first given the layer's grid.
+    const bool limited = document_->selection.has_value();
+    QImage mask = limited ? expandedMaskImage(*layer) : layer->mask.convertToFormat(QImage::Format_Grayscale8);
+    QImage inverted = mask;
+    for (int y = 0; y < inverted.height(); ++y) { uchar *row = inverted.scanLine(y); for (int x = 0; x < inverted.width(); ++x) row[x] = uchar(255 - row[x]); }
+    if (limited) {
+        const QImage coverage = document_->selection->convertToFormat(QImage::Format_Grayscale8);
+        const LayerTransform placement = layer->maskPlacement.value_or(layer->transform);
+        QTransform toDocument;
+        toDocument.translate(placement.center().x(), placement.center().y());
+        toDocument.rotate(placement.rotation);
+        toDocument.scale((placement.flipX ? -1 : 1) * placement.size.width() / mask.width(),
+                         (placement.flipY ? -1 : 1) * placement.size.height() / mask.height());
+        toDocument.translate(-mask.width() / 2.0, -mask.height() / 2.0);
+        for (int y = 0; y < mask.height(); ++y) {
+            uchar *out = inverted.scanLine(y); const uchar *keep = mask.constScanLine(y);
+            for (int x = 0; x < mask.width(); ++x) {
+                const QPointF mapped = toDocument.map(QPointF(x + .5, y + .5));
+                const QPoint point(qFloor(mapped.x()), qFloor(mapped.y()));
+                const int amount = QRect(QPoint(), coverage.size()).contains(point) ? coverage.constScanLine(point.y())[point.x()] : 0;
+                out[x] = uchar((int(keep[x]) * (255 - amount) + int(out[x]) * amount + 127) / 255);
+            }
+        }
+    }
+    if (inverted == layer->mask) return false;
+    beginEdit(QStringLiteral("Invert Mask")); document_->layers[index].mask = inverted; endEdit(); return true;
 }
 
 bool EditorSession::canCopyLayerMask(const QUuid &sourceId, const QUuid &targetId) const

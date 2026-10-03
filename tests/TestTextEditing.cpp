@@ -340,6 +340,8 @@ void TestTextEditing::filtersWaitForTextEditing()
 {
     MainWindow window;
     window.session().createDocument(400, 300);
+    window.session().insertImage(QImage(100, 100, QImage::Format_RGBA8888_Premultiplied), QStringLiteral("Pixels"));
+    window.syncDocumentViews();
     window.show();
     QAction *invert = nullptr, *blur = nullptr;
     for (QAction *top : window.menuBar()->actions()) if (QMenu *menu = top->menu())

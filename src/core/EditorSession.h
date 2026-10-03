@@ -382,6 +382,9 @@ public:
     }
 
 private:
+    // A filter that reaches past the layer's edge (blur, bloom): runs on the layer padded by `margin` pixels on every
+    // side, then trims the empty padding again (mac PixelFilter.trimmed / FilterEdit.growForBlur).
+    bool applySpreadingFilter(const QString &historyName, double margin, const std::function<QImage(const QImage &)> &filter);
     [[nodiscard]] int indexOf(const QUuid &id) const;
     [[nodiscard]] QString nextName(const QString &base) const;
     [[nodiscard]] QSet<QUuid> selectedTransformLayerIds() const;

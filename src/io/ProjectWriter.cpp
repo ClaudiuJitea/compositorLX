@@ -1,4 +1,5 @@
 #include "io/ProjectWriter.h"
+#include "io/AdjustmentJson.h"
 #include "io/ProjectReader.h"
 
 #include <QDir>
@@ -282,6 +283,8 @@ void validateAdjustmentSettings(const QJsonObject &adj, int version)
         fail(QStringLiteral("%1 adjustment requires format version 9; version %2 cannot contain blurs or noise.").arg(kindStr).arg(version));
     }
 
+    if (const QString problem = adjustmentJsonError(adj); !problem.isEmpty()) fail(problem);
+
     const double hue = adj.value(QStringLiteral("hue")).toDouble(0.0);
     const double saturation = adj.value(QStringLiteral("saturation")).toDouble(0.0);
     const double lightness = adj.value(QStringLiteral("lightness")).toDouble(0.0);
@@ -558,7 +561,7 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
         }
 
         if (targetVersion >= 7 && !layer.adjustment.isEmpty()) {
-            value.insert(QStringLiteral("adjustment"), layer.adjustment);
+            value.insert(QStringLiteral("adjustment"), completedAdjustmentJson(layer.adjustment));
         }
 
         if (layer.text.has_value()) {

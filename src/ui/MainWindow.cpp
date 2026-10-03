@@ -2782,7 +2782,12 @@ void MainWindow::createActions()
     connect(flatten, &QAction::triggered, this, [this] { if (session_.flattenImage()) syncDocumentViews(); });
     image->addSeparator();
     auto *invert = image->addAction(tr("&Invert")); invert->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
-    connect(invert, &QAction::triggered, this, [this] { if (session_.invertActiveLayerPixels()) syncDocumentViews(); });
+    connect(invert, &QAction::triggered, this, [this] {
+        // With a mask targeted the command is "Invert Mask" (mac Image menu), limited to the selection like pixels are.
+        const bool changed = session_.isMaskSelected() ? session_.invertLayerMask() : session_.invertActiveLayerPixels();
+        if (changed) syncDocumentViews();
+    });
+    invert->setObjectName(QStringLiteral("commandInvert"));
     auto *blackWhite = image->addAction(tr("Black & White…"));
     auto *colorBalance = image->addAction(tr("Color Balance…"));
     connect(blackWhite, &QAction::triggered, this, &MainWindow::blackWhiteDialog);
@@ -2823,6 +2828,12 @@ void MainWindow::createActions()
     filterMenu->addAction(noise); filterMenu->addAction(lens);
     for (QAction *item : filterMenu->actions()) item->setProperty("needsCommittedText", true);
     for (QAction *item : {levels, exposure, hueSaturation, curves, gradientMap, grain, invert, blackWhite, colorBalance, noise, lens}) item->setProperty("needsCommittedText", true);
+    // mac canAdjustColors: an unhidden pixel layer, no mask targeted, one layer selected, a selection that isn't empty.
+    for (QAction *item : {levels, exposure, hueSaturation, curves, gradientMap, grain, blackWhite, colorBalance, noise, lens,
+                          cameraRaw, gaussianBlur, motionBlur, bloomGlowAction, ditherAction, tonalContrastAction})
+        item->setProperty("needsPixelLayer", true);
+    vignetteAction->setProperty("needsPixelLayer", true);
+    vignetteAction->setProperty("allowsEmptyLayer", true);   // mac canVignette: Vignette can also start an empty layer
 
     auto *brushTool = new QAction(this); brushTool->setShortcut(QKeySequence(Qt::Key_B));
     auto *moveTool = new QAction(this); moveTool->setShortcut(QKeySequence(Qt::Key_V));
@@ -4095,6 +4106,8 @@ void MainWindow::gaussianBlurDialog()
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
 
+    preview();   // the panel opens already showing its result, as mac beginFilter does
+
     if (runFloatingDialog(dialog) == QDialog::Accepted) {
         previewEnabled->setChecked(true);
         preview();
@@ -4163,6 +4176,8 @@ void MainWindow::motionBlurDialog()
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(buttons);
+
+    preview();   // the panel opens already showing its result, as mac beginFilter does
 
     if (runFloatingDialog(dialog) == QDialog::Accepted) {
         previewEnabled->setChecked(true);
@@ -6433,6 +6448,22 @@ void MainWindow::updateCommandStates()
     // The editor draws the text being edited, not its layer, so a filter's preview of it would be wrong: commit first.
     if (menuBar()) for (QAction *menuAction : menuBar()->actions()) if (QMenu *menu = menuAction->menu())
         for (QAction *item : menu->actions()) if (item->property("needsCommittedText").toBool()) item->setEnabled(!editingText);
+    {
+        const bool oneLayer = session_.selectedLayerIds().size() <= 1;
+        const bool selectionUsable = !hasSelection || session_.selectionBounds().has_value();
+        const bool visible = active && document_ && LayerRenderer::effectivelyVisible(*document_, *active);
+        const bool base = hasDocument && active && !active->group && active->adjustment.isEmpty() && !session_.isMaskSelected()
+                          && oneLayer && selectionUsable && visible && !editingText;
+        if (menuBar()) for (QAction *menuAction : menuBar()->actions()) if (QMenu *menu = menuAction->menu())
+            for (QAction *item : menu->actions()) if (item->property("needsPixelLayer").toBool())
+                item->setEnabled(base && (!active->image.isNull() || item->property("allowsEmptyLayer").toBool()));
+        if (QAction *item = action("commandInvert")) {
+            const bool maskTarget = session_.isMaskSelected();
+            item->setText(maskTarget ? tr("Invert Mask") : tr("&Invert"));
+            item->setEnabled(hasDocument && active && !editingText && oneLayer && selectionUsable && visible
+                             && (maskTarget ? !active->mask.isNull() && active->maskEnabled : !active->group && !active->image.isNull()));
+        }
+    }
     enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument);
     enabled("imageTrimAction", hasDocument); enabled("imageCropAction", hasDocument);
     enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy); enabled("commandCopyMerged", hasDocument && hasSelection);
