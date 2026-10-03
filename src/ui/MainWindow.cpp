@@ -2180,10 +2180,13 @@ MainWindow::MainWindow(QWidget *parent)
         syncLookControls();
         updateCommandStates();
     };
-    connect(canvas_, &CanvasWidget::textBoxRequested, this, [this, textFont, textSize, textAlignment, beginInlineText](const QRectF &box, bool areaText) {
+    connect(canvas_, &CanvasWidget::textBoxRequested, this, [this, textFont, textSize, textAlignment, textBold, textItalic, textTracking, textLeading, beginInlineText](const QRectF &box, bool areaText) {
         TextStyle style;
         style.content.clear();
-        style.fontName = textFont->currentFont().family();
+        // New text starts as the controls say: face (with Bold and Italic in its name), size, spacing.
+        style.fontName = composeTextFace(textFont->currentFont().family(), textBold->isChecked(), textItalic->isChecked());
+        style.tracking = textTracking->value();
+        style.leading = textLeading->value();
         style.fontSize = textSize->value();
         style.red = foregroundColor_.redF(); style.green = foregroundColor_.greenF(); style.blue = foregroundColor_.blueF();
         style.alignment = textAlignment->currentIndex() == 1 ? TextAlignment::Center : textAlignment->currentIndex() == 2 ? TextAlignment::Right : TextAlignment::Left;
@@ -2191,7 +2194,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (!areaText) {
             // A click puts the first baseline on the pointer, starting at it (as Photoshop's does): the box sits its padding
             // to the left and the first baseline's height above.
-            const double lineHeight = textLineHeight(style.fontSize, textLeadingField_->value());
+            const double lineHeight = textLineHeight(style.fontSize, style.leading);
             const double descent = QFontMetricsF(textFontForFace(style.fontName, style.fontSize)).descent();
             placed.moveTopLeft(QPointF(box.left() - kTextPadding, box.top() - (kTextPadding + lineHeight - descent)));
         }

@@ -12,6 +12,8 @@
 #include "rendering/TextLayout.h"
 #include "ui/CanvasWidget.h"
 #include "ui/InlineTextEditor.h"
+#include "ui/MainWindow.h"
+#include <QToolButton>
 
 #include <QFontMetricsF>
 #include <QTemporaryDir>
@@ -277,6 +279,9 @@ private slots:
     void eightHandlesResizeTheBoxAndReflow();
     void overflowMarkerShowsWhenTextDoesNotFit();
     void mixedFacesShareOneBaseline();
+    void copyAndCopyMergedIncludeTextPixels();
+    void copiedTextLayersPromoteTheFormat();
+    void boldAndItalicButtonsSetTheFaceOfNewAndExistingText();
 };
 
 // ---- TypeToolTests ---------------------------------------------------------------------------------------------
@@ -1090,6 +1095,80 @@ void TestTextLayers::mixedFacesShareOneBaseline()
         for (int x = image.width() - 40; x < image.width() - 12; ++x) if (image.pixelColor(x, y).alpha() > 128) lastBottom = y;
     }
     QVERIFY2(std::abs(firstBottom - lastBottom) <= 1, qPrintable(QString("%1 %2").arg(firstBottom).arg(lastBottom)));
+}
+
+void TestTextLayers::copyAndCopyMergedIncludeTextPixels()
+{
+    EditorSession session;
+    session.createDocument(400, 300);
+    QImage base(400, 300, QImage::Format_RGBA8888_Premultiplied); base.fill(Qt::white);
+    QVERIFY(session.insertPixelLayer(base, QPointF(0, 0), QStringLiteral("Base"), QStringLiteral("Fill"), false));
+    TextStyle s = style(QStringLiteral("Copy"), QStringLiteral("DejaVu Sans"), 60);
+    QVERIFY(session.addText(s, QRectF(20, 20, 0, 0), false, false, false, false));
+    const auto layerCopy = session.copiedPixels(false);
+    QVERIFY(layerCopy.has_value());
+    QVERIFY(inkPixels(layerCopy->first, 128) > 100);          // the letters, on transparency
+    QVERIFY(layerCopy->first.pixelColor(0, 0).alpha() == 0);
+    const auto merged = session.copiedPixels(true);
+    QVERIFY(merged.has_value());
+    // Merged: the same canvas pixels the exporter flattens, with the letters in it.
+    const QImage flat = LayerRenderer::flattened(*session.document());
+    const QImage mergedImage = merged->first.convertToFormat(QImage::Format_RGBA8888);
+    QCOMPARE(mergedImage.size(), flat.size());
+    QCOMPARE(mergedImage.convertToFormat(QImage::Format_RGBA8888), flat.convertToFormat(QImage::Format_RGBA8888));
+    int dark = 0;
+    for (int y = 0; y < mergedImage.height(); ++y) for (int x = 0; x < mergedImage.width(); ++x) if (mergedImage.pixelColor(x, y).lightness() < 60) ++dark;
+    QVERIFY(dark > 100);
+}
+
+void TestTextLayers::copiedTextLayersPromoteTheFormat()
+{
+    EditorSession session;
+    session.createDocument(400, 300);
+    TextStyle s = style(QStringLiteral("Runs"), QStringLiteral("DejaVu Sans"), 40);
+    s.setColor({1, 0, 0}, 0, 2);
+    s.setFont(QStringLiteral("Courier New"), 2, 2);
+    QVERIFY(session.addText(s, QRectF(), false, false, false, false));
+    Document target;
+    target.formatVersion = 9;
+    target.layers.append(session.document()->layers.last());
+    QVERIFY(ProjectWriter::minimumRequiredVersion(target) >= 11);
+}
+
+void TestTextLayers::boldAndItalicButtonsSetTheFaceOfNewAndExistingText()
+{
+    MainWindow window;
+    window.show();
+    EditorSession &session = window.session();
+    session.createDocument(400, 300);
+    window.syncDocumentViews();
+    auto *canvas = window.findChild<CanvasWidget *>();
+    auto *bold = window.findChild<QToolButton *>(QStringLiteral("textBold"));
+    auto *italic = window.findChild<QToolButton *>(QStringLiteral("textItalic"));
+    QVERIFY(canvas && bold && italic);
+    QVERIFY(!window.findChild<QToolButton *>(QStringLiteral("textUnderline")));   // not representable, so not offered
+    canvas->setTool(CanvasWidget::Tool::Text);
+    QCoreApplication::processEvents();
+    QVERIFY(bold->isVisible() && italic->isVisible());
+    // Before any text is open, the buttons set what new text starts as.
+    bold->setChecked(true);
+    emit canvas->textBoxRequested(QRectF(40, 60, 0, 0), false);
+    InlineTextEditor *editor = window.inlineTextEditor();
+    QVERIFY(editor);
+    QTest::keyClicks(editor, "Bold start");
+    QVERIFY(resolveTextFace(editor->faceAtSelection().isEmpty() ? editor->fallbackFace : editor->faceAtSelection()).bold());
+    // Toggling Italic on with the text open changes its letters' face; the saved name carries both.
+    italic->setChecked(true);
+    QVERIFY(resolveTextFace(editor->fallbackFace).italic || resolveTextFace(editor->faceAtSelection()).italic);
+    editor->finish(true);
+    QCoreApplication::processEvents();
+    const Layer *layer = session.activeLayer();
+    QVERIFY(layer && layer->text.has_value());
+    const TextFace saved = resolveTextFace(layer->text->fontName);
+    QVERIFY(saved.bold() && saved.italic);
+    // A click starts the first letter on the pointer: the box sits its padding to the left and the baseline's height above.
+    QVERIFY(std::abs(layer->transform.origin.x() - (40 - kTextPadding)) < 0.5);
+    QVERIFY(layer->transform.origin.y() < 60 - kTextPadding);
 }
 
 QTEST_MAIN(TestTextLayers)

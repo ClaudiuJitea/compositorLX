@@ -146,7 +146,21 @@ inline QSize pointTextBoxSize(QTextDocument &document, double fontSize, double l
 // baseline is where macOS Compositor's is.
 [[nodiscard]] inline double baselineShift(QTextDocument &document, double lineHeight)
 {
-    const double descent = QFontMetricsF(document.defaultFont()).descent();
+    // The descent that counts is the deepest of the faces on the first line, as AppKit works the line out.
+    double descent = QFontMetricsF(document.defaultFont()).descent();
+    const QTextBlock block = document.firstBlock();
+    if (block.isValid() && block.layout() && block.layout()->lineCount() > 0) {
+        document.size();
+        const QTextLine line = block.layout()->lineAt(0);
+        const int start = line.textStart(), end = start + line.textLength();
+        for (QTextBlock::iterator it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            const int from = fragment.position() - block.position();
+            if (from >= end || from + fragment.length() <= start) continue;
+            const QFont font = fragment.charFormat().font().resolve(document.defaultFont());
+            descent = std::max(descent, QFontMetricsF(font).descent());
+        }
+    }
     return (lineHeight - descent) - firstLineBaseline(document);
 }
 
