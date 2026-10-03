@@ -435,6 +435,13 @@ static void renderScope(const Document &document,
                 drawLayer(own, document, base, QPainter::CompositionMode_SourceOver);
             }
             const QImage baseCoverage = layerCoverage(document, base, {});
+            // Where the base's own shape has any coverage, clipped layers draw at full strength (its soft edge is put
+            // back at the end); its effects (stroke, glow) are never painted over.
+            QImage hardCoverage = baseCoverage;
+            for (int y = 0; y < canvasSize.height(); ++y) {
+                uchar *row = hardCoverage.scanLine(y);
+                for (int x = 0; x < canvasSize.width(); ++x) { const uchar v = row[x * 4 + 3] ? 255 : 0; row[x * 4] = row[x * 4 + 1] = row[x * 4 + 2] = row[x * 4 + 3] = v; }
+            }
             const QImage stackAlpha = stack;   // the base on its own: its alpha is what the stack keeps
             // Children draw over the base's color at full strength: lift the soft edge to opaque first.
             for (int y = 0; y < canvasSize.height(); ++y) {
@@ -478,6 +485,8 @@ static void renderScope(const Document &document,
                     {
                         QPainter cp(&childImg);
                         drawLayer(cp, document, layer, QPainter::CompositionMode_SourceOver);
+                        cp.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+                        cp.drawImage(0, 0, hardCoverage);
                     }
                     if (customMode(layer.blendMode)) {
                         customComposite(stack, childImg, layer.blendMode);
