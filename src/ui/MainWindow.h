@@ -99,6 +99,7 @@ public:
     [[nodiscard]] QDoubleSpinBox *brushSizeField() const { return brushSizeField_; }
     [[nodiscard]] QDoubleSpinBox *brushHardnessField() const { return brushHardnessField_; }
     [[nodiscard]] QDoubleSpinBox *brushOpacityField() const { return brushOpacityField_; }
+    [[nodiscard]] QDoubleSpinBox *blurRadiusField() const { return blurRadiusField_; }
     [[nodiscard]] QDoubleSpinBox *brushSmoothingField() const { return brushSmoothingField_; }
     [[nodiscard]] QDoubleSpinBox *xField() const { return xField_; }
     [[nodiscard]] QDoubleSpinBox *yField() const { return yField_; }
@@ -121,6 +122,7 @@ public:
     void cycleSmearMode();
     void cycleToolMode();
     void updateSmearStatusHint();
+    void updateBlurRadiusVisibility();
 
     QFuture<ProjectWriter::SaveResult> saveProjectAsync(int tabIndex = -1, bool asNew = false, const QString &explicitDestination = QString(), bool isAutosave = false);
     QFuture<ProjectWriter::SaveResult> saveRecoveryAsync(int tabIndex = -1);
@@ -257,6 +259,7 @@ private:
     ScrubLabel *brushSizeLabel_ = nullptr;
     ScrubLabel *brushHardnessLabel_ = nullptr;
     ScrubLabel *brushOpacityLabel_ = nullptr;
+    ScrubLabel *blurRadiusLabel_ = nullptr;
     ScrubLabel *brushSmoothingLabel_ = nullptr;
     ScrubLabel *shapeRadiusLabel_ = nullptr;
     ScrubLabel *shapeLineWidthLabel_ = nullptr;
@@ -277,6 +280,7 @@ private:
     QDoubleSpinBox *brushSizeField_ = nullptr;
     QDoubleSpinBox *brushHardnessField_ = nullptr;
     QDoubleSpinBox *brushOpacityField_ = nullptr;
+    QDoubleSpinBox *blurRadiusField_ = nullptr;
     QDoubleSpinBox *brushSmoothingField_ = nullptr;
     QDoubleSpinBox *shapeRadiusField_ = nullptr;
     QDoubleSpinBox *shapeLineWidthField_ = nullptr;
@@ -294,6 +298,7 @@ private:
     double brushDiameter_ = 40;
     double brushHardness_ = 1;
     double brushOpacity_ = 1;
+    double blurRadius_ = 5;
     double brushSmoothing_ = 0;
     int pendingOpacityDigit_ = -1;
     qint64 pendingOpacityAt_ = 0;

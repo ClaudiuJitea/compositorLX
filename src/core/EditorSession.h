@@ -199,7 +199,7 @@ public:
                           bool aligned = true, bool sampleAllLayers = false);
     bool beginHealingStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1,
                             double opacity = 1, int mode = 0, quint32 seed = 0);
-    bool beginBlurStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1, double opacity = 1);
+    bool beginBlurStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1, double opacity = 1, double radius = 5);
     bool beginWarpStroke(const QPointF &documentPoint, int mode, double diameter = 40, double hardness = 1, double strength = 1);
     void continueBrushStroke(const QPointF &documentPoint);
     bool endBrushStroke();
@@ -407,6 +407,7 @@ private:
         QRect tailBounds;
         QRect dirtyPixels;
         bool changed = false;
+        double blurRadius = 5;
     };
     std::optional<BrushState> brush_;
     struct WarpState {
@@ -419,7 +420,9 @@ private:
         QImage original;
         QImage working;
         QImage coverage;
-        QVector<float> carried;
+        QByteArray carried;
+        // Liquify: how far each pixel's source lies from it, in tiles allocated as the stroke reaches them.
+        QHash<qint64, QVector<float>> offsets;
         bool changed = false;
     };
     std::optional<WarpState> warp_;

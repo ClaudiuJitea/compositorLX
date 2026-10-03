@@ -877,6 +877,7 @@ MainWindow::MainWindow(QWidget *parent)
     smearMode_->setVisible(false);
     auto *smearMode = smearMode_;
     connect(smearMode_, &SegmentedControl::currentIndexChanged, this, [this](int) {
+        updateBlurRadiusVisibility();
         updateSmearStatusHint();
     });
     auto *cloneAligned = new QCheckBox(tr("Aligned"), transformBar); cloneAligned->setChecked(true); cloneAligned->setVisible(false);
@@ -983,6 +984,10 @@ MainWindow::MainWindow(QWidget *parent)
     brushOpacityField_ = numberField(transformBar, QStringLiteral("Opacity"), 100, &brushOpacityLabel_, 1.0);
     brushOpacityField_->setRange(1, 100); brushOpacityField_->setValue(100); brushOpacityField_->setSuffix(QStringLiteral(" %"));
     brushOpacityField_->setVisible(false); brushOpacityLabel_->setVisible(false);
+    blurRadiusField_ = numberField(transformBar, QStringLiteral("Radius"), 50, &blurRadiusLabel_, 0.5);
+    blurRadiusField_->setRange(0.5, 50); blurRadiusField_->setDecimals(1); blurRadiusField_->setValue(blurRadius_); blurRadiusField_->setSuffix(QStringLiteral(" px"));
+    blurRadiusField_->setObjectName(QStringLiteral("blurRadius")); blurRadiusLabel_->setObjectName(QStringLiteral("blurRadiusLabel"));
+    blurRadiusLabel_->setToolTip(tr("How far the blur softens, in pixels")); blurRadiusField_->setVisible(false); blurRadiusLabel_->setVisible(false);
     brushSmoothingField_ = numberField(transformBar, QStringLiteral("Smoothing"), 100, &brushSmoothingLabel_, 1.0);
     brushSmoothingField_->setRange(0, 100); brushSmoothingField_->setValue(0); brushSmoothingField_->setSuffix(QStringLiteral(" %"));
     brushSmoothingField_->setVisible(false); brushSmoothingLabel_->setVisible(false);
@@ -1028,7 +1033,7 @@ MainWindow::MainWindow(QWidget *parent)
     transformLayout->addGroup({shapeKind});
     transformLayout->addGroup({shapeRadiusLabel_, shapeRadiusField_, shapeLineWidthLabel_, shapeLineWidthField_});
     transformLayout->addGroup({brushSizeLabel_, brushSizeField_, brushHardnessLabel_, brushHardnessField_,
-                               brushOpacityLabel_, brushOpacityField_, brushSmoothingLabel_, brushSmoothingField_});
+                               brushOpacityLabel_, brushOpacityField_, blurRadiusLabel_, blurRadiusField_, brushSmoothingLabel_, brushSmoothingField_});
     transformLayout->addGroup({cloneAligned});
     transformLayout->addGroup({cloneSample});
     transformLayout->addGroup({textFont, textSizeLabel_, textSizeField_, textTrackingLabel_, textTrackingField_, textLeadingLabel_, textLeadingField_});
@@ -1132,6 +1137,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
     connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushHardness_ = value / 100.0; });
     connect(brushOpacityField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushOpacity_ = value / 100.0; });
+    connect(blurRadiusField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { blurRadius_ = value; });
     connect(brushSmoothingField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         brushSmoothing_ = value;
         session_.setBrushSmoothing(value);
@@ -1218,6 +1224,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (tool == CanvasWidget::Tool::Blur) {
             updateSmearStatusHint();
         }
+        updateBlurRadiusVisibility();
         const bool smoothingVisible = (tool == CanvasWidget::Tool::Brush || tool == CanvasWidget::Tool::Eraser);
         brushSmoothingLabel_->setVisible(smoothingVisible);
         brushSmoothingField_->setVisible(smoothingVisible);
@@ -1883,7 +1890,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(canvas_, &CanvasWidget::blurStrokeStarted, this, [this, smearMode, explainRefusal](const QPointF &point) {
         explainRefusal();
-        if (smearMode->currentIndex() == 1) session_.beginBlurStroke(point, brushDiameter_, brushHardness_, brushOpacity_);
+        if (smearMode->currentIndex() == 1) session_.beginBlurStroke(point, brushDiameter_, brushHardness_, brushOpacity_, blurRadius_);
         else session_.beginWarpStroke(point, smearMode->currentIndex() == 0 ? 0 : 1, brushDiameter_, brushHardness_, brushOpacity_);
         canvas_->invalidateDocument();
     });
@@ -2202,6 +2209,13 @@ void MainWindow::cycleToolMode()
     default:
         break;
     }
+}
+
+void MainWindow::updateBlurRadiusVisibility()
+{
+    // Blur has a Radius of its own, apart from Strength; Liquify and Smudge have none.
+    const bool visible = canvas_ && smearMode_ && canvas_->tool() == CanvasWidget::Tool::Blur && smearMode_->currentIndex() == 1;
+    blurRadiusLabel_->setVisible(visible); blurRadiusField_->setVisible(visible);
 }
 
 void MainWindow::updateSmearStatusHint()

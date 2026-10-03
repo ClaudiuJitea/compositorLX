@@ -61,3 +61,9 @@ add_executable(dither_tests
 target_include_directories(dither_tests PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(dither_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME dither_tests COMMAND dither_tests -platform offscreen)
+add_executable(paint_tools_tests
+    TestPaintTools.cpp
+)
+target_include_directories(paint_tools_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(paint_tools_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME paint_tools_tests COMMAND paint_tools_tests -platform offscreen)
