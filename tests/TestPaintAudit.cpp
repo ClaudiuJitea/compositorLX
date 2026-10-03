@@ -440,6 +440,91 @@ private slots:
         QVERIFY(s.beginBrushStroke(QPointF(50, 50), Qt::black, 10, 1, 1, true)); s.endBrushStroke();
         QCOMPARE(alphaAt(s, 50, 50), 0); QCOMPARE(s.activeLayer()->image.size(), QSize(20, 20));
     }
+    // Pointer-driven: real mouse events through CanvasWidget (offscreen)
+private:
+    struct Rig {
+        MainWindow window;
+        CanvasWidget *canvas() { return window.canvas(); }
+        EditorSession &session() { return window.session(); }
+        QPoint at(double x, double y) { const QPointF p = canvas()->canvasRect().topLeft() + QPointF(x, y) * canvas()->zoom(); return p.toPoint(); }
+        void press(double x, double y, Qt::KeyboardModifiers m = {}) { QTest::mousePress(canvas(), Qt::LeftButton, m, at(x, y)); }
+        void move(double x, double y) { QTest::mouseMove(canvas(), at(x, y)); QMouseEvent e(QEvent::MouseMove, QPointF(at(x, y)), QPointF(at(x, y)), Qt::NoButton, Qt::LeftButton, Qt::NoModifier); QCoreApplication::sendEvent(canvas(), &e); }
+        void release(double x, double y, Qt::KeyboardModifiers m = {}) { QTest::mouseRelease(canvas(), Qt::LeftButton, m, at(x, y)); }
+    };
+    static void setup(Rig &r, int w, int h)
+    {
+        r.window.resize(1100, 800); r.window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&r.window));
+        r.session().createDocument(w, h); r.session().addBlankLayer(); r.window.syncDocumentViews();
+        r.canvas()->setZoom(1.0); QCoreApplication::processEvents();
+    }
+private slots:
+    void mouseDrivenBrushStrokePaintsAndCommitsOneUndo()
+    {
+        Rig r; setup(r, 200, 100);
+        auto *size = r.window.findChild<QDoubleSpinBox *>("brushSize"); r.canvas()->setTool(CanvasWidget::Tool::Brush);
+        size->setValue(10); r.session().setForegroundColor(Qt::red); r.window.refreshPaletteSwatches();
+        const int undo = r.session().history().undoCount();
+        r.press(20, 50); r.move(60, 50); r.move(120, 50); r.release(120, 50);
+        QCOMPARE(r.session().history().undoCount(), undo + 1);
+        QCOMPARE(QColor(LayerRenderer_flat(r.session()).pixelColor(70, 50)), QColor(Qt::red));
+        QCOMPARE(LayerRenderer_flat(r.session()).pixelColor(70, 20).alpha(), 0);
+        // Shift-click draws a straight line from where the last stroke ended
+        r.press(120, 80, Qt::ShiftModifier); r.release(120, 80, Qt::ShiftModifier);
+        QVERIFY(LayerRenderer_flat(r.session()).pixelColor(120, 65).alpha() > 0);
+    }
+    void mouseDrivenEraserAndMaskPaintUsesPalette()
+    {
+        Rig r; setup(r, 100, 100);
+        r.session().beginBrushStroke(QPointF(50, 50), Qt::red, 300, 1, 1, false); r.session().endBrushStroke();
+        QVERIFY(r.session().addLayerMask(true)); r.session().selectMaskTarget(true); r.window.syncDocumentViews();
+        r.canvas()->setTool(CanvasWidget::Tool::Brush);
+        r.window.findChild<QDoubleSpinBox *>("brushSize")->setValue(20);
+        r.press(50, 50); r.release(50, 50);                    // black hides
+        QCOMPARE(LayerRenderer_flat(r.session()).pixelColor(50, 50).alpha(), 0);
+        r.session().setMaskPaintWhite(true);
+        r.press(50, 50); r.release(50, 50);                    // white reveals again
+        QCOMPARE(LayerRenderer_flat(r.session()).pixelColor(50, 50).alpha(), 255);
+    }
+    void optionClickPicksColourInPaintingTools()
+    {
+        Rig r; setup(r, 100, 100);
+        r.session().beginBrushStroke(QPointF(50, 50), QColor(10, 200, 30), 300, 1, 1, false); r.session().endBrushStroke();
+        for (auto tool : {CanvasWidget::Tool::Brush, CanvasWidget::Tool::Eraser, CanvasWidget::Tool::Healing, CanvasWidget::Tool::Gradient}) {
+            r.session().setForegroundColor(Qt::black);
+            r.canvas()->setTool(tool);
+            const int undo = r.session().history().undoCount();
+            r.press(40, 40, Qt::AltModifier); r.release(40, 40, Qt::AltModifier);
+            QCOMPARE(r.session().foregroundColor(), QColor(10, 200, 30));
+            QCOMPARE(r.session().history().undoCount(), undo);   // it picked, it did not paint
+        }
+    }
+    void pointerDrivenGradientHandlesDragAndApply()
+    {
+        Rig r; setup(r, 200, 20);
+        r.session().setForegroundColor(Qt::black); r.session().setBackgroundColor(Qt::white); r.window.refreshPaletteSwatches();
+        r.canvas()->setTool(CanvasWidget::Tool::Gradient);
+        if (auto *style = r.window.findChild<QWidget *>("gradientOpacity")) Q_UNUSED(style);
+        r.press(10, 10); r.move(100, 10); r.release(100, 10);
+        QVERIFY(r.canvas()->hasPendingGradient());
+        const int whileDragging = LayerRenderer_flat(r.session()).pixelColor(50, 10).alpha();
+        // drag the end handle further right: the pending gradient is re-rendered, not stacked
+        r.press(100, 10); r.move(190, 10); r.release(190, 10);
+        QVERIFY(r.canvas()->hasPendingGradient());
+        const int mid = LayerRenderer_flat(r.session()).pixelColor(100, 10).alpha();
+        QVERIFY(whileDragging > 0 && mid > 0);
+        r.canvas()->resolvePendingGradient(true);
+        QVERIFY(!r.canvas()->hasPendingGradient());
+        const QImage flat = LayerRenderer_flat(r.session());
+        QVERIFY(flat.pixelColor(10, 10).alpha() > 200);                 // foreground end (opaque)
+        QVERIFY(flat.pixelColor(150, 10).alpha() < flat.pixelColor(10, 10).alpha());   // fading (to transparent by default)
+        // Escape cancels a new pending one without touching the layer
+        const Layer committed = *r.session().activeLayer();
+        r.press(10, 15); r.move(80, 15); r.release(80, 15);
+        QVERIFY(r.canvas()->hasPendingGradient());
+        r.canvas()->resolvePendingGradient(false);
+        QVERIFY(*r.session().activeLayer() == committed);
+    }
     // SpotHealingTests (all modes) and CloneStampTests
     static QImage blemished()
     {
