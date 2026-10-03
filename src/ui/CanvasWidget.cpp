@@ -30,6 +30,36 @@
 
 namespace compositor {
 
+namespace {
+// The topmost visible text layer whose (rotated, flipped) rectangle holds `point`; folders that are hidden hide what is
+// inside them (macOS beginTextGesture: effectiveVisibleIDs and transform.contains).
+std::optional<QUuid> textLayerAt(const Document &document, const QPointF &point)
+{
+    const auto visible = [&document](const Layer &layer) {
+        for (const Layer *current = &layer;;) {
+            if (!current->visible) return false;
+            if (!current->parentId) return true;
+            const auto parent = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &l) { return l.id == *current->parentId; });
+            if (parent == document.layers.cend()) return true;
+            current = &*parent;
+        }
+    };
+    for (auto it = document.layers.crbegin(); it != document.layers.crend(); ++it) {
+        if (it->group || !it->text.has_value() || !visible(*it)) continue;
+        QTransform inverse;
+        inverse.translate(it->transform.center().x(), it->transform.center().y());
+        inverse.rotate(it->transform.rotation);
+        bool ok = false;
+        const QTransform back = inverse.inverted(&ok);
+        if (!ok) continue;
+        const QPointF local = back.map(point);
+        if (std::abs(local.x()) <= it->transform.size.width() / 2.0 && std::abs(local.y()) <= it->transform.size.height() / 2.0) return it->id;
+    }
+    return std::nullopt;
+}
+}
+
+
 static QCursor zoomCursor(bool out)
 {
     QPixmap pixmap(28, 28); pixmap.fill(Qt::transparent); QPainter painter(&pixmap); painter.setRenderHint(QPainter::Antialiasing);
@@ -1024,12 +1054,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
     }
     if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Text) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
-        for (auto it = document_->layers.crbegin(); it != document_->layers.crend(); ++it) {
-            if (it->visible && !it->group && (it->text.has_value() || it->shape.value(QStringLiteral("kind")).toString() == QStringLiteral("Text"))
-                && QRectF(it->transform.origin, it->transform.size).contains(point)) {
-                emit textLayerEditRequested(it->id); event->accept(); return;
-            }
-        }
+        if (const auto hit = textLayerAt(*document_, point)) { emit textLayerEditRequested(*hit); event->accept(); return; }
     }
     if (event->button() == Qt::LeftButton && document_ && (tool_ == Tool::Gradient || tool_ == Tool::Shape || tool_ == Tool::Text)) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
@@ -1709,13 +1734,7 @@ void CanvasWidget::mouseDoubleClickEvent(QMouseEvent *event)
     if (editorInteractionBlocked_) { event->accept(); return; }
     if (event->button() == Qt::LeftButton && document_ && (tool_ == Tool::Move || tool_ == Tool::Text)) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
-        for (auto it = document_->layers.crbegin(); it != document_->layers.crend(); ++it) {
-            if (it->visible && !it->group && (it->text.has_value() || it->shape.value(QStringLiteral("kind")).toString() == QStringLiteral("Text"))
-                && QRectF(it->transform.origin, it->transform.size).contains(point)) {
-                if (tool_ != Tool::Text) setTool(Tool::Text);
-                emit textLayerEditRequested(it->id); event->accept(); return;
-            }
-        }
+        if (const auto hit = textLayerAt(*document_, point)) { if (tool_ != Tool::Text) setTool(Tool::Text); emit textLayerEditRequested(*hit); event->accept(); return; }
     }
     if (event->button() == Qt::LeftButton && tool_ == Tool::Lasso && polygonalLasso_ && lassoPoints_.size() >= 3) {
         const QPolygonF completed = lassoPoints_; lassoPoints_.clear(); emit polygonSelectionRequested(completed, lassoMode_, selectionAntialiased_); update(); event->accept(); return;

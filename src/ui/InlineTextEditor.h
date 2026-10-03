@@ -36,11 +36,15 @@ public:
             parent->installEventFilter(this);
         }
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        auto *grip = new QLabel(QStringLiteral("⌟"), this);
-        grip->setObjectName(QStringLiteral("inlineTextGrip"));
-        grip->setAlignment(Qt::AlignCenter);
-        grip->setAttribute(Qt::WA_TransparentForMouseEvents);
-        grip_ = grip;
+        viewport()->setMouseTracking(true);
+        setMouseTracking(true);
+        // The box's outline, its eight handles and the overflow marker are drawn over the whole editor, margins included.
+        auto *overlay = new BoxOverlay(this);
+        overlay->setObjectName(QStringLiteral("inlineTextGrip"));
+        overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
+        overlay->paintBox = [this](QPainter &painter) { paintBox(painter); };
+        grip_ = overlay;
+        connect(this, &QTextEdit::textChanged, overlay, [overlay] { overlay->update(); });
     }
 
 Q_SIGNALS:
@@ -56,6 +60,7 @@ public:
     bool areaText = true;
     double tracking = 0.0;
     double leading = 0.0;
+    double fontSize = 48.0;   // in layer pixels; a leading of 0 is Auto, 120% of it
 
     void syncCanvasGeometry()
     {
@@ -63,10 +68,15 @@ public:
         auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
         const qreal zoom = canvas ? canvas->zoom() : 1.0;
         const QRect geometry = canvas ? canvas->widgetRectForDocumentRect(canvasBox).toAlignedRect() : canvasBox.toAlignedRect();
-        const QMargins margins(qRound(4 * zoom), qRound(3 * zoom), qRound(4 * zoom), qRound(3 * zoom));
+        // The letters sit kTextPadding inside the box, as in the layer raster; a fixed line height puts the first baseline
+        // a little off where the document would, which the top margin makes up.
+        const double lineHeight = document()->firstBlock().blockFormat().lineHeight();
+        const double shift = lineHeight > 0 ? baselineShift(*document(), lineHeight) : 0.0;
+        const QMargins margins(qRound(kTextPadding * zoom), std::max(0, qRound(kTextPadding * zoom + shift)),
+                               qRound(kTextPadding * zoom), qRound(kTextPadding * zoom));
         if (viewportMargins() != margins) setViewportMargins(margins);
         setGeometry(geometry);
-        const int wrapWidth = std::max(1, qRound((canvasBox.width() - 8) * zoom));
+        const int wrapWidth = std::max(1, qRound((canvasBox.width() - 2 * kTextPadding) * zoom));
         if (areaText && lineWrapColumnOrWidth() != wrapWidth) setLineWrapColumnOrWidth(wrapWidth);
     }
 
@@ -75,9 +85,11 @@ public:
         if (areaText || wasResized_ || finishing_) return;
         auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
         const qreal zoom = canvas ? canvas->zoom() : 1.0;
-        const QSizeF content = document()->size();
-        canvasBox.setSize(QSizeF(std::max(40.0, document()->idealWidth() / zoom + 8),
-                                 std::max(20.0, content.height() / zoom + 6)));
+        const double lineHeight = std::max(1.0, document()->firstBlock().blockFormat().lineHeight());
+        // The text measures in the document's (zoomed) pixels; the padding is in layer pixels.
+        const double width = (document()->idealWidth() + std::max(1, document()->defaultFont().pixelSize()) * 0.1) / zoom + 2 * kTextPadding;
+        const double height = std::max(document()->size().height() / zoom, lineHeight / zoom) + 2 * kTextPadding;
+        canvasBox.setSize(QSizeF(std::max(16.0, std::ceil(width)), std::max(16.0, std::ceil(height))));
         syncCanvasGeometry();
     }
 
@@ -226,6 +238,27 @@ public:
 
     [[nodiscard]] bool wasResized() const { return wasResized_; }
 
+    // The edge or corner a point (in this widget's coordinates) is on, in handle order top-left, top, top-right, right,
+    // bottom-right, bottom, bottom-left, left: a band along each edge, as macOS's box has, rather than only the squares.
+    // -1 anywhere else, which is the text.
+    [[nodiscard]] int handleAt(const QPoint &point) const
+    {
+        const int reach = std::max(2, std::min(10, std::min(width(), height()) / 3));
+        if (point.x() < -reach || point.x() > width() + reach || point.y() < -reach || point.y() > height() + reach) return -1;
+        const bool left = point.x() <= reach, right = point.x() >= width() - reach;
+        const bool top = point.y() <= reach, bottom = point.y() >= height() - reach;
+        if (left && top) return 0;
+        if (right && top) return 2;
+        if (right && bottom) return 4;
+        if (left && bottom) return 6;
+        if (top) return 1;
+        if (right) return 3;
+        if (bottom) return 5;
+        if (left) return 7;
+        return -1;
+    }
+
+
     void finish(bool commit)
     {
         if (finishing_) return;
@@ -245,9 +278,11 @@ public:
         applySpacing();
     }
 
+    // Up closes the lines up, down opens them out, counting from whatever Auto works out to (as macOS does).
     void adjustLeading(double delta)
     {
-        leading = std::max(0.0, leading + delta);
+        const double current = textLineHeight(fontSize, leading);
+        leading = delta < 0 ? std::max(1.0, current + delta) : std::min(5000.0, current + delta);
         if (leadingAdjusted) leadingAdjusted(delta);
         applySpacing();
     }
@@ -264,9 +299,7 @@ public:
         cursor.select(QTextCursor::Document);
 
         QTextBlockFormat blockFormat;
-        if (leading > 0.0) {
-            blockFormat.setLineHeight(leading * zoom, QTextBlockFormat::MinimumHeight);
-        }
+        blockFormat.setLineHeight(textLineHeight(fontSize, leading) * zoom, QTextBlockFormat::FixedHeight);
         cursor.mergeBlockFormat(blockFormat);
 
         growPointText();
@@ -332,13 +365,36 @@ protected:
         QTextEdit::keyPressEvent(event);
     }
 
+    static Qt::CursorShape cursorForHandle(int handle)
+    {
+        switch (handle) {
+        case 0: case 4: return Qt::SizeFDiagCursor;
+        case 2: case 6: return Qt::SizeBDiagCursor;
+        case 1: case 5: return Qt::SizeVerCursor;
+        case 3: case 7: return Qt::SizeHorCursor;
+        default: return Qt::IBeamCursor;
+        }
+    }
+
+    // The margins around the text belong to this widget, not to its viewport, and a scroll area drops mouse events there:
+    // the box's edges are in them, so they are handled here.
+    bool event(QEvent *e) override
+    {
+        switch (e->type()) {
+        case QEvent::MouseButtonPress: mousePressEvent(static_cast<QMouseEvent *>(e)); return true;
+        case QEvent::MouseMove: mouseMoveEvent(static_cast<QMouseEvent *>(e)); return true;
+        case QEvent::MouseButtonRelease: mouseReleaseEvent(static_cast<QMouseEvent *>(e)); return true;
+        default: return QTextEdit::event(e);
+        }
+    }
+
     void mousePressEvent(QMouseEvent *event) override
     {
-        if (QRect(width() - 18, height() - 18, 18, 18).contains(event->position().toPoint())) {
-            resizing_ = true;
+        const int handle = event->button() == Qt::LeftButton ? handleAt(mapFromGlobal(event->globalPosition().toPoint())) : -1;
+        if (handle >= 0) {
+            resizeHandle_ = handle;
             resizeStart_ = event->globalPosition();
-            originalSize_ = size();
-            setCursor(Qt::SizeFDiagCursor);
+            originalGeometry_ = geometry();
             event->accept();
             return;
         }
@@ -347,32 +403,41 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
-        if (resizing_) {
+        if (resizeHandle_ >= 0) {
             const QPointF delta = event->globalPosition() - resizeStart_;
-            resize(std::max(120, originalSize_.width() + qRound(delta.x())),
-                   std::max(48, originalSize_.height() + qRound(delta.y())));
+            auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
+            const qreal zoom = canvas ? canvas->zoom() : 1.0;
+            const int minimum = std::max(1, qRound(16 * zoom));
+            QRect rect = originalGeometry_;
+            const int dx = qRound(delta.x()), dy = qRound(delta.y());
+            const int h = resizeHandle_;
+            if (h == 0 || h == 6 || h == 7) rect.setLeft(std::min(rect.left() + dx, rect.right() - minimum + 1));
+            if (h == 2 || h == 3 || h == 4) rect.setRight(std::max(rect.right() + dx, rect.left() + minimum - 1));
+            if (h == 0 || h == 1 || h == 2) rect.setTop(std::min(rect.top() + dy, rect.bottom() - minimum + 1));
+            if (h == 4 || h == 5 || h == 6) rect.setBottom(std::max(rect.bottom() + dy, rect.top() + minimum - 1));
+            // A box holds its text and wraps it rather than scaling it, whatever it was before.
+            wasResized_ = true;
+            areaText = true;
+            if (canvas) canvasBox = canvas->documentRectForWidgetRect(QRectF(rect));
+            else canvasBox = QRectF(rect);
+            setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+            setLineWrapMode(QTextEdit::FixedPixelWidth);
+            syncCanvasGeometry();
             event->accept();
             return;
         }
-        setCursor(QRect(width() - 18, height() - 18, 18, 18).contains(event->position().toPoint())
-                  ? Qt::SizeFDiagCursor : Qt::IBeamCursor);
+        const int handle = handleAt(mapFromGlobal(event->globalPosition().toPoint()));
+        setCursor(cursorForHandle(handle));
+        viewport()->setCursor(cursorForHandle(handle));
         QTextEdit::mouseMoveEvent(event);
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override
     {
-        if (resizing_) {
-            resizing_ = false;
-            wasResized_ = true;
-            areaText = true;
-            auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
-            if (canvas) {
-                canvasBox.setSize(canvas->documentRectForWidgetRect(geometry()).size());
-            }
-            setWordWrapMode(QTextOption::WordWrap);
-            setLineWrapMode(QTextEdit::FixedPixelWidth);
-            syncCanvasGeometry();
+        if (resizeHandle_ >= 0) {
+            resizeHandle_ = -1;
             setCursor(Qt::IBeamCursor);
+            viewport()->setCursor(Qt::IBeamCursor);
             event->accept();
             return;
         }
@@ -382,18 +447,52 @@ protected:
     void resizeEvent(QResizeEvent *event) override
     {
         QTextEdit::resizeEvent(event);
-        if (grip_) grip_->setGeometry(width() - 18, height() - 18, 16, 16);
-    }
-
-    void paintEvent(QPaintEvent *event) override
-    {
-        QTextEdit::paintEvent(event);
-        QPainter painter(viewport());
-        painter.setPen(QPen(QColor(94, 167, 242), 1));
-        painter.drawRect(viewport()->rect().adjusted(0, 0, -1, -1));
+        if (grip_) grip_->setGeometry(rect());
     }
 
 private:
+    // A transparent layer over the editor that draws the box: see paintBox.
+    class BoxOverlay final : public QWidget {
+    public:
+        explicit BoxOverlay(QWidget *parent) : QWidget(parent) {}
+        std::function<void(QPainter &)> paintBox;
+    protected:
+        void paintEvent(QPaintEvent *) override { QPainter painter(this); if (paintBox) paintBox(painter); }
+    };
+
+    // Text that does not fit the box is marked by a plus in the bottom-right handle, as in Photoshop.
+    [[nodiscard]] bool overflows() const
+    {
+        if (!areaText) return false;
+        auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
+        const qreal zoom = canvas ? canvas->zoom() : 1.0;
+        const double room = (canvasBox.height() - 2 * kTextPadding) * zoom;
+        return document()->size().height() > room + 0.5;
+    }
+
+    void paintBox(QPainter &painter)
+    {
+        const QColor accent(94, 167, 242);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.setPen(QPen(accent, 1));
+        painter.drawRect(rect().adjusted(0, 0, -1, -1));
+        const int size = 6;
+        const QPoint corners[8] = {rect().topLeft(), QPoint(width() / 2, 0), rect().topRight(), QPoint(width() - 1, height() / 2),
+                                   rect().bottomRight(), QPoint(width() / 2, height() - 1), rect().bottomLeft(), QPoint(0, height() / 2)};
+        for (const QPoint &center : corners) {
+            const QRect handle(center.x() - size / 2, center.y() - size / 2, size, size);
+            painter.fillRect(handle, Qt::white);
+            painter.setPen(QPen(accent, 1));
+            painter.drawRect(handle);
+        }
+        if (overflows()) {
+            const QPoint c = corners[4];
+            painter.setPen(QPen(Qt::black, 1));
+            painter.drawLine(c.x() - 2, c.y(), c.x() + 2, c.y());
+            painter.drawLine(c.x(), c.y() - 2, c.x(), c.y() + 2);
+        }
+    }
+
     void applyLetterFormat(const QTextCharFormat &format)
     {
         const QTextCursor selection = textCursor();
@@ -409,12 +508,12 @@ private:
 
     bool previewPushed_ = false;
     int previewSteps_ = 0;
-    QLabel *grip_ = nullptr;
-    bool resizing_ = false;
+    QWidget *grip_ = nullptr;
+    int resizeHandle_ = -1;
     bool wasResized_ = false;
     bool finishing_ = false;
     QPointF resizeStart_;
-    QSize originalSize_;
+    QRect originalGeometry_;
 };
 
 } // namespace compositor

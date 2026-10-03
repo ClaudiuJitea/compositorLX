@@ -100,6 +100,10 @@ add_library(compositor_core
     src/io/ImageImporter.cpp
     src/io/ImageImporter.h
     src/io/PSDReader.cpp
+    src/io/PSDText.cpp
+    src/io/PSDText.h
+    src/io/PSDVector.cpp
+    src/io/PSDVector.h
     src/io/PSDReader.h
     src/io/RawImporter.cpp
     src/io/RawImporter.h
@@ -117,6 +121,8 @@ add_library(compositor_core
     src/rendering/RasterOperations.h
     src/rendering/SubjectRemoval.cpp
     src/rendering/SubjectRemoval.h
+    src/rendering/TextFaces.cpp
+    src/rendering/TextFaces.h
     vendor/compositor-rendering/AdjustPixels.c
     vendor/compositor-rendering/BrushPixels.c
     vendor/compositor-rendering/ContentFill.c

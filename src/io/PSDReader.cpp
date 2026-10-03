@@ -1,4 +1,6 @@
 #include "io/PSDReader.h"
+#include "io/PSDText.h"
+#include "io/PSDVector.h"
 #include "rendering/RasterOperations.h"
 
 #include <QFile>
@@ -1556,6 +1558,12 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
     };
     QVector<LayerEntry> entries;
 
+    qint64 vectorBudget = remainingPixels;
+    for (const auto &rawLayer : raw) {
+        if (!rawLayer.image.isNull()) vectorBudget -= qint64(rawLayer.image.width()) * rawLayer.image.height();
+    }
+    vectorBudget = std::max<qint64>(0, vectorBudget);
+
     for (const auto &rawLayer : raw) {
         if (rawLayer.section == 3) {
             // Group closing divider (bottom)
@@ -1583,16 +1591,45 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
             });
         }
 
+        // Editable text and live shapes, from the type and vector blocks (macOS PSDReader.assemble).
+        std::optional<PSDTextSource> textSource;
+        std::optional<PSDTextRendered> textRendered;
+        std::optional<PSDVectorLive> liveShape;
+        std::optional<PSDVectorRaster> vectorRaster;
+        if (!isGroup) {
+            bool tooLarge = false;
+            if (kind == PSDLayerKind::Text) {
+                textSource = PSDText::parse(rawLayer.extra);
+                if (textSource) textRendered = PSDText::render(*textSource);
+            }
+            if (!textRendered) {
+                textSource.reset();
+                liveShape = PSDVector::live(rawLayer.extra, QSizeF(canvasWidth, canvasHeight), vectorBudget, &tooLarge);
+                if (!tooLarge && !liveShape && rawLayer.image.isNull())
+                    vectorRaster = PSDVector::raster(rawLayer.extra, QSizeF(canvasWidth, canvasHeight), vectorBudget, &tooLarge);
+            }
+            if (tooLarge) {
+                if (error) *error = psdErrorMessage(PSDErrorCode::TooLarge);
+                return false;
+            }
+            if (liveShape) vectorBudget = std::max<qint64>(0, vectorBudget - qint64(liveShape->image.width()) * liveShape->image.height());
+            if (vectorRaster) vectorBudget = std::max<qint64>(0, vectorBudget - qint64(vectorRaster->image.width()) * vectorRaster->image.height());
+        }
+
         if (kind == PSDLayerKind::Text) {
-            conversions.append(PSDConversion{
-                QUuid::createUuid(), layer.name,
-                QStringLiteral("Text layer was rasterized to pixels.")
-            });
+            if (textRendered) {
+                for (const QString &note : textSource->notes) conversions.append(PSDConversion{QUuid::createUuid(), layer.name, note});
+                const QString missing = PSDText::missingFontNote(textSource->style.fontName);
+                if (!missing.isEmpty()) conversions.append(PSDConversion{QUuid::createUuid(), layer.name, missing});
+            } else {
+                conversions.append(PSDConversion{QUuid::createUuid(), layer.name, PSDText::rasterizedNote()});
+            }
         } else if (kind == PSDLayerKind::Vector) {
-            conversions.append(PSDConversion{
-                QUuid::createUuid(), layer.name,
-                QStringLiteral("Vector shape was rasterized to pixels.")
-            });
+            if (liveShape) {
+                for (const QString &note : liveShape->notes) conversions.append(PSDConversion{QUuid::createUuid(), layer.name, note});
+            } else {
+                conversions.append(PSDConversion{QUuid::createUuid(), layer.name, QStringLiteral("Vector shape was rasterized to pixels.")});
+            }
         } else if (kind == PSDLayerKind::SmartObject) {
             conversions.append(PSDConversion{
                 QUuid::createUuid(), layer.name,
@@ -1655,6 +1692,20 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
             layer.transform.origin = QPointF(rawLayer.left, rawLayer.top);
             layer.transform.size = QSizeF(w, h);
             layer.image = rawLayer.image;
+            if (textRendered) {
+                layer.image = textRendered->image;
+                layer.transform = textRendered->transform;
+                layer.text = textSource->style;
+            } else if (liveShape) {
+                layer.image = liveShape->image;
+                layer.transform.origin = liveShape->bounds.topLeft();
+                layer.transform.size = liveShape->bounds.size();
+                layer.shapeStyle = liveShape->style;
+            } else if (vectorRaster) {
+                layer.image = vectorRaster->image;
+                layer.transform.origin = vectorRaster->bounds.topLeft();
+                layer.transform.size = vectorRaster->bounds.size();
+            }
         }
 
         if (!rawLayer.maskFromRender && !rawLayer.maskImage.isNull()) {

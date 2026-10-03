@@ -149,6 +149,7 @@ public:
     void setObjectSelectionSampleAllLayers(bool sampleAll) { objectSelectionSampleAllLayers_ = sampleAll; }
     bool invertActiveLayerPixels();
     bool fillSelection(const QColor &color);
+    // Paints a text layer's letters in `color`, keeping it text. False when the layer is not live text.
     bool clearSelectedPixels();
     // `historyName` defaults to "Transform Selection" ("Duplicate Pixels" when duplicating); a Cmd-drag or Cmd-arrow move
     // is "Move Pixels" (mac SelectionEdits.swift finishPixelMove).

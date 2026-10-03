@@ -1064,7 +1064,7 @@ MainWindow::MainWindow(QWidget *parent)
     auto *textFont = new QFontComboBox(transformBar); textFont->setObjectName(QStringLiteral("textFont")); textFont->setFixedWidth(170); textFont->setEditable(true); textFont->setInsertPolicy(QComboBox::NoInsert); textFont->setMaxVisibleItems(16); textFont->setToolTip(tr("Type to search or open the font list")); textFont->setVisible(false);
     if (textFont->completer()) { textFont->completer()->setCaseSensitivity(Qt::CaseInsensitive); textFont->completer()->setCompletionMode(QCompleter::PopupCompletion); }
     if (textFont->lineEdit()) { textFont->lineEdit()->setPlaceholderText(tr("Search fonts")); textFont->lineEdit()->setClearButtonEnabled(false); }
-    textSizeField_ = new QSpinBox(transformBar); textSizeField_->setObjectName(QStringLiteral("textSize")); textSizeField_->setRange(4, 1000); textSizeField_->setValue(48); textSizeField_->setSuffix(tr(" px")); textSizeField_->setFixedWidth(88); textSizeField_->setVisible(false);
+    textSizeField_ = new QSpinBox(transformBar); textSizeField_->setObjectName(QStringLiteral("textSize")); textSizeField_->setRange(1, 2000); textSizeField_->setValue(48); textSizeField_->setSuffix(tr(" px")); textSizeField_->setFixedWidth(88); textSizeField_->setVisible(false);
     textSizeLabel_ = new ScrubLabel(tr("Size"), textSizeField_, 1.0, 1.0, transformBar); textSizeLabel_->setObjectName(QStringLiteral("textSizeLabel")); textSizeLabel_->setVisible(false); textSizeLabel_->setToolTip(tr("Font Size"));
     auto *textSize = textSizeField_;
     textTrackingField_ = new QDoubleSpinBox(transformBar); textTrackingField_->setObjectName(QStringLiteral("textTracking")); textTrackingField_->setRange(-100.0, 1000.0); textTrackingField_->setValue(0.0); textTrackingField_->setDecimals(1); textTrackingField_->setSuffix(tr(" px")); textTrackingField_->setFixedWidth(88); textTrackingField_->setKeyboardTracking(false); textTrackingField_->setVisible(false);
@@ -1075,11 +1075,9 @@ MainWindow::MainWindow(QWidget *parent)
     auto *textLeading = textLeadingField_;
     auto *textBold = new QToolButton(); textBold->setObjectName(QStringLiteral("textBold")); textBold->setText(tr("B")); textBold->setCheckable(true); textBold->setToolTip(tr("Bold")); textBold->setFixedSize(32, 28);
     auto *textItalic = new QToolButton(); textItalic->setObjectName(QStringLiteral("textItalic")); textItalic->setText(tr("I")); textItalic->setCheckable(true); textItalic->setToolTip(tr("Italic")); textItalic->setFixedSize(32, 28);
-    auto *textUnderline = new QToolButton(); textUnderline->setObjectName(QStringLiteral("textUnderline")); textUnderline->setText(tr("U")); textUnderline->setCheckable(true); textUnderline->setToolTip(tr("Underline")); textUnderline->setFixedSize(32, 28);
     auto *textStyleGroup = new SegmentedGroup(transformBar);
     textStyleGroup->addButton(textBold);
     textStyleGroup->addButton(textItalic);
-    textStyleGroup->addButton(textUnderline);
     textStyleGroup->setVisible(false);
     auto *textAlignment = new SegmentedControl(transformBar); textAlignment->setObjectName(QStringLiteral("textAlignment"));
     textAlignment->addItem(editorIcon(24), tr("Align left"));
@@ -2150,28 +2148,32 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::shapeCreated, this, [this](ShapeKind kind, const QRectF &rect, double strokeWidth, double cornerRadius, const std::optional<QPointF> &start, const std::optional<QPointF> &end) {
         if (session_.addShape(kind, rect, session_.foregroundColor(), session_.foregroundColor(), strokeWidth, cornerRadius, start, end)) syncDocumentViews();
     });
-    const auto applyInlineTextFormat = [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textUnderline, textAlignment] {
+    const auto applyInlineTextFormat = [this, textFont, textSize, textTracking, textLeading, textAlignment] {
         auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly));
         if (!editor) return;
         editor->tracking = textTracking->value();
         editor->leading = textLeading->value();
-        // Size, weight and spacing belong to the whole text; each letter keeps its own color and face.
-        QFont font = textFont->currentFont(); font.setPixelSize(std::max(1, qRound(textSize->value() * canvas_->zoom()))); font.setBold(textBold->isChecked()); font.setItalic(textItalic->isChecked()); font.setUnderline(textUnderline->isChecked());
+        editor->fontSize = textSize->value();
+        // Size and spacing belong to the whole text; each letter keeps its own color and face (weight and slant are
+        // part of the face's name).
+        QFont font = textFontForFace(editor->fallbackFace.isEmpty() ? textFont->currentFont().family() : editor->fallbackFace,
+                                     std::max(1.0, textSize->value() * canvas_->zoom()));
         if (editor->tracking != 0.0) {
             font.setLetterSpacing(QFont::AbsoluteSpacing, editor->tracking * canvas_->zoom());
         }
         const QTextCursor originalCursor = editor->textCursor();
-        layoutTextDocument(*editor->document(), font, textAlignment->currentIndex(), editor->areaText, editor->leading * canvas_->zoom());
+        layoutTextDocument(*editor->document(), font, textAlignment->currentIndex(), editor->areaText,
+                           textLineHeight(editor->fontSize, editor->leading) * canvas_->zoom());
         editor->setTextCursor(originalCursor);
         editor->growPointText();
     };
     // The face applies to the selected letters (all the text when nothing is selected). The combo takes the focus,
     // but the editor keeps its selection, so the choice still lands on those letters.
-    connect(textFont, &QFontComboBox::currentFontChanged, this, [this](const QFont &font) {
+    connect(textFont, &QFontComboBox::currentFontChanged, this, [this, textBold, textItalic](const QFont &font) {
         auto *editor = inlineTextEditor();
         if (!editor) return;
         editor->endPreview(false);
-        editor->applyFace(font.family());
+        editor->applyFace(composeTextFace(font.family(), textBold->isChecked(), textItalic->isChecked()));
         editor->growPointText();
     });
     connect(textFont, QOverload<int>::of(&QComboBox::activated), this, [this](int) { if (auto *editor = inlineTextEditor()) editor->setFocus(Qt::OtherFocusReason); });
@@ -2179,17 +2181,27 @@ MainWindow::MainWindow(QWidget *parent)
     connect(textSize, &QSpinBox::valueChanged, this, [applyInlineTextFormat](int) { applyInlineTextFormat(); });
     connect(textTracking, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyInlineTextFormat](double) { applyInlineTextFormat(); });
     connect(textLeading, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyInlineTextFormat](double) { applyInlineTextFormat(); });
-    connect(textBold, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
-    connect(textItalic, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
-    connect(textUnderline, &QToolButton::toggled, this, [applyInlineTextFormat](bool) { applyInlineTextFormat(); });
+    // Bold and Italic change the face of the selected letters (all the text when nothing is selected): a face's name
+    // carries its weight and slant, so what is saved is what macOS Compositor would save.
+    const auto applyTraits = [this, textBold, textItalic] {
+        auto *editor = inlineTextEditor();
+        if (!editor) return;
+        const QString current = editor->faceAtSelection().isEmpty() ? editor->fallbackFace : editor->faceAtSelection();
+        editor->endPreview(false);
+        editor->applyFace(composeTextFace(current, textBold->isChecked(), textItalic->isChecked()));
+        editor->growPointText();
+    };
+    connect(textBold, &QToolButton::toggled, this, [applyTraits](bool) { applyTraits(); });
+    connect(textItalic, &QToolButton::toggled, this, [applyTraits](bool) { applyTraits(); });
     connect(textAlignment, &SegmentedControl::currentIndexChanged, this, [applyInlineTextFormat](int) { applyInlineTextFormat(); });
-    const auto beginInlineText = [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textUnderline, textAlignment, textDone, textCancel, applyInlineTextFormat]
+    const auto beginInlineText = [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textAlignment, textDone, textCancel, applyInlineTextFormat]
         (const QRectF &box, const TextStyle &style, bool areaText, const std::optional<QUuid> &layerId) {
         if (auto *existing = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) existing->finish(true);
         auto *editor = new InlineTextEditor(canvas_);
         editor->canvasBox = box; editor->areaText = areaText;
         editor->tracking = style.tracking;
         editor->leading = style.leading;
+        editor->fontSize = style.fontSize;
         {
             const QSignalBlocker tb(textTracking), lb(textLeading);
             textTracking->setValue(style.tracking);
@@ -2207,31 +2219,31 @@ MainWindow::MainWindow(QWidget *parent)
         editor->loadStyle(style);
         editor->setLineWrapMode(areaText ? QTextEdit::FixedPixelWidth : QTextEdit::NoWrap);
         textDone->setEnabled(true); textCancel->setEnabled(true);
-        editor->finished = [this, editor, textFont, textSize, textBold, textItalic, textUnderline, textAlignment, textDone, textCancel, box, areaText, layerId, style](bool commit) {
+        editor->finished = [this, editor, textFont, textSize, textAlignment, textDone, textCancel, box, areaText, layerId, style](bool commit) {
             textDone->setEnabled(false); textCancel->setEnabled(false);
             canvas_->setTextEditingLayer(std::nullopt);
             editor->endPreview(false);
-            if (commit && !editor->toPlainText().trimmed().isEmpty()) {
+            if (commit && (layerId || !editor->toPlainText().trimmed().isEmpty())) {
                 // Minimum editor size and rounded screen coordinates must not change layer geometry.
                 const QRectF documentBox = editor->canvasBox;
                 const bool fixedBox = areaText || editor->wasResized();
                 // The letters carry their own colors and faces; the controls own size, alignment and spacing.
                 TextStyle edited = style;
-                edited.fontSize = textSize->value();
+                if (qRound(style.fontSize) != textSize->value() || layerId == std::nullopt) edited.fontSize = textSize->value();
                 edited.alignment = textAlignment->currentIndex() == 1 ? TextAlignment::Center : textAlignment->currentIndex() == 2 ? TextAlignment::Right : TextAlignment::Left;
                 edited.tracking = editor->tracking;
                 edited.leading = editor->leading;
                 edited = editor->collectStyle(edited);
                 const bool changed = layerId
-                    ? session_.updateText(*layerId, edited, documentBox, textBold->isChecked(), textItalic->isChecked(), textUnderline->isChecked(), fixedBox)
-                    : session_.addText(edited, documentBox, textBold->isChecked(), textItalic->isChecked(), textUnderline->isChecked(), fixedBox);
+                    ? session_.updateText(*layerId, edited, documentBox, false, false, false, fixedBox)
+                    : session_.addText(edited, documentBox, false, false, false, fixedBox);
                 if (changed) { updateCommandStates(); syncDocumentViews(); return; }
             }
             updateCommandStates();
             canvas_->invalidateDocument(); syncDocumentViews(false);
         };
         // The swatch and the font menu follow the letters under the selection, or before the caret.
-        const auto syncLookControls = [this, editor, textFont] {
+        const auto syncLookControls = [this, editor, textFont, textBold, textItalic] {
             const QColor color = editor->colorAtSelection();
             if (color.isValid()) {
                 session_.setForegroundColor(color);
@@ -2239,12 +2251,15 @@ MainWindow::MainWindow(QWidget *parent)
             }
             if (textFont->view() && textFont->view()->isVisible()) return;
             const QString face = editor->faceAtSelection();
-            const QSignalBlocker blocker(textFont);
+            const QSignalBlocker blocker(textFont), boldBlocker(textBold), italicBlocker(textItalic);
             if (face.isEmpty()) {
                 textFont->setCurrentIndex(-1);
                 if (textFont->lineEdit()) textFont->lineEdit()->setText(tr("(Multiple)"));
             } else {
-                textFont->setCurrentFont(QFont(face));
+                const TextFace resolved = resolveTextFace(face);
+                textFont->setCurrentFont(QFont(resolved.family));
+                textBold->setChecked(resolved.bold());
+                textItalic->setChecked(resolved.italic);
             }
         };
         connect(editor, &QTextEdit::cursorPositionChanged, editor, syncLookControls);
@@ -2260,67 +2275,50 @@ MainWindow::MainWindow(QWidget *parent)
         syncLookControls();
         updateCommandStates();
     };
-    connect(canvas_, &CanvasWidget::textBoxRequested, this, [this, textFont, textSize, textAlignment, beginInlineText](const QRectF &box, bool areaText) {
+    connect(canvas_, &CanvasWidget::textBoxRequested, this, [this, textFont, textSize, textAlignment, textBold, textItalic, textTracking, textLeading, beginInlineText](const QRectF &box, bool areaText) {
         TextStyle style;
         style.content.clear();
-        style.fontName = textFont->currentFont().family();
+        // New text starts as the controls say: face (with Bold and Italic in its name), size, spacing.
+        style.fontName = composeTextFace(textFont->currentFont().family(), textBold->isChecked(), textItalic->isChecked());
+        style.tracking = textTracking->value();
+        style.leading = textLeading->value();
         style.fontSize = textSize->value();
         style.red = session_.foregroundColor().redF(); style.green = session_.foregroundColor().greenF(); style.blue = session_.foregroundColor().blueF();
         style.alignment = textAlignment->currentIndex() == 1 ? TextAlignment::Center : textAlignment->currentIndex() == 2 ? TextAlignment::Right : TextAlignment::Left;
-        beginInlineText(box, style, areaText, std::nullopt);
+        QRectF placed = box;
+        if (!areaText) {
+            // A click puts the first baseline on the pointer, starting at it (as Photoshop's does): the box sits its padding
+            // to the left and the first baseline's height above.
+            const double lineHeight = textLineHeight(style.fontSize, style.leading);
+            const double descent = QFontMetricsF(textFontForFace(style.fontName, style.fontSize)).descent();
+            placed.moveTopLeft(QPointF(box.left() - kTextPadding, box.top() - (kTextPadding + lineHeight - descent)));
+        }
+        beginInlineText(placed, style, areaText, std::nullopt);
     });
-    connect(canvas_, &CanvasWidget::textLayerEditRequested, this, [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textUnderline, textAlignment, beginInlineText](const QUuid &id) {
+    connect(canvas_, &CanvasWidget::textLayerEditRequested, this, [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textAlignment, beginInlineText](const QUuid &id) {
         // Commit using the previous layer's controls before loading the next layer's style.
         if (auto *existing = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) existing->finish(true);
         if (!document_) return;
         auto it = std::find_if(document_->layers.begin(), document_->layers.end(), [&id](const Layer &layer) { return layer.id == id; });
         if (it == document_->layers.end()) return;
-        const QJsonObject metadata = it->shape;
-        const QSignalBlocker fontBlock(textFont), sizeBlock(textSize), trackingBlock(textTracking), leadingBlock(textLeading), boldBlock(textBold), italicBlock(textItalic), underlineBlock(textUnderline), alignmentBlock(textAlignment);
-        TextStyle style;
-        int pixelSize = 48;
-        bool bold = false;
-        bool italic = false;
-        bool underline = false;
-        int align = 0;
-        QColor color = session_.foregroundColor();
-        bool areaText = false;
-
-        if (it->text.has_value()) {
-            style = *it->text;
-            pixelSize = qRound(style.fontSize);
-            color = QColor::fromRgbF(style.red, style.green, style.blue);
-            if (style.alignment == TextAlignment::Center) align = 1;
-            else if (style.alignment == TextAlignment::Right) align = 2;
-            areaText = style.boxSize.has_value();
-            bold = metadata.value(QStringLiteral("bold")).toBool();
-            italic = metadata.value(QStringLiteral("italic")).toBool();
-            underline = metadata.value(QStringLiteral("underline")).toBool();
-        } else {
-            style.content = metadata.value(QStringLiteral("text")).toString();
-            style.fontName = metadata.value(QStringLiteral("fontFamily")).toString(QStringLiteral("Helvetica"));
-            pixelSize = metadata.value(QStringLiteral("pixelSize")).toInt(48);
-            bold = metadata.value(QStringLiteral("bold")).toBool();
-            italic = metadata.value(QStringLiteral("italic")).toBool();
-            underline = metadata.value(QStringLiteral("underline")).toBool();
-            align = std::clamp(metadata.value(QStringLiteral("alignment")).toInt(), 0, 2);
-            const QColor c(metadata.value(QStringLiteral("fill")).toString());
-            if (c.isValid()) color = c;
-            areaText = metadata.value(QStringLiteral("areaText")).toBool();
-            style.fontSize = pixelSize;
-            style.alignment = align == 1 ? TextAlignment::Center : align == 2 ? TextAlignment::Right : TextAlignment::Left;
-            style.red = color.redF(); style.green = color.greenF(); style.blue = color.blueF();
-        }
+        const QSignalBlocker fontBlock(textFont), sizeBlock(textSize), trackingBlock(textTracking), leadingBlock(textLeading), boldBlock(textBold), italicBlock(textItalic), alignmentBlock(textAlignment);
+        if (!it->text.has_value()) return;
+        TextStyle style = *it->text;
+        const int pixelSize = qRound(style.fontSize);
+        const QColor color = QColor::fromRgbF(style.red, style.green, style.blue);
+        const int align = style.alignment == TextAlignment::Center ? 1 : style.alignment == TextAlignment::Right ? 2 : 0;
+        const bool areaText = style.boxSize.has_value();
+        const TextFace face = resolveTextFace(style.fontName);
+        const bool bold = face.bold(), italic = face.italic;
         const double tracking = style.tracking;
         const double leading = style.leading;
-        const QString fontName = style.fontName;
 
-        textFont->setCurrentFont(QFont(fontName));
+        textFont->setCurrentFont(QFont(face.family));
         textSize->setValue(pixelSize);
         textTracking->setValue(tracking);
         textLeading->setValue(leading);
         textBold->setChecked(bold); textItalic->setChecked(italic);
-        textUnderline->setChecked(underline); textAlignment->setCurrentIndex(align);
+        textAlignment->setCurrentIndex(align);
         if (color.isValid()) {
             session_.setForegroundColor(color);
             refreshPaletteSwatches();
