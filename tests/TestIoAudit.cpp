@@ -277,6 +277,8 @@ private slots:
     void openingAMissingProjectNamesIt();
     void tabsKeepIndependentDocumentsAndUndo();
     void tabReorderKeepsDocumentsAndExternalWatch();
+    void tabDragReorderWithRealMouseEvents();
+    void copyThenPasteAcrossTabs();
     void quitAsksAboutEveryUnsavedTab();
     void closeTabAsksAndRemoves();
     void unsavedMarkOnTabAndTitle();
@@ -1178,6 +1180,66 @@ void TestIoAudit::tabReorderKeepsDocumentsAndExternalWatch()
     ProjectWriter::save(changed, b);
     tabs->setCurrentIndex(0);
     QTRY_COMPARE_WITH_TIMEOUT(window.document()->layers.first().name, QStringLiteral("Changed externally"), 8000);
+}
+
+void TestIoAudit::tabDragReorderWithRealMouseEvents()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString a = saveSimpleProject(dir, QStringLiteral("A.comp"), Qt::red);
+    const QString b = saveSimpleProject(dir, QStringLiteral("B.comp"), Qt::blue);
+    const QString c = saveSimpleProject(dir, QStringLiteral("C.comp"), Qt::green);
+    MainWindow window;
+    window.resize(1200, 800);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *tabs = window.findChild<QTabBar *>(QStringLiteral("documentTabs"));
+    QVERIFY(window.openProject(a)); QVERIFY(window.openProject(b)); QVERIFY(window.openProject(c));
+    QTest::qWait(100);
+    const auto names = [&] { QStringList n; for (int i = 0; i < tabs->count(); ++i) n << tabs->tabText(i).remove(QStringLiteral(" •")); return n; };
+    QCOMPARE(names(), (QStringList{QStringLiteral("A"), QStringLiteral("B"), QStringLiteral("C")}));
+    // Drag A across B and C to the end.
+    const QPoint from = tabs->tabRect(0).center(), to = tabs->tabRect(2).center() + QPoint(40, 0);
+    QTest::mousePress(tabs, Qt::LeftButton, Qt::NoModifier, from);
+    for (int step = 1; step <= 20; ++step) {
+        QTest::mouseMove(tabs, from + (to - from) * step / 20);
+        QTest::qWait(5);
+    }
+    QTest::mouseRelease(tabs, Qt::LeftButton, Qt::NoModifier, to);
+    QTest::qWait(100);
+    QCOMPARE(names(), (QStringList{QStringLiteral("B"), QStringLiteral("C"), QStringLiteral("A")}));
+    // The documents followed their tabs: each tab still shows its own project.
+    for (int i = 0; i < 3; ++i) {
+        tabs->setCurrentIndex(i);
+        QCOMPARE(QFileInfo(window.document()->projectPath).completeBaseName(), names().at(i));
+    }
+}
+
+void TestIoAudit::copyThenPasteAcrossTabs()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString a = saveSimpleProject(dir, QStringLiteral("Source.comp"), QColor(200, 30, 60));
+    MainWindow window;
+    auto *tabs = window.findChild<QTabBar *>(QStringLiteral("documentTabs"));
+    QVERIFY(window.openProject(a));
+    window.canvas();
+    auto *copy = window.findChild<QAction *>(QStringLiteral("commandCopy"));
+    auto *paste = window.findChild<QAction *>(QStringLiteral("commandPaste"));
+    QVERIFY(copy->isEnabled());
+    copy->trigger();                                     // no selection: the whole layer
+    QVERIFY(window.openProject(saveSimpleProject(dir, QStringLiteral("Target.comp"), Qt::blue)));
+    QCOMPARE(tabs->count(), 2);
+    window.syncDocumentViews();
+    QVERIFY(paste->isEnabled());
+    const int before = window.document()->layers.size();
+    paste->trigger();
+    QCOMPARE(window.document()->layers.size(), before + 1);
+    const Layer &pasted = window.document()->layers.last();
+    QCOMPARE(pixelAt(pasted.image, 3, 3), qRgb(200, 30, 60));
+    QCOMPARE(window.session().history().undoName(), QStringLiteral("Paste"));
+    // The source tab is untouched.
+    tabs->setCurrentIndex(0);
+    QCOMPARE(window.document()->layers.size(), 1);
+    QVERIFY(!window.session().isModified());
 }
 
 void TestIoAudit::quitAsksAboutEveryUnsavedTab()
