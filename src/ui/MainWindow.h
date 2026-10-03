@@ -245,6 +245,9 @@ private:
     SegmentedControl *sampling_ = nullptr;
     SegmentedControl *smearMode_ = nullptr;
     QCheckBox *showTransformControls_ = nullptr;
+    bool autoSelectFlipped_ = false;
+    bool ratioLockFlipped_ = false;
+    void syncHeldModifiers();
     QSlider *opacitySlider_ = nullptr;
     ScrubLabel *xLabel_ = nullptr;
     ScrubLabel *yLabel_ = nullptr;

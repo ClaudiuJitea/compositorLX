@@ -943,7 +943,9 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
         const bool groupContains = !currentGroupBounds.isEmpty() && currentGroupBounds.contains(pressPoint);
         const bool forcePick = event->modifiers().testFlag(Qt::ControlModifier);
         if (underPointer && *underPointer != *document_->activeLayerId
-            && (forcePick || (transformAutoSelect_ && !activeContains && !groupContains))) {
+            // Control flips Auto Select for as long as it is held (mac bca8f13): with the box off it picks the layer under
+            // the pointer; with it on, a press drags the active layer instead of picking.
+            && (forcePick ? !transformAutoSelect_ : (transformAutoSelect_ && !activeContains && !groupContains))) {
             emit layerSelectionRequested(*underPointer);
         }
         const QRectF groupBounds = transformsAsGroup() && !transformMask_ ? selectedLayersBounds() : QRectF();
@@ -962,7 +964,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
             TransformDrag drag = TransformDrag::None;
             if (transformControlsVisible() && QLineF(point, rotationPoint).length() <= tolerance) drag = TransformDrag::Rotate;
             else if (transformControlsVisible() && !handle.isNull()) drag = event->modifiers().testFlag(Qt::ControlModifier) ? TransformDrag::Distort : TransformDrag::Resize;
-            else if (groupBounds.contains(point) || !transformAutoSelect_ || !underPointer) drag = TransformDrag::Move;
+            else if (groupBounds.contains(point) || !transformAutoSelect_ || forcePick || !underPointer) drag = TransformDrag::Move;
             if (drag != TransformDrag::None) {
                 transformOriginals_.clear();
                 maskPlacementOriginals_.clear();
@@ -1033,7 +1035,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
                                                           : handle.x() == 0 ? Qt::SizeVerCursor : Qt::SizeHorCursor);
                 duplicateOnMove_ = false; duplicateIssued_ = false; if (!distort) emit layerTransformStarted(false); event->accept(); return;
             }
-            if (invertible && (bounds.contains(local) || !transformAutoSelect_ || !underPointer)) {
+            if (invertible && (bounds.contains(local) || !transformAutoSelect_ || forcePick || !underPointer)) {
                 movingLayer_ = true;
                 transformDrag_ = TransformDrag::Move;
                 moveStartDocument_ = point;

@@ -6413,8 +6413,34 @@ void MainWindow::closeEvent(QCloseEvent *event)
     event->accept();
 }
 
+// While Control is held the Auto Select box shows flipped, and while Shift is held the aspect lock does, as what a
+// press will do (mac bca8f13). Keys held while typing in a field don't count, so shortcuts there don't flicker the bar.
+void MainWindow::syncHeldModifiers()
+{
+    auto *autoSelect = findChild<QCheckBox *>(QStringLiteral("transformAutoSelect"));
+    auto *lock = findChild<QToolButton *>(QStringLiteral("transformRatioLock"));
+    if (!autoSelect || !lock) return;
+    const QWidget *focus = QApplication::focusWidget();
+    const bool typing = focus && (qobject_cast<const QLineEdit *>(focus) || qobject_cast<const QAbstractSpinBox *>(focus) || qobject_cast<const QTextEdit *>(focus) || qobject_cast<const QPlainTextEdit *>(focus));
+    const Qt::KeyboardModifiers held = typing ? Qt::KeyboardModifiers() : QApplication::queryKeyboardModifiers();
+    const bool ctrl = held.testFlag(Qt::ControlModifier), shift = held.testFlag(Qt::ShiftModifier);
+    if (autoSelectFlipped_ != ctrl) {
+        autoSelectFlipped_ = ctrl;
+        const QSignalBlocker blocker(autoSelect);
+        autoSelect->setChecked(canvas_->transformAutoSelects() != ctrl);
+    }
+    if (ratioLockFlipped_ != shift) {
+        ratioLockFlipped_ = shift;
+        const QSignalBlocker blocker(lock);
+        lock->setChecked(canvas_->locksTransformRatio() != shift);
+    }
+}
+
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease || event->type() == QEvent::ApplicationStateChange
+        || event->type() == QEvent::WindowActivate || event->type() == QEvent::MouseButtonPress)
+        QTimer::singleShot(0, this, &MainWindow::syncHeldModifiers);
     if (event->type() == QEvent::Show) {
         if (auto *dialog = qobject_cast<QDialog *>(watched)) {
             dialog->setWindowIcon(QIcon());
