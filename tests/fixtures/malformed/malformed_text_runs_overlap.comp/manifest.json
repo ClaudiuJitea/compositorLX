@@ -1,0 +1,59 @@
+{
+  "activeLayerID": "CCCCCCCC-4444-5555-6666-000000000022",
+  "colorSpace": "sRGB",
+  "documentID": "0000000D-0000-0000-0000-000000000022",
+  "format": "com.compositor.project",
+  "height": 64,
+  "layers": [
+    {
+      "id": "CCCCCCCC-4444-5555-6666-000000000022",
+      "imageFile": "CCCCCCCC-4444-5555-6666-000000000022.png",
+      "isVisible": true,
+      "name": "TextLayer",
+      "text": {
+        "alignment": "Left",
+        "blue": 0.3,
+        "colorRuns": [
+          {
+            "blue": 0.0,
+            "green": 0.0,
+            "length": 6,
+            "location": 0,
+            "red": 1.0
+          },
+          {
+            "blue": 1.0,
+            "green": 0.0,
+            "length": 3,
+            "location": 5,
+            "red": 0.0
+          }
+        ],
+        "content": "Hello World",
+        "fontName": "Helvetica",
+        "fontSize": 24.0,
+        "green": 0.2,
+        "leading": 0.0,
+        "red": 0.1,
+        "tracking": 0.0
+      },
+      "transform": {
+        "flipX": false,
+        "flipY": false,
+        "origin": [
+          0,
+          0
+        ],
+        "rotation": 0.0,
+        "sampling": "High quality",
+        "size": [
+          64,
+          64
+        ]
+      }
+    }
+  ],
+  "resolution": 72.0,
+  "version": 11,
+  "width": 64
+}

@@ -55,6 +55,22 @@ QJsonObject textObject(const TextStyle &text)
     if (text.boxSize) {
         obj.insert(QStringLiteral("boxSize"), QJsonArray{text.boxSize->width(), text.boxSize->height()});
     }
+    if (text.colorRuns) {
+        QJsonArray runs;
+        for (const TextColorRun &run : *text.colorRuns) {
+            runs.append(QJsonObject{{QStringLiteral("location"), run.location}, {QStringLiteral("length"), run.length},
+                                    {QStringLiteral("red"), run.red}, {QStringLiteral("green"), run.green}, {QStringLiteral("blue"), run.blue}});
+        }
+        obj.insert(QStringLiteral("colorRuns"), runs);
+    }
+    if (text.fontRuns) {
+        QJsonArray runs;
+        for (const TextFontRun &run : *text.fontRuns) {
+            runs.append(QJsonObject{{QStringLiteral("location"), run.location}, {QStringLiteral("length"), run.length},
+                                    {QStringLiteral("fontName"), run.fontName}});
+        }
+        obj.insert(QStringLiteral("fontRuns"), runs);
+    }
     return obj;
 }
 
@@ -344,10 +360,11 @@ int ProjectWriter::computeTargetVersion(const Document &document)
             }
         }
         if (layer.group && layer.opacity < 0.999999) minRequired = std::max(minRequired, 8);
+        if (layer.text) minRequired = std::max(minRequired, layer.text->requiredFormatVersion());
     }
     if (!document.guides.isEmpty()) minRequired = std::max(minRequired, 8);
 
-    return (document.formatVersion >= 1 && document.formatVersion <= 9)
+    return (document.formatVersion >= 1 && document.formatVersion <= 11)
                ? document.formatVersion
                : std::max(minRequired, 9);
 }
@@ -434,6 +451,9 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
             validateAdjustmentSettings(layer.adjustment, targetVersion);
         }
         if (layer.text.has_value()) {
+            if (targetVersion < layer.text->requiredFormatVersion()) {
+                fail(QStringLiteral("text colorRuns/fontRuns require format version 10/11; this document is version %1.").arg(targetVersion));
+            }
             if (!layer.text->isValid()) {
                 fail(QStringLiteral("invalid text style"));
             }

@@ -34,3 +34,13 @@ target_compile_definitions(svg_tests PRIVATE
 )
 add_test(NAME svg_tests COMMAND svg_tests -platform offscreen)
 
+
+add_executable(text_runs_tests
+    TestTextRuns.cpp
+)
+target_include_directories(text_runs_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(text_runs_tests PRIVATE compositor_ui Qt6::Test)
+target_compile_definitions(text_runs_tests PRIVATE
+    FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
+add_test(NAME text_runs_tests COMMAND text_runs_tests -platform offscreen)

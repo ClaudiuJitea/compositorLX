@@ -376,6 +376,25 @@ struct LayerEffects {
 
 enum class TextAlignment { Left, Center, Right };
 
+// Letters painted in another color than the text's own (format 10+). `location`/`length` count UTF-16 units of
+// the content, which is what QString indexes by.
+struct TextColorRun {
+    int location = 0;
+    int length = 0;
+    double red = 0.0;
+    double green = 0.0;
+    double blue = 0.0;
+    bool operator==(const TextColorRun &) const = default;
+};
+
+// Letters set in another face than the text's own (format 11+).
+struct TextFontRun {
+    int location = 0;
+    int length = 0;
+    QString fontName;
+    bool operator==(const TextFontRun &) const = default;
+};
+
 struct TextStyle {
     QString content = QStringLiteral("Text");
     QString fontName = QStringLiteral("Helvetica");
@@ -387,8 +406,142 @@ struct TextStyle {
     double tracking = 0.0;
     double leading = 0.0;
     std::optional<QSizeF> boxSize;
+    // Sorted, non-overlapping, never empty when present. Nullopt when the whole text is one color / one face.
+    std::optional<QVector<TextColorRun>> colorRuns;
+    std::optional<QVector<TextFontRun>> fontRuns;
+
+    struct Rgb {
+        double r, g, b;
+        bool operator==(const Rgb &) const = default;
+    };
+
+    [[nodiscard]] bool colorRunsAreValid() const {
+        if (!colorRuns) return true;
+        if (colorRuns->isEmpty()) return false;
+        qint64 end = 0;
+        for (const TextColorRun &run : *colorRuns) {
+            if (run.location < end || run.length <= 0) return false;
+            for (const double c : {run.red, run.green, run.blue}) if (!std::isfinite(c) || c < 0.0 || c > 1.0) return false;
+            end = qint64(run.location) + run.length;
+        }
+        return end <= content.size();
+    }
+    [[nodiscard]] bool fontRunsAreValid() const {
+        if (!fontRuns) return true;
+        if (fontRuns->isEmpty()) return false;
+        qint64 end = 0;
+        for (const TextFontRun &run : *fontRuns) {
+            if (run.location < end || run.length <= 0) return false;
+            if (run.fontName.isEmpty() || run.fontName.size() > 200 || run.fontName.contains(QLatin1Char('\n')) || run.fontName.contains(QLatin1Char('\r'))) return false;
+            end = qint64(run.location) + run.length;
+        }
+        return end <= content.size();
+    }
+    // The lowest manifest version able to carry this style.
+    [[nodiscard]] int requiredFormatVersion() const { return fontRuns ? 11 : colorRuns ? 10 : 1; }
+
+    [[nodiscard]] Rgb colorAt(int index) const {
+        if (colorRuns) for (const TextColorRun &run : *colorRuns)
+            if (run.location <= index && index < run.location + run.length) return {run.red, run.green, run.blue};
+        return {red, green, blue};
+    }
+    [[nodiscard]] QString fontNameAt(int index) const {
+        if (fontRuns) for (const TextFontRun &run : *fontRuns)
+            if (run.location <= index && index < run.location + run.length) return run.fontName;
+        return fontName;
+    }
+    // The one face covering [start, start+length), or an empty string when the range is empty or mixed.
+    [[nodiscard]] QString uniformFontName(int start, int length) const {
+        const int count = content.size();
+        start = std::clamp(start, 0, count);
+        const int end = std::clamp(start + length, start, count);
+        if (end <= start) return {};
+        const QString face = fontNameAt(start);
+        for (int i = start + 1; i < end; ++i) if (fontNameAt(i) != face) return {};
+        return face;
+    }
+
+    // Paints a range. An empty range, or one covering the whole text, recolors all of it.
+    void setColor(Rgb color, int start, int length) {
+        const int count = content.size();
+        start = std::clamp(start, 0, count);
+        const int end = std::clamp(start + length, start, count);
+        if (start == end || (start == 0 && end == count)) { red = color.r; green = color.g; blue = color.b; colorRuns.reset(); return; }
+        QVector<Rgb> units = unitColors();
+        for (int i = start; i < end; ++i) units[i] = color;
+        setUnitColors(units);
+    }
+    void setFont(const QString &name, int start, int length) {
+        if (name.isEmpty() || name.size() > 200 || name.contains(QLatin1Char('\n')) || name.contains(QLatin1Char('\r'))) return;
+        const int count = content.size();
+        start = std::clamp(start, 0, count);
+        const int end = std::clamp(start + length, start, count);
+        if (start == end || (start == 0 && end == count)) { fontName = name; fontRuns.reset(); return; }
+        QVector<QString> units = unitFonts();
+        for (int i = start; i < end; ++i) units[i] = name;
+        setUnitFonts(units);
+    }
+    // Keeps each letter's color and face when [start, start+length) is replaced by `newLength` units, which
+    // inherit from the letter before (or the first letter replaced). Call before `content` changes.
+    void replaceCharacters(int start, int length, int newLength) {
+        const int count = content.size();
+        start = std::clamp(start, 0, count);
+        const int end = std::clamp(start + length, start, count);
+        newLength = std::max(0, newLength);
+        if (colorRuns) {
+            QVector<Rgb> units = unitColors();
+            const Rgb inherited = start > 0 ? units[start - 1] : (end > start ? units[start] : (units.isEmpty() ? Rgb{red, green, blue} : units.first()));
+            units.remove(start, end - start);
+            units.insert(start, newLength, inherited);
+            setUnitColors(units);
+        }
+        if (fontRuns) {
+            QVector<QString> units = unitFonts();
+            const QString inherited = start > 0 ? units[start - 1] : (end > start ? units[start] : (units.isEmpty() ? fontName : units.first()));
+            units.remove(start, end - start);
+            units.insert(start, newLength, inherited);
+            setUnitFonts(units);
+        }
+    }
+
+    [[nodiscard]] QVector<Rgb> unitColors() const {
+        QVector<Rgb> units(content.size(), Rgb{red, green, blue});
+        if (colorRuns) for (const TextColorRun &run : *colorRuns)
+            for (int i = std::max(0, run.location); i < std::min<int>(units.size(), run.location + run.length); ++i) units[i] = {run.red, run.green, run.blue};
+        return units;
+    }
+    void setUnitColors(const QVector<Rgb> &units) {
+        const Rgb base{red, green, blue};
+        QVector<TextColorRun> runs;
+        for (int i = 0; i < units.size(); ++i) {
+            if (units[i] == base) continue;
+            if (!runs.isEmpty() && runs.last().location + runs.last().length == i
+                && Rgb{runs.last().red, runs.last().green, runs.last().blue} == units[i]) ++runs.last().length;
+            else runs.append({i, 1, units[i].r, units[i].g, units[i].b});
+        }
+        if (runs.isEmpty()) colorRuns.reset(); else colorRuns = runs;
+    }
+    [[nodiscard]] QVector<QString> unitFonts() const {
+        QVector<QString> units(content.size(), fontName);
+        if (fontRuns) for (const TextFontRun &run : *fontRuns)
+            for (int i = std::max(0, run.location); i < std::min<int>(units.size(), run.location + run.length); ++i) units[i] = run.fontName;
+        return units;
+    }
+    void setUnitFonts(const QVector<QString> &units) {
+        if (!units.isEmpty() && std::all_of(units.cbegin(), units.cend(), [&](const QString &u) { return u == units.first(); })) {
+            fontName = units.first(); fontRuns.reset(); return;
+        }
+        QVector<TextFontRun> runs;
+        for (int i = 0; i < units.size(); ++i) {
+            if (units[i] == fontName) continue;
+            if (!runs.isEmpty() && runs.last().location + runs.last().length == i && runs.last().fontName == units[i]) ++runs.last().length;
+            else runs.append({i, 1, units[i]});
+        }
+        if (runs.isEmpty()) fontRuns.reset(); else fontRuns = runs;
+    }
 
     [[nodiscard]] bool isValid() const {
+        if (!colorRunsAreValid() || !fontRunsAreValid()) return false;
         if (content.size() > 100000) return false;
         if (!std::isfinite(fontSize) || fontSize < 1.0 || fontSize > 2000.0) return false;
         if (!std::isfinite(red) || red < 0.0 || red > 1.0) return false;

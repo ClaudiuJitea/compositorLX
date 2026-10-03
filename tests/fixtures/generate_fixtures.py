@@ -680,6 +680,43 @@ def generate_all(base_dir):
         images={f"{v7_text_layer_id}.png": img64}
     )
 
+    # 12b. v10/v11 text runs (per-letter color and face), plus negative variants
+    def text_runs_manifest(version, text_extra, doc_suffix):
+        lid = "CCCCCCCC-4444-5555-6666-0000000000" + doc_suffix
+        text = {
+            "alignment": "Left", "content": "Hello World", "fontName": "Helvetica", "fontSize": 24.0,
+            "leading": 0.0, "red": 0.1, "green": 0.2, "blue": 0.3, "tracking": 0.0,
+        }
+        text.update(text_extra)
+        return {
+            "activeLayerID": lid, "colorSpace": "sRGB",
+            "documentID": "0000000D-0000-0000-0000-0000000000" + doc_suffix,
+            "format": "com.compositor.project", "height": 64,
+            "layers": [{"id": lid, "imageFile": f"{lid}.png", "isVisible": True, "name": "TextLayer",
+                        "text": text, "transform": default_transform(64, 64)}],
+            "resolution": 72.0, "version": version, "width": 64,
+        }, {f"{lid}.png": img64}
+    color_runs = [{"location": 0, "length": 5, "red": 1.0, "green": 0.0, "blue": 0.0},
+                  {"location": 6, "length": 5, "red": 0.0, "green": 0.0, "blue": 1.0}]
+    font_runs = [{"location": 6, "length": 5, "fontName": "Courier"}]
+    manifest, imgs = text_runs_manifest(10, {"colorRuns": color_runs}, "10")
+    write_package(os.path.join(valid_dir, "v10_text_color_runs.comp"), manifest, images=imgs)
+    manifest, imgs = text_runs_manifest(11, {"colorRuns": color_runs, "fontRuns": font_runs}, "11")
+    write_package(os.path.join(valid_dir, "v11_text_font_runs.comp"), manifest, images=imgs)
+    negatives = {
+        "malformed_v9_with_color_runs": (9, {"colorRuns": color_runs}),
+        "malformed_v10_with_font_runs": (10, {"fontRuns": font_runs}),
+        "malformed_text_runs_overlap": (11, {"colorRuns": [
+            {"location": 0, "length": 6, "red": 1.0, "green": 0.0, "blue": 0.0},
+            {"location": 5, "length": 3, "red": 0.0, "green": 0.0, "blue": 1.0}]}),
+        "malformed_text_runs_past_end": (11, {"fontRuns": [{"location": 8, "length": 9, "fontName": "Courier"}]}),
+        "malformed_text_runs_empty": (11, {"colorRuns": []}),
+        "malformed_text_run_color_range": (11, {"colorRuns": [{"location": 0, "length": 2, "red": 1.5, "green": 0.0, "blue": 0.0}]}),
+    }
+    for index, (name, (version, extra)) in enumerate(negatives.items()):
+        manifest, imgs = text_runs_manifest(version, extra, "2%d" % index)
+        write_package(os.path.join(malformed_dir, name + ".comp"), manifest, images=imgs)
+
     # 13. v9_effects.comp (v9 document dedicated to all 6 layer effects)
     v9_eff_bg_id = "DDDDDDDD-1111-2222-3333-000000000001"
     v9_eff_layer_id = "DDDDDDDD-1111-2222-3333-000000000002"

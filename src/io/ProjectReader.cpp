@@ -380,7 +380,7 @@ std::optional<LayerEffects> parseEffects(const QJsonObject &obj)
     return effects;
 }
 
-std::optional<TextStyle> parseText(const QJsonObject &obj)
+std::optional<TextStyle> parseText(const QJsonObject &obj, int version)
 {
     if (obj.isEmpty()) return std::nullopt;
     TextStyle text;
@@ -397,6 +397,42 @@ std::optional<TextStyle> parseText(const QJsonObject &obj)
     text.leading = number(obj, QStringLiteral("leading"), 0.0);
     if (obj.contains(QStringLiteral("boxSize"))) {
         text.boxSize = parseSize(obj.value(QStringLiteral("boxSize")), QStringLiteral("boxSize"));
+    }
+    if (obj.contains(QStringLiteral("colorRuns"))) {
+        if (version < 10) invalid(QStringLiteral("text colorRuns require format version 10 or later"));
+        const QJsonValue value = obj.value(QStringLiteral("colorRuns"));
+        if (!value.isArray()) invalid(QStringLiteral("text colorRuns must be an array"));
+        QVector<TextColorRun> runs;
+        for (const QJsonValue &item : value.toArray()) {
+            if (!item.isObject()) invalid(QStringLiteral("invalid text color run"));
+            const QJsonObject run = item.toObject();
+            TextColorRun parsed;
+            parsed.location = run.value(QStringLiteral("location")).toInt(-1);
+            parsed.length = run.value(QStringLiteral("length")).toInt(-1);
+            parsed.red = number(run, QStringLiteral("red"), -1.0);
+            parsed.green = number(run, QStringLiteral("green"), -1.0);
+            parsed.blue = number(run, QStringLiteral("blue"), -1.0);
+            if (parsed.location < 0 || parsed.length <= 0) invalid(QStringLiteral("invalid text color run"));
+            runs.append(parsed);
+        }
+        text.colorRuns = runs;
+    }
+    if (obj.contains(QStringLiteral("fontRuns"))) {
+        if (version < 11) invalid(QStringLiteral("text fontRuns require format version 11 or later"));
+        const QJsonValue value = obj.value(QStringLiteral("fontRuns"));
+        if (!value.isArray()) invalid(QStringLiteral("text fontRuns must be an array"));
+        QVector<TextFontRun> runs;
+        for (const QJsonValue &item : value.toArray()) {
+            if (!item.isObject()) invalid(QStringLiteral("invalid text font run"));
+            const QJsonObject run = item.toObject();
+            TextFontRun parsed;
+            parsed.location = run.value(QStringLiteral("location")).toInt(-1);
+            parsed.length = run.value(QStringLiteral("length")).toInt(-1);
+            parsed.fontName = run.value(QStringLiteral("fontName")).toString();
+            if (parsed.location < 0 || parsed.length <= 0) invalid(QStringLiteral("invalid text font run"));
+            runs.append(parsed);
+        }
+        text.fontRuns = runs;
     }
     if (!text.isValid()) invalid(QStringLiteral("invalid layer text style"));
     return text;
@@ -490,8 +526,8 @@ Document ProjectReader::load(const QString &projectDirectory)
 
     Document document;
     document.formatVersion = manifest.value(QStringLiteral("version")).toInt(-1);
-    if (document.formatVersion < 1 || document.formatVersion > 9) {
-        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–9.").arg(document.formatVersion));
+    if (document.formatVersion < 1 || document.formatVersion > 11) {
+        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–11.").arg(document.formatVersion));
     }
     if (manifest.value(QStringLiteral("colorSpace")).toString() != QStringLiteral("sRGB")) {
         invalid(QStringLiteral("only the sRGB working space is supported"));
@@ -629,7 +665,7 @@ Document ProjectReader::load(const QString &projectDirectory)
             if (layer.group) invalid(QStringLiteral("groups cannot carry text"));
             if (!layer.adjustment.isEmpty()) invalid(QStringLiteral("adjustments cannot carry text"));
             if (layer.image.isNull()) invalid(QStringLiteral("text layer requires fallback image"));
-            layer.text = parseText(object.value(QStringLiteral("text")).toObject());
+            layer.text = parseText(object.value(QStringLiteral("text")).toObject(), document.formatVersion);
         }
 
         if (object.contains(QStringLiteral("shape")) && object.value(QStringLiteral("shape")).isObject()) {
