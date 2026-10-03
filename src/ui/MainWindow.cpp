@@ -1398,7 +1398,23 @@ MainWindow::MainWindow(QWidget *parent)
             : tool == CanvasWidget::Tool::Hand ? 13 : tool == CanvasWidget::Tool::Zoom ? 14 : -1;
         if (selected >= 0) toolButtons.at(selected)->setChecked(true);
     });
-    connect(canvas_, &CanvasWidget::toolChanged, this, [this](CanvasWidget::Tool) { refreshPaletteSwatches(); });
+    connect(canvas_, &CanvasWidget::toolChanged, this, [this](CanvasWidget::Tool tool) {
+        refreshPaletteSwatches();
+        // Clone Stamp and Smear each keep their own size, hardness and opacity (both starting soft); Brush, Eraser and
+        // Spot Healing share one (mac EditorSession.parkedBrushTips).
+        const int family = tool == CanvasWidget::Tool::Clone ? 1 : tool == CanvasWidget::Tool::Blur ? 2
+            : (tool == CanvasWidget::Tool::Brush || tool == CanvasWidget::Tool::Eraser || tool == CanvasWidget::Tool::Healing) ? 0 : -1;
+        if (family < 0) return;
+        const int current = property("brushTipFamily").isValid() ? property("brushTipFamily").toInt() : 0;
+        if (family == current) return;
+        QVariantList parked = property("parkedBrushTips").toList();
+        if (parked.isEmpty()) parked = {QVariantList{40.0, 1.0, 1.0}, QVariantList{40.0, 0.0, 1.0}, QVariantList{40.0, 0.0, 1.0}};
+        parked[current] = QVariantList{brushSizeField_->value(), brushHardnessField_->value() / 100.0, brushOpacityField_->value() / 100.0};
+        const QVariantList next = parked.at(family).toList();
+        brushSizeField_->setValue(next.at(0).toDouble()); brushHardnessField_->setValue(next.at(1).toDouble() * 100.0);
+        brushOpacityField_->setValue(next.at(2).toDouble() * 100.0);
+        setProperty("parkedBrushTips", parked); setProperty("brushTipFamily", family);
+    });
     connect(marqueeKind, &SegmentedControl::currentIndexChanged, this, [this, selectionAntialias, marqueeKind](int) {
         selectionAntialias->setVisible(canvas_->tool() == CanvasWidget::Tool::Marquee && marqueeKind->currentIndex() == 1);
     });

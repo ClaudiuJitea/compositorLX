@@ -3,7 +3,11 @@
 #include "core/ColorPalette.h"
 #include "core/Document.h"
 #include "core/EditorSession.h"
+#include "ui/CanvasWidget.h"
+#include "ui/MainWindow.h"
 
+#include <QDoubleSpinBox>
+#include <QLabel>
 #include <QtTest>
 #include <cmath>
 
@@ -373,6 +377,42 @@ private slots:
         QCOMPARE(s.activeLayer()->shapeStyle->cornerRadius, 8.0);
         QVERIFY(s.beginBrushStroke(QPointF(30, 25), Qt::green, 6, 1, 1, false)); s.endBrushStroke();
         QVERIFY(!s.activeLayer()->shapeStyle.has_value()); // rasterized by painting, as on the Mac
+    }
+    // CloneStampTests.cloneStampKeepsItsOwnSoftBrushTip, through the real window's options bar
+    void cloneStampKeepsItsOwnSoftBrushTip()
+    {
+        MainWindow window; window.resize(1000, 700); window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.session().createDocument(40, 20); window.syncDocumentViews();
+        auto *size = window.findChild<QDoubleSpinBox *>("brushSize"); auto *hard = window.findChild<QDoubleSpinBox *>("brushHardness");
+        QVERIFY(size && hard);
+        window.canvas()->setTool(CanvasWidget::Tool::Brush);
+        size->setValue(30); QCOMPARE(hard->value(), 100.0);
+        window.canvas()->setTool(CanvasWidget::Tool::Clone);
+        QCOMPARE(hard->value(), 0.0); QCOMPARE(size->value(), 40.0);
+        hard->setValue(50);
+        window.canvas()->setTool(CanvasWidget::Tool::Healing);
+        QCOMPARE(hard->value(), 100.0); QCOMPARE(size->value(), 30.0);
+        window.canvas()->setTool(CanvasWidget::Tool::Clone);
+        QCOMPARE(hard->value(), 50.0); QCOMPARE(size->value(), 40.0);
+    }
+    // X swaps, D resets (also on a mask: black/white), swatches follow the session
+    void swapAndResetKeysDriveSwatchesAndMask()
+    {
+        MainWindow window; window.resize(1000, 700); window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        EditorSession &s = window.session(); s.createDocument(40, 20); s.addBlankLayer(); window.syncDocumentViews();
+        window.canvas()->setFocus();
+        auto *fg = window.findChild<QLabel *>("foregroundSwatch");
+        s.setForegroundColor(Qt::red); window.refreshPaletteSwatches();
+        QTest::keyClick(window.canvas(), Qt::Key_X);
+        QCOMPARE(s.foregroundColor(), QColor(Qt::white)); QCOMPARE(s.backgroundColor(), QColor(Qt::red));
+        QVERIFY(fg->styleSheet().contains("#ffffff"));
+        QTest::keyClick(window.canvas(), Qt::Key_D);
+        QCOMPARE(s.foregroundColor(), QColor(Qt::black)); QVERIFY(fg->styleSheet().contains("#000000"));
+        QVERIFY(s.addLayerMask()); s.selectMaskTarget(true); window.syncDocumentViews();
+        QTest::keyClick(window.canvas(), Qt::Key_X);
+        QVERIFY(s.maskPaintWhite()); QVERIFY(fg->styleSheet().contains("#ffffff"));
     }
     // SpotHealingTests (all modes) and CloneStampTests
     static QImage blemished()

@@ -812,7 +812,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
         emit hueTargetStarted(QPoint(qFloor(position.x()), qFloor(position.y())));
         setCursor(Qt::SizeHorCursor); event->accept(); return;
     }
-    if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Eyedropper) {
+    // Option temporarily turns Brush, Eraser, Spot Healing and Gradient into the Eyedropper (mac palettePicking).
+    const bool optionPick = event->modifiers().testFlag(Qt::AltModifier) && !brushDrawing_ && !creationDragging_
+        && (tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Gradient);
+    if (event->button() == Qt::LeftButton && document_ && (tool_ == Tool::Eyedropper || optionPick)) {
         const QPointF position = (event->position() - canvasRect().topLeft()) / zoom_;
         samplingColor_ = true; sampleOriginal_ = paletteForeground_;
         const QPoint pixel(qFloor(position.x()), qFloor(position.y())); if (QRect(QPoint(), renderedDocument_.size()).contains(pixel)) sampleCurrent_ = renderedDocument_.pixelColor(pixel);
@@ -1114,7 +1117,7 @@ QPoint CanvasWidget::snapSelectionMoveEnd(const QPoint &current, Qt::KeyboardMod
 void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 {
     if (document_) cursorDocument_ = (event->position() - canvasRect().topLeft()) / zoom_;
-    if (samplingColor_ && tool_ == Tool::Eyedropper && cursorDocument_) {
+    if (samplingColor_ && cursorDocument_) {
         const QPoint pixel(qFloor(cursorDocument_->x()), qFloor(cursorDocument_->y()));
         if (QRect(QPoint(), renderedDocument_.size()).contains(pixel)) { sampleCurrent_ = renderedDocument_.pixelColor(pixel); emit colorSampleRequested(pixel); }
         update(); event->accept(); return;
