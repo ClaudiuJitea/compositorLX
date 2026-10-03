@@ -2380,6 +2380,7 @@ MainWindow::MainWindow(QWidget *parent)
     autosaveTimer_->setInterval(60000);
     connect(autosaveTimer_, &QTimer::timeout, this, &MainWindow::autosave);
     autosaveTimer_->start();
+    for (QAction *item : findChildren<QAction *>()) if (!item->objectName().isEmpty()) commandActions_.insert(item->objectName(), item);
     QTimer::singleShot(0, this, &MainWindow::offerRecovery);
 }
 
@@ -2932,7 +2933,7 @@ void MainWindow::createActions()
         const bool changed = session_.isMaskSelected() ? session_.invertLayerMask() : session_.invertActiveLayerPixels();
         if (changed) syncDocumentViews();
     });
-    invert->setObjectName(QStringLiteral("commandInvert"));
+    invert->setObjectName(QStringLiteral("cmdInvert"));
     auto *blackWhite = image->addAction(tr("Black && White…"));
     auto *colorBalance = image->addAction(tr("Color Balance…"));
     connect(blackWhite, &QAction::triggered, this, &MainWindow::blackWhiteDialog);
@@ -3237,7 +3238,7 @@ void MainWindow::createActions()
             {flatten, "cmdFlatten"},
             {cameraRaw, "cmdCameraRaw"}, {gaussianBlur, "cmdGaussianBlur"}, {motionBlur, "cmdMotionBlur"}, {vignetteAction, "cmdVignette"},
             {bloomGlowAction, "cmdBloom"}, {ditherAction, "cmdDither"}, {tonalContrastAction, "cmdTonalContrast"},
-            {removeBackground, "cmdRemoveBackground"}, {contentFill, "commandContentFill"},
+            {removeBackground, "cmdRemoveBackground"}, 
             {fill, "cmdFill"}, {fillForeground, "cmdFillForeground"}, {fillBackground, "cmdFillBackground"}, {clearPixels, "cmdClearPixels"},
             {flipLayerH, "cmdFlipLayerH"}, {flipLayerV, "cmdFlipLayerV"},
             {revealMask, "cmdMaskRevealAll"}, {hideMask, "cmdMaskHideAll"}, {revealSelectionMask, "cmdMaskRevealSelection"},
@@ -6535,7 +6536,7 @@ void MainWindow::installInNewTab(EditorSession session, const QString &title)
     session_ = workspaceTabs_.at(currentTab_); syncDocumentViews();
 }
 
-bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab, const std::optional<QPointF> &point)
+bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab, const std::optional<QPointF> &point, const QString &historyName)
 {
     if (ids.isEmpty()) return false;
     stashCurrentTab();
@@ -6616,7 +6617,7 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
         layer.transform.origin += offset;
         if (layer.maskPlacement) layer.maskPlacement->origin += offset;
     }
-    session_.beginEdit(copied.size() > 1 ? tr("Copy Layers from Project") : tr("Copy Layer from Project"));
+    session_.beginEdit(!historyName.isEmpty() ? historyName : copied.size() > 1 ? tr("Copy Layers from Project") : tr("Copy Layer from Project"));
     session_.document()->layers += copied;
     // Copied layers may need a newer format than this project was saved as (text runs, folders, masks, adjustments).
     if (session_.document()->formatVersion != 0)   // 0 means "work it out from the content"
@@ -6730,7 +6731,12 @@ void MainWindow::updateInspector()
 
 void MainWindow::updateCommandStates()
 {
-    const auto action = [this](const char *name) { return findChild<QAction *>(QString::fromLatin1(name)); };
+    // Looked up in a table built once the window is complete: a recursive findChild per command is slow, and runs
+    // while dialogs' widgets are being destroyed (a focus change fires mid-teardown), which crashed.
+    const auto action = [this](const char *name) -> QAction * {
+        if (commandActions_.isEmpty()) return findChild<QAction *>(QString::fromLatin1(name));
+        return commandActions_.value(QString::fromLatin1(name)).data();
+    };
     const auto enabled = [&action](const char *name, bool value) { if (QAction *item = action(name)) item->setEnabled(value); };
     const bool text = textEditorHasFocus();
     const bool hasDocument = bool(document_);
@@ -6762,12 +6768,7 @@ void MainWindow::updateCommandStates()
         if (menuBar()) for (QAction *menuAction : menuBar()->actions()) if (QMenu *menu = menuAction->menu())
             for (QAction *item : menu->actions()) if (item->property("needsPixelLayer").toBool())
                 item->setEnabled(base && (!active->image.isNull() || item->property("allowsEmptyLayer").toBool()));
-        if (QAction *item = action("commandInvert")) {
-            const bool maskTarget = session_.isMaskSelected();
-            item->setText(maskTarget ? tr("Invert Mask") : tr("&Invert"));
-            item->setEnabled(hasDocument && active && !editingText && oneLayer && selectionUsable && visible
-                             && (maskTarget ? !active->mask.isNull() && active->maskEnabled : !active->group && !active->image.isNull()));
-        }
+        if (QAction *item = action("cmdInvert")) item->setText(session_.isMaskSelected() ? tr("Invert Mask") : tr("&Invert"));   // enabled state below
     }
     enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument);
     enabled("imageTrimAction", hasDocument); enabled("imageCropAction", hasDocument);
@@ -6780,7 +6781,6 @@ void MainWindow::updateCommandStates()
     enabled("commandMerge", session_.canMergeLayers()); enabled("commandMoveUp", session_.canMoveActiveLayer(1)); enabled("commandMoveDown", session_.canMoveActiveLayer(-1));
     enabled("commandNewAdjustment", hasDocument && !editingText); enabled("commandEditAdjustment", !editingText && active && !active->adjustment.isEmpty() && active->adjustment.value(QStringLiteral("kind")).toString() != QStringLiteral("Invert"));
     enabled("commandLayerEffects", session_.canEditEffects());
-    enabled("commandContentAwareFill", hasSelection && active && !active->group && !active->image.isNull() && !session_.isMaskSelected());
     enabled("commandSelectAll", text || hasDocument); enabled("commandDeselect", hasSelection); enabled("commandInverseSelection", hasSelection);
 
     // The menu names the step it would undo or redo, as the mac menu does; in a text field it is the field's own undo.
@@ -6819,7 +6819,7 @@ void MainWindow::updateCommandStates()
                                  "cmdGaussianBlur", "cmdMotionBlur", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdRemoveBackground"}) enabled(name, adjustable);
         enabled("cmdVignette", vignetteOk);
         enabled("cmdInvert", invertOk);
-        enabled("commandContentFill", adjustable && hasSelection);
+        enabled("commandContentAwareFill", adjustable && hasSelection);
         for (const char *name : {"cmdImageSize", "cmdCanvasSize", "cmdFlipCanvasH", "cmdFlipCanvasV", "cmdFlatten", "cmdFit", "cmdActual", "cmdZoomIn", "cmdZoomOut", "commandGridSettings"}) enabled(name, hasDocument);
         for (const char *name : {"cmdFill", "cmdFillForeground", "cmdFillBackground"}) enabled(name, text || paintOk);
         enabled("cmdClearPixels", paintOk && hasSelection);

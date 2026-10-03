@@ -875,7 +875,7 @@ void TestIoAudit::projectDimmedFolderSavesAndReopens()
     session.selectLayers({child}, child);
     session.groupSelectedLayers();
     const QUuid folder = *session.document()->activeLayerId;
-    QVERIFY(session.document()->layers.last().group);
+    QVERIFY(std::any_of(session.document()->layers.cbegin(), session.document()->layers.cend(), [&](const Layer &l) { return l.id == folder && l.group; }));
     session.setLayerOpacity(folder, 0.5);
     const auto it = std::find_if(session.document()->layers.cbegin(), session.document()->layers.cend(), [&](const Layer &l) { return l.id == folder; });
     QCOMPARE(it->opacity, 0.5);
@@ -1719,7 +1719,7 @@ void TestIoAudit::menuEnabledStatesFollowMac()
     for (const char *name : needPixelLayer) QVERIFY2(on(name), name);
     QVERIFY(on("commandCopyMerged"));    // no selection needed, as canCopyMerged
     QVERIFY(on("cmdFlipLayerH"));
-    QVERIFY(!on("cmdExpand")); QVERIFY(!on("cmdContract")); QVERIFY(!on("commandFeatherSelection")); QVERIFY(!on("commandContentFill"));
+    QVERIFY(!on("cmdExpand")); QVERIFY(!on("cmdContract")); QVERIFY(!on("commandFeatherSelection")); QVERIFY(!on("commandContentAwareFill"));
     QVERIFY(!on("cmdClearPixels"));
     // A hidden layer cannot be adjusted or inverted (effectiveVisibleIDs).
     window.session().toggleLayerVisibility(*window.document()->activeLayerId); refresh();
@@ -1728,7 +1728,7 @@ void TestIoAudit::menuEnabledStatesFollowMac()
     QVERIFY(on("cmdLevels"));
     // A selection enables the selection-only commands.
     window.session().setRectangularSelection(QRect(5, 5, 10, 10)); refresh();
-    QVERIFY(on("cmdExpand")); QVERIFY(on("cmdContract")); QVERIFY(on("commandFeatherSelection")); QVERIFY(on("commandContentFill"));
+    QVERIFY(on("cmdExpand")); QVERIFY(on("cmdContract")); QVERIFY(on("commandFeatherSelection")); QVERIFY(on("commandContentAwareFill"));
     QVERIFY(on("cmdClearPixels"));
     // A mask enables the mask commands and Select > Mask's Black Areas; with the mask targeted, Invert needs it enabled.
     window.session().addLayerMask(true, false); refresh();
@@ -1760,6 +1760,8 @@ void TestIoAudit::menuNamingFollowsMac()
     window.session().addLayerMask(true, false);
     window.session().selectMaskTarget(true); window.syncDocumentViews();
     QCOMPARE(text("commandDelete"), QStringLiteral("Delete Layer Mask"));
+    QCOMPARE(text("cmdInvert"), QStringLiteral("Invert Mask"));   // a mask is targeted here (mac: Invert Mask)
+    window.session().selectMaskTarget(false); window.syncDocumentViews();
     QCOMPARE(text("cmdInvert"), QStringLiteral("Invert"));
     // New Adjustment Layer: editable kinds end in an ellipsis, Invert does not.
     QMenu *layer = topMenu(window.menuBar(), QStringLiteral("Layer"));

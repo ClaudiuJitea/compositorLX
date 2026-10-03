@@ -231,7 +231,8 @@ private:
     void finishPendingCanvasEdits();
     void installTabCloseButton(int index);
     void installInNewTab(EditorSession session, const QString &title);
-    bool copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab, const std::optional<QPointF> &point = std::nullopt);
+    bool copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab, const std::optional<QPointF> &point = std::nullopt,
+                         const QString &historyName = QString());
 
     CanvasWidget *canvas_ = nullptr;
     CanvasRulerCornerWidget *rulerCorner_ = nullptr;
@@ -269,6 +270,7 @@ private:
     bool ratioLockFlipped_ = false;
     void syncHeldModifiers();
     void updateTabOverflow();
+    QHash<QString, QPointer<QAction>> commandActions_;   // named actions, built at the end of the constructor
     QToolButton *tabOverflow_ = nullptr;
     QSlider *opacitySlider_ = nullptr;
     ScrubLabel *xLabel_ = nullptr;

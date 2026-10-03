@@ -156,7 +156,7 @@ bool MainWindow::pasteWholeLayers()
     stashCurrentTab();
     for (int i = 0; i < int(workspaceTabs_.size()); ++i) {
         if (i == currentTab_ || !holds(workspaceTabs_.at(i).document().get())) continue;
-        return copyLayersToTab(ids, currentTab_, false);
+        return copyLayersToTab(ids, currentTab_, false, std::nullopt, tr("Paste"));
     }
     return false;
 }
