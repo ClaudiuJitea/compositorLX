@@ -16,6 +16,8 @@
 #include "ui/CanvasWidget.h"
 #include "ui/LayerListModel.h"
 #include "ui/MainWindow.h"
+#include "rendering/DownsampleCache.h"
+#include <QIcon>
 #include "ui/RawDevelopDialog.h"
 #include "io/RawImporter.h"
 #include <QPushButton>
@@ -298,6 +300,14 @@ private slots:
     void rawImportRunsTheDevelopStep();
     void rawImportRespectsTheDocumentBudget();
     void heicWiring();
+
+    // DownsampleTests / CanvasThumbnailTests
+    void downsampleLevelsAreReusedAndOnlyForLargeReductions();
+    void exportShrinkKeepsAHardEdgeSharp();
+    void exportShrinkOfFineStripesIsFlatGray();
+    void downsampleKeepsTranslucencyValidAndMasksGray();
+    void layerThumbnailsTakeTheCanvasShapeAndPlacement();
+    void maskThumbnailsFillTheCanvasWithTheirEdgeTone();
 
     // PSD / PSB (PSDRoundTripTests, PSBImportTests, CropToCanvasImportTests)
     void psdLayersOrderVisibilityOpacityAndBlend();
@@ -1840,6 +1850,117 @@ void TestIoAudit::heicWiring()
 #endif
     const QList<QByteArray> formats = QImageReader::supportedImageFormats();
     qInfo() << "HEIC decoding available through a Qt plugin:" << (formats.contains("heic") || formats.contains("heif"));
+}
+
+// ---------------------------------------------------------------------------------------------------- downsample / thumbnails
+
+namespace {
+QImage grayColumns(int width, int height, const std::function<int(int)> &value)
+{
+    QImage image(width, height, QImage::Format_RGBA8888_Premultiplied);
+    for (int y = 0; y < height; ++y) { QRgb *row = reinterpret_cast<QRgb *>(image.scanLine(y)); for (int x = 0; x < width; ++x) { const int v = value(x); row[x] = qRgba(v, v, v, 255); } }
+    return image;
+}
+// The export render of one layer shrunk to `width` x `height` on a canvas of that size (High quality sampling).
+QImage exportedShrink(const QImage &source, int width, int height)
+{
+    Layer layer = imageLayer(QStringLiteral("L"), source, QPointF(0, 0), QSizeF(width, height));
+    layer.transform.sampling = Sampling::HighQuality;
+    return LayerRenderer::flattened(documentWith(QSize(width, height), {layer}));
+}
+} // namespace
+
+void TestIoAudit::downsampleLevelsAreReusedAndOnlyForLargeReductions()
+{
+    DownsampleCache &cache = DownsampleCache::shared();
+    cache.clear();
+    const QImage source = grayColumns(1024, 512, [](int x) { return x % 2 == 0 ? 0 : 255; });
+    QCOMPARE(cache.image(source, 0.6).cacheKey(), source.cacheKey());         // half size and up draws the image itself
+    const QImage eighth = cache.image(source, 0.125);
+    QCOMPARE(eighth.size(), QSize(128, 64));
+    QCOMPARE(cache.image(source, 0.3).width(), 512);                            // 0.3 uses the half
+    QCOMPARE(cache.image(source, 0.125).cacheKey(), eighth.cacheKey());         // copies are cached
+    QCOMPARE(DownsampleCache::pixelBudget, qsizetype(DocumentLimits::maxSurfacePixels));
+}
+
+void TestIoAudit::exportShrinkKeepsAHardEdgeSharp()
+{
+    const QImage source = grayColumns(4096, 64, [](int x) { return x < 2048 ? 0 : 255; });
+    const QImage shrunk = exportedShrink(source, 512, 8);
+    int soft = 0;
+    for (int x = 0; x < 512; ++x) { const int v = qRed(pixelAt(shrunk, x, 4)); if (v > 40 && v < 215) ++soft; }
+    QVERIFY2(soft <= 3, qPrintable(QStringLiteral("the edge smears across %1 pixels").arg(soft)));
+    QVERIFY(qRed(pixelAt(shrunk, 250, 4)) < 10 && qRed(pixelAt(shrunk, 262, 4)) > 245);
+}
+
+void TestIoAudit::exportShrinkOfFineStripesIsFlatGray()
+{
+    const QImage source = grayColumns(2048, 256, [](int x) { return x % 2 == 0 ? 0 : 255; });
+    const QImage shrunk = exportedShrink(source, 256, 32);
+    QVector<double> values;
+    for (int x = 4; x < 252; ++x) values << qRed(pixelAt(shrunk, x, 16));
+    double mean = 0; for (double v : values) mean += v; mean /= values.size();
+    double spread = 0; for (double v : values) spread += (v - mean) * (v - mean); spread = std::sqrt(spread / values.size());
+    QVERIFY2(qAbs(mean - 127.5) < 8, qPrintable(QString::number(mean)));
+    QVERIFY2(spread < 6, qPrintable(QStringLiteral("stripes shimmer after shrinking: spread %1").arg(spread)));
+}
+
+void TestIoAudit::downsampleKeepsTranslucencyValidAndMasksGray()
+{
+    QImage translucent(512, 512, QImage::Format_RGBA8888_Premultiplied);
+    translucent.fill(Qt::transparent);
+    QPainter painter(&translucent); painter.fillRect(128, 128, 256, 256, QColor(255, 255, 255, 128)); painter.end();
+    const QImage shrunk = DownsampleCache::shared().image(translucent, 0.25).convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    for (int y = 0; y < shrunk.height(); ++y) for (int x = 0; x < shrunk.width(); ++x) {
+        const QRgb p = shrunk.pixel(x, y);
+        QVERIFY2(qRed(p) <= qAlpha(p), "no premultiplied colour above its alpha");
+    }
+    QImage mask(512, 512, QImage::Format_Grayscale8); mask.fill(0);
+    for (int y = 0; y < 512; ++y) for (int x = 0; x < 256; ++x) mask.scanLine(y)[x] = 255;
+    const QImage level = DownsampleCache::shared().image(mask, 0.25);
+    QCOMPARE(level.width(), 128);
+    QCOMPARE(level.format(), QImage::Format_Grayscale8);
+}
+
+void TestIoAudit::layerThumbnailsTakeTheCanvasShapeAndPlacement()
+{
+    const auto thumbnailOf = [](const Document &doc) {
+        LayerListModel model; model.setDocument(std::make_shared<Document>(doc));
+        const QIcon icon = qvariant_cast<QIcon>(model.data(model.index(0, 0), Qt::DecorationRole));
+        const QList<QSize> sizes = icon.availableSizes();
+        return sizes.isEmpty() ? QImage() : icon.pixmap(sizes.first()).toImage();
+    };
+    Layer red = imageLayer(QStringLiteral("Red"), solid(100, 100, Qt::red), QPointF(0, 0), QSizeF(100, 100));
+    const QImage wide = thumbnailOf(documentWith(QSize(400, 200), {red}));
+    QVERIFY(!wide.isNull());
+    QCOMPARE(wide.size(), QSize(36, 18));               // the canvas's shape in a 36 px box
+    QCOMPARE(pixelAt(wide, 2, 2), qRgb(255, 0, 0));     // top-left quarter
+    QVERIFY(qRed(pixelAt(wide, 30, 12)) < 200);         // the rest is checkerboard
+    QVERIFY(qRed(pixelAt(wide, 2, 15)) < 200);          // not flipped
+    QCOMPARE(thumbnailOf(documentWith(QSize(300, 600), {imageLayer(QStringLiteral("T"), solid(10, 10, Qt::red))})).size(), QSize(18, 36));
+}
+
+void TestIoAudit::maskThumbnailsFillTheCanvasWithTheirEdgeTone()
+{
+    const auto maskThumb = [](const QImage &mask) {
+        Layer layer = imageLayer(QStringLiteral("M"), solid(100, 100, Qt::red), QPointF(100, 50), QSizeF(100, 100));
+        layer.mask = mask;
+        LayerListModel model; model.setDocument(std::make_shared<Document>(documentWith(QSize(400, 200), {layer})));
+        return qvariant_cast<QImage>(model.data(model.index(0, 0), Qt::UserRole + 3)).convertToFormat(QImage::Format_Grayscale8);
+    };
+    QImage hideAll(1, 1, QImage::Format_Grayscale8); hideAll.fill(0);
+    const QImage hidden = maskThumb(hideAll);
+    QVERIFY(hidden.constScanLine(1)[1] < 10);
+    QVERIFY(hidden.constScanLine(12)[30] < 10);
+    QImage framed(20, 20, QImage::Format_Grayscale8); framed.fill(255);
+    for (int y = 5; y < 15; ++y) for (int x = 5; x < 15; ++x) framed.scanLine(y)[x] = 0;
+    const QImage shown = maskThumb(framed);
+    QVERIFY2(shown.constScanLine(2)[2] > 245, "outside the layer the edge tone carries on");
+    QVERIFY2(shown.constScanLine(8)[14] < 40, "the black middle sits where the layer is");
+    // A stroke reaching the mask's edge: the rest still reads white, never a gray average.
+    QImage stroked = framed;
+    for (int y = 8; y < 12; ++y) for (int x = 0; x < 20; ++x) stroked.scanLine(y)[x] = 0;
+    QVERIFY2(maskThumb(stroked).constScanLine(2)[2] > 245, "the background is white or black, never gray");
 }
 
 // ---------------------------------------------------------------------------------------------------- PSD / PSB

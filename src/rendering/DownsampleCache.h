@@ -18,7 +18,7 @@ public:
     void clear();
 
     static constexpr int maxLevel = 6;
-    static constexpr qsizetype pixelBudget = 100'000'000;
+    static constexpr qsizetype pixelBudget = 200'000'000;   // one surface (mac DocumentLimits.maxSurfacePixels)
 
 private:
     struct Entry {

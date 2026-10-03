@@ -50,7 +50,9 @@ static QImage maskThumbnail(const Layer &layer, const QSize &canvas)
     qint64 sum = 0, count = 0;
     for (int y = 0; y < mask.height(); ++y) for (int x = 0; x < mask.width(); ++x)
         if (y == 0 || y + 1 == mask.height() || x == 0 || x + 1 == mask.width()) { sum += mask.constScanLine(y)[x]; ++count; }
-    const int edge = count ? int(sum / count) : 255;
+    // Beyond the mask's pixels it shows white or black, whichever most of its edge is, never a gray average
+    // (mac LayerMask.background), so a reveal-all mask keeps revealing and a hide-all mask hiding.
+    const int edge = (count == 0 || sum * 2 >= count * 255) ? 255 : 0;
     const QSize size = thumbnailSize(canvas);
     QImage result(size, QImage::Format_Grayscale8); result.fill(edge);
     QPainter painter(&result);
