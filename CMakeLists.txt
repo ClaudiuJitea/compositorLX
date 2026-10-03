@@ -79,6 +79,8 @@ add_library(compositor_core
     src/core/EditorSession.h
     src/core/ImageTrim.cpp
     src/core/ImageTrim.h
+    src/core/SelectionOps.cpp
+    src/core/SelectionOps.h
     src/io/ProjectReader.cpp
     src/io/ProjectReader.h
     src/io/ProjectWriter.cpp

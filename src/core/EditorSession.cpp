@@ -1,4 +1,5 @@
 #include "core/EditorSession.h"
+#include "core/SelectionOps.h"
 #include "io/ProjectReader.h"
 #include "io/ProjectWriter.h"
 #include "io/PSDReader.h"
@@ -360,31 +361,10 @@ static bool maskHasCoverage(const QImage &source)
     return false;
 }
 
-static QImage morphology(const QImage &source, int radius, bool maximum)
-{
-    const QImage input = source.convertToFormat(QImage::Format_Grayscale8);
-    QImage horizontal(input.size(), QImage::Format_Grayscale8), output(input.size(), QImage::Format_Grayscale8);
-    const auto filter = [radius, maximum](const uchar *in, uchar *out, int length, int stride) {
-        std::deque<int> queue;
-        const auto valueAt = [in, length, stride](int index) { return index < 0 || index >= length ? 0 : int(in[index * stride]); };
-        for (int sample = -radius; sample < length + radius; ++sample) {
-            const int value = valueAt(sample);
-            while (!queue.empty() && (maximum ? valueAt(queue.back()) <= value : valueAt(queue.back()) >= value)) queue.pop_back();
-            queue.push_back(sample);
-            while (!queue.empty() && queue.front() < sample - 2 * radius) queue.pop_front();
-            const int position = sample - radius;
-            if (position >= 0 && position < length) out[position * stride] = uchar(valueAt(queue.front()));
-        }
-    };
-    for (int y = 0; y < input.height(); ++y) filter(input.constScanLine(y), horizontal.scanLine(y), input.width(), 1);
-    for (int x = 0; x < input.width(); ++x) filter(horizontal.constBits() + x, output.bits() + x, input.height(), output.bytesPerLine());
-    return output;
-}
-
 static bool resizeSelectionMask(std::shared_ptr<Document> &document, int amount, bool expand, DocumentHistory &history)
 {
     if (!document || !document->selection || amount < 1 || amount > 500 || !maskHasCoverage(*document->selection)) return false;
-    const QImage result = morphology(*document->selection, amount, expand);
+    const QImage result = expand ? SelectionOps::dilated(*document->selection, amount) : SelectionOps::eroded(*document->selection, amount);
     if (result == *document->selection) return false;
     history.begin(expand ? QStringLiteral("Expand Selection") : QStringLiteral("Contract Selection"), document);
     document->selection = result;
@@ -409,15 +389,26 @@ bool EditorSession::featherSelection(int amount)
 
 bool EditorSession::moveSelection(const QPoint &offset)
 {
-    if (!document_ || !document_->selection || offset.isNull() || !maskHasCoverage(*document_->selection)) return false;
-    QImage moved(document_->canvasSize, QImage::Format_Grayscale8); moved.fill(0);
-    QPainter painter(&moved); painter.drawImage(offset, *document_->selection); painter.end();
-    beginEdit(QStringLiteral("Move Selection")); document_->selection = moved; endEdit(); return true;
+    if (!document_ || !document_->selection || offset.isNull()) return false;
+    // A run of moves is applied to the mask the run started from, so an outline taken off the canvas and back is whole again.
+    QImage base;
+    QPoint total = offset;
+    if (selectionMoveRun_ && selectionMoveRun_->resultKey == document_->selection->cacheKey()) {
+        base = selectionMoveRun_->base;
+        total = selectionMoveRun_->offset + offset;
+    } else {
+        base = document_->selection->convertToFormat(QImage::Format_Grayscale8);
+    }
+    if (!SelectionOps::hasCoverage(base)) return false;
+    const QImage moved = SelectionOps::shifted(base, total);
+    beginEdit(QStringLiteral("Move Selection")); document_->selection = moved; endEdit();
+    selectionMoveRun_ = SelectionMoveRun{base, total, document_->selection->cacheKey()};
+    return true;
 }
 
 bool EditorSession::nudgeSelectedPixels(const QPoint &offset)
 {
-    if (offset.isNull() || !beginSelectionTransform()) return false;
+    if (offset.isNull() || !beginSelectionTransform(false, QStringLiteral("Move Pixels"))) return false;
     Layer *floating = activeLayer();
     if (!floating) { cancelSelectionTransform(); return false; }
     floating->transform.origin += offset;
@@ -467,76 +458,87 @@ static QImage clippedPixels(const QImage &originalImage, const QImage &editedIma
     return original;
 }
 
-bool EditorSession::setRectangularSelection(const QRect &rect, SelectionMode mode)
+// A drawn outline combined with the selection, as one undo step. A shape that encloses nothing deselects in New mode, as
+// a lasso click does in Photoshop; subtracting from no selection selects nothing new, so nothing changes.
+static bool commitShape(EditorSession &session, std::shared_ptr<Document> &document, const QImage &shape, SelectionMode mode, const QString &name)
 {
-    if (!document_ || (mode == SelectionMode::Subtract && !document_->selection)) return false;
-    QImage shape(document_->canvasSize, QImage::Format_Grayscale8); shape.fill(0);
-    QPainter painter(&shape); painter.fillRect(rect.intersected(QRect(QPoint(), document_->canvasSize)), Qt::white);
-    const QImage result = combineSelection(document_->selection, shape, mode);
-    if (document_->selection && *document_->selection == result) return false;
-    beginEdit(QStringLiteral("Rectangular Marquee")); document_->selection = result; endEdit(); return true;
-}
-
-static bool setPaintedSelection(std::shared_ptr<Document> &document, DocumentHistory &history,
-                                const QPainterPath &path, SelectionMode mode, const QString &name, bool antialiased)
-{
-    if (!document || path.isEmpty() || (mode == SelectionMode::Subtract && !document->selection)) return false;
-    QImage shape(document->canvasSize, QImage::Format_Grayscale8); shape.fill(0);
-    QPainter painter(&shape); painter.setRenderHint(QPainter::Antialiasing, antialiased); painter.fillPath(path, Qt::white); painter.end();
+    if (!document || (mode == SelectionMode::Subtract && !document->selection)) return false;
     const QImage result = combineSelection(document->selection, shape, mode);
     if (document->selection && *document->selection == result) return false;
-    history.begin(name, document); document->selection = result; history.end(document); return true;
+    session.beginEdit(name); document->selection = result; session.endEdit();
+    return true;
+}
+
+static bool encloses(const QRectF &bounds) { return bounds.width() > 0 && bounds.height() > 0; }
+
+bool EditorSession::setRectangularSelection(const QRect &rect, SelectionMode mode)
+{
+    if (!document_) return false;
+    if (rect.width() <= 0 || rect.height() <= 0) {
+        if (mode != SelectionMode::Replace || !document_->selection) return false;
+        deselect(); return true;
+    }
+    QImage shape(document_->canvasSize, QImage::Format_Grayscale8); shape.fill(0);
+    QPainter painter(&shape); painter.fillRect(rect.intersected(QRect(QPoint(), document_->canvasSize)), Qt::white); painter.end();
+    return commitShape(*this, document_, shape, mode, QStringLiteral("Rectangular Marquee"));
+}
+
+static bool paintedSelection(EditorSession &session, std::shared_ptr<Document> &document, const QPainterPath &path,
+                             SelectionMode mode, const QString &name, bool antialiased)
+{
+    if (!document) return false;
+    if (!encloses(path.boundingRect())) {
+        if (mode != SelectionMode::Replace || !document->selection) return false;
+        session.deselect(); return true;
+    }
+    QImage shape(document->canvasSize, QImage::Format_Grayscale8); shape.fill(0);
+    QPainter painter(&shape); painter.setRenderHint(QPainter::Antialiasing, antialiased); painter.fillPath(path, Qt::white); painter.end();
+    return commitShape(session, document, shape, mode, name);
 }
 
 bool EditorSession::setEllipticalSelection(const QRect &rect, SelectionMode mode, bool antialiased)
 {
     QPainterPath path; path.addEllipse(QRectF(rect));
-    return setPaintedSelection(document_, history_, path, mode, QStringLiteral("Elliptical Marquee"), antialiased);
+    return paintedSelection(*this, document_, path, mode, QStringLiteral("Elliptical Marquee"), antialiased);
 }
 
-bool EditorSession::setPolygonSelection(const QPolygonF &points, SelectionMode mode, bool antialiased)
+bool EditorSession::setPolygonSelection(const QPolygonF &points, SelectionMode mode, bool antialiased, const QString &name)
 {
-    if (points.size() < 3) return false;
-    QPainterPath path; path.addPolygon(points); path.closeSubpath();
-    return setPaintedSelection(document_, history_, path, mode, QStringLiteral("Lasso"), antialiased);
+    QPainterPath path;
+    if (points.size() >= 3) { path.addPolygon(points); path.closeSubpath(); }
+    return paintedSelection(*this, document_, path, mode, name, antialiased);
+}
+
+// What selection-from-image tools read at canvas size: every visible layer as shown, or just the active layer's own
+// pixels without its mask, opacity, blend mode or effects, as Cmd-click selection reads them. A folder or blank layer
+// reads as transparent (mac Magic Wand selectionSample).
+static QImage selectionSampleImage(const Document &document, const Layer *active, bool sampleAllLayers)
+{
+    if (sampleAllLayers) return LayerRenderer::flattened(document);
+    Document one = document; one.selection.reset(); one.layers.clear();
+    if (active && !active->group && !active->image.isNull() && active->adjustment.isEmpty()) {
+        Layer copy = *active;
+        copy.parentId.reset(); copy.visible = true; copy.opacity = 1; copy.blendMode = BlendMode::Normal;
+        copy.mask = {}; copy.maskPlacement.reset(); copy.maskSourceId.reset(); copy.effects.reset();
+        one.layers = {copy};
+    }
+    return LayerRenderer::flattened(one);
 }
 
 bool EditorSession::magicWand(const QPoint &documentPoint, int tolerance, int sampleRadius,
                               bool contiguous, bool sampleAllLayers, SelectionMode mode, bool antialiased)
 {
-    if (!document_ || !QRect(QPoint(), document_->canvasSize).contains(documentPoint)
-        || (mode == SelectionMode::Subtract && !document_->selection)) return false;
-    QImage sample;
-    if (sampleAllLayers) sample = LayerRenderer::flattened(*document_);
-    else if (const Layer *layer = activeLayer(); layer && !layer->group) {
-        Document one = *document_; Layer copy = *layer; copy.parentId.reset(); copy.visible = true;
-        one.layers = {copy}; one.selection.reset(); sample = LayerRenderer::flattened(one);
-    } else return false;
+    Q_UNUSED(antialiased); // The traced outline lies on exact pixel edges, so smoothing changes nothing, as on the Mac.
+    if (!document_ || !QRect(QPoint(), document_->canvasSize).contains(documentPoint)) return false;
+    const QImage sample = selectionSampleImage(*document_, activeLayer(), sampleAllLayers);
     const auto shape = RasterOperations::magicWandMask(sample, documentPoint, tolerance, sampleRadius, contiguous);
     if (!shape) return false;
-    if (antialiased) {
-        const QImage mask = shape->convertToFormat(QImage::Format_Grayscale8);
-        QImage softened(mask.size(), QImage::Format_Grayscale8); softened.fill(0);
-        for (int y = 0; y < mask.height(); ++y) {
-            uchar *out = softened.scanLine(y);
-            for (int x = 0; x < mask.width(); ++x) {
-                if (mask.constScanLine(y)[x] == 0) continue;
-                int sum = 0;
-                for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
-                    const int sx = x + dx, sy = y + dy;
-                    if (sx < 0 || sy < 0 || sx >= mask.width() || sy >= mask.height()) continue;
-                    const int weight = (dx == 0 ? 2 : 1) * (dy == 0 ? 2 : 1);
-                    sum += mask.constScanLine(sy)[sx] * weight;
-                }
-                out[x] = uchar((sum + 8) / 16);
-            }
-        }
-        const QImage result = combineSelection(document_->selection, softened, mode);
-        if (document_->selection && *document_->selection == result) return false;
-        beginEdit(QStringLiteral("Magic Wand")); document_->selection = result; endEdit(); return true;
+    // Nothing matched: New clears the selection, as a lasso click enclosing nothing does.
+    if (!SelectionOps::hasCoverage(*shape)) {
+        if (mode != SelectionMode::Replace || !document_->selection) return false;
+        deselect(); return true;
     }
-    const QImage result = combineSelection(document_->selection, *shape, mode);
-    beginEdit(QStringLiteral("Magic Wand")); document_->selection = result; endEdit(); return true;
+    return commitShape(*this, document_, *shape, mode, QStringLiteral("Magic Wand"));
 }
 
 EditorSession::SelectionSnapshot EditorSession::createSelectionSnapshot(bool sampleAllLayers, QString *error) const
@@ -566,13 +568,7 @@ EditorSession::SelectionSnapshot EditorSession::createSelectionSnapshot(bool sam
             snapshot.error = error ? *error : QObject::tr("The selected layer has no pixels.");
             return snapshot;
         }
-        Document one = *document_;
-        Layer copy = *layer;
-        copy.parentId.reset();
-        copy.visible = true;
-        one.layers = {copy};
-        one.selection.reset();
-        snapshot.sampleImage = LayerRenderer::flattened(one);
+        snapshot.sampleImage = selectionSampleImage(*document_, layer, false);
     } else {
         if (error) *error = QObject::tr("No active layer selected.");
         snapshot.error = error ? *error : QObject::tr("No active layer selected.");
@@ -818,6 +814,9 @@ bool EditorSession::fillSelection(const QColor &color)
 {
     Layer *layer = activeLayer();
     if (!document_ || !layer || layer->group || !color.isValid()) return false;
+    // A text layer that is still text takes the color as its own, rather than being painted over: the letters change
+    // color and stay editable (mac SelectionEdits.swift fillSelection).
+    if (!maskSelected_ && !document_->selection && layer->text && recolorText(layer->id, color)) return true;
     const int index = indexOf(layer->id);
     if (maskSelected_) {
         if (layer->mask.isNull() || !layer->maskEnabled) return false;
@@ -862,7 +861,7 @@ static QTransform pixelToDocument(const LayerTransform &placement, const QSize &
     return transform;
 }
 
-bool EditorSession::beginSelectionTransform(bool duplicate)
+bool EditorSession::beginSelectionTransform(bool duplicate, const QString &historyName)
 {
     Layer *source = activeLayer();
     if (!document_ || floating_ || maskSelected_ || !document_->selection || !source || source->group || source->image.isNull()) return false;
@@ -872,7 +871,7 @@ bool EditorSession::beginSelectionTransform(bool duplicate)
     const Document before = *document_;
     const std::optional<QUuid> beforeActive = document_->activeLayerId;
     const QUuid sourceId = source->id;
-    beginEdit(duplicate ? QStringLiteral("Duplicate Pixels") : QStringLiteral("Transform Selection"));
+    beginEdit(!historyName.isEmpty() ? historyName : duplicate ? QStringLiteral("Duplicate Pixels") : QStringLiteral("Transform Selection"));
     QImage cleared(source->image.size(), QImage::Format_RGBA8888_Premultiplied);
     document_->layers[sourceIndex].image = clippedPixels(source->image, cleared, *source, document_->selection);
     if (!duplicate) rasterizeLayer(document_->layers[sourceIndex]);
@@ -1250,7 +1249,8 @@ bool EditorSession::updateText(const QUuid &id, const QString &text, const QRect
     return updateText(id, ts, input, bold, italic, underline, areaText);
 }
 
-bool EditorSession::updateText(const QUuid &id, const TextStyle &input, const QRectF &boxInput, bool bold, bool italic, bool underline, bool areaText)
+bool EditorSession::updateText(const QUuid &id, const TextStyle &input, const QRectF &boxInput, bool bold, bool italic, bool underline, bool areaText,
+                               const QString &historyName)
 {
     if (!document_) return false;
     const int index = indexOf(id);
@@ -1268,7 +1268,7 @@ bool EditorSession::updateText(const QUuid &id, const TextStyle &input, const QR
                                     textAlignmentIndex(ts.alignment), areaText);
     if (image.isNull()) return false;
     const QSize size = image.size();
-    beginEdit(QStringLiteral("Edit Text"));
+    beginEdit(historyName);
     // Taken after beginEdit: a reference from before it would write into the buffer the history snapshot shares.
     Layer &layer = document_->layers[index];
     if (!layer.mask.isNull() && !layer.maskPlacement) layer.maskPlacement = layer.transform;
@@ -1283,6 +1283,24 @@ bool EditorSession::updateText(const QUuid &id, const TextStyle &input, const QR
     if (ts.requiredFormatVersion() > 1) document_->formatVersion = std::max(document_->formatVersion, ts.requiredFormatVersion());
     endEdit();
     return true;
+}
+
+bool EditorSession::recolorText(const QUuid &id, const QColor &color)
+{
+    if (!document_ || !color.isValid()) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    const Layer &layer = document_->layers.at(index);
+    if (layer.group || !layer.text || layer.image.isNull()) return false;
+    TextStyle style = *layer.text;
+    const TextStyle::Rgb target{color.redF(), color.greenF(), color.blueF()};
+    if (style.red == target.r && style.green == target.g && style.blue == target.b && !style.colorRuns) return true;
+    style.setColor(target, 0, 0);
+    const QJsonObject shape = layer.shape;
+    const QRectF box(layer.transform.origin, layer.transform.size);
+    return updateText(id, style, box, shape.value(QStringLiteral("bold")).toBool(), shape.value(QStringLiteral("italic")).toBool(),
+                      shape.value(QStringLiteral("underline")).toBool(), shape.value(QStringLiteral("areaText")).toBool(),
+                      QStringLiteral("Fill Text"));
 }
 
 void EditorSession::redrawSelectedShapes()
@@ -1731,15 +1749,57 @@ bool EditorSession::applyCameraRaw(const QUuid &id, const CameraRawSettings &set
 }
 
 bool EditorSession::contentAwareFill()
-
 {
     const Layer *layer = activeLayer();
-    if (!document_ || !document_->selection || !maskHasCoverage(*document_->selection) || !layer || layer->group || layer->image.isNull()) return false;
+    if (!document_ || maskSelected_ || !document_->selection || !SelectionOps::hasCoverage(*document_->selection)
+        || !layer || layer->group || layer->image.isNull()) return false;
     const int index = indexOf(layer->id);
-    const QImage coverage = selectionCoverageForLayer(*layer, layer->image.size(), document_->selection);
-    const auto result = RasterOperations::contentAwareFill(layer->image, coverage);
-    if (!result || *result == layer->image) return false;
-    beginEdit(QStringLiteral("Content-Aware Fill")); document_->layers[index].image = *result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
+    QImage image = layer->image;
+    LayerTransform placed = layer->transform;
+    const QRect selected = SelectionOps::coverageBounds(*document_->selection);
+    // The layer grows over any of the selection that lies on the canvas past its edge, so the fill reaches it (mac Filters.swift
+    // FilterEdit(growingTo:)). The padding is transparent; selected pixels are filled whether or not anything was there.
+    const QTransform toDocument = pixelToDocument(layer->transform, image.size());
+    bool invertible = false;
+    const QTransform toPixels = toDocument.inverted(&invertible);
+    if (!invertible) return false;
+    const QRectF wanted = toPixels.mapRect(QRectF(selected));
+    const QRect bounds(QPoint(), image.size());
+    const QRect extent = QRectF(bounds).united(wanted).toAlignedRect();
+    if (extent != bounds) {
+        if (extent.width() > 30000 || extent.height() > 30000 || qint64(extent.width()) * extent.height() > 100000000LL) return false;
+        QImage grown(extent.size(), QImage::Format_RGBA8888_Premultiplied); grown.fill(Qt::transparent);
+        QPainter painter(&grown); painter.drawImage(-extent.topLeft(), image); painter.end();
+        image = grown;
+        placed.size = QSizeF(extent.width() * layer->transform.size.width() / bounds.width(),
+                             extent.height() * layer->transform.size.height() / bounds.height());
+        const QPointF middle = toDocument.map(QRectF(extent).center());
+        placed.origin = middle - QPointF(placed.size.width() / 2.0, placed.size.height() / 2.0);
+    }
+    Layer target = *layer; target.transform = placed;
+    const QImage coverage = selectionCoverageForLayer(target, image.size(), document_->selection);
+    const auto filled = RasterOperations::contentAwareFill(image, coverage);
+    if (!filled) return false;
+    // Soft selection edges blend the fill with what was there, as every filter does.
+    QImage result = clippedPixels(image, *filled, target, document_->selection);
+    if (result == layer->image) return false;
+    beginEdit(QStringLiteral("Content-Aware Fill"));
+    Layer &edited = document_->layers[index];
+    if (extent != bounds && !edited.mask.isNull() && !edited.maskPlacement && edited.mask.size() == bounds.size()) {
+        // The mask covering the old grid carries onto the new one, its edge tone continuing past the old edge.
+        const QImage old = edited.mask.convertToFormat(QImage::Format_Grayscale8);
+        QImage carried(extent.size(), QImage::Format_Grayscale8);
+        for (int y = 0; y < carried.height(); ++y) {
+            uchar *out = carried.scanLine(y);
+            const uchar *row = old.constScanLine(std::clamp(y + extent.top(), 0, old.height() - 1));
+            for (int x = 0; x < carried.width(); ++x) out[x] = row[std::clamp(x + extent.left(), 0, old.width() - 1)];
+        }
+        edited.mask = carried;
+    }
+    edited.image = result; edited.transform = placed;
+    rasterizeLayer(edited);
+    endEdit();
+    return true;
 }
 
 static std::optional<QPointF> documentToPixel(const Layer &layer, const QPointF &point, const QSize &size)

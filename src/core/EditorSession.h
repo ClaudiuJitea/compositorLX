@@ -78,7 +78,9 @@ public:
     bool nudgeSelectedPixels(const QPoint &offset);
     bool setRectangularSelection(const QRect &rect, SelectionMode mode = SelectionMode::Replace);
     bool setEllipticalSelection(const QRect &rect, SelectionMode mode = SelectionMode::Replace, bool antialiased = true);
-    bool setPolygonSelection(const QPolygonF &points, SelectionMode mode = SelectionMode::Replace, bool antialiased = true);
+    // `name` is the undo step: "Lasso" for freehand, "Polygonal Lasso" for polygonal (mac Selection.swift finishLasso).
+    bool setPolygonSelection(const QPolygonF &points, SelectionMode mode = SelectionMode::Replace, bool antialiased = true,
+                             const QString &name = QStringLiteral("Lasso"));
     bool magicWand(const QPoint &documentPoint, int tolerance = 32, int sampleRadius = 0,
                    bool contiguous = true, bool sampleAllLayers = false,
                    SelectionMode mode = SelectionMode::Replace, bool antialiased = true);
@@ -142,7 +144,9 @@ public:
     bool invertActiveLayerPixels();
     bool fillSelection(const QColor &color);
     bool clearSelectedPixels();
-    bool beginSelectionTransform(bool duplicate = false);
+    // `historyName` defaults to "Transform Selection" ("Duplicate Pixels" when duplicating); a Cmd-drag or Cmd-arrow move
+    // is "Move Pixels" (mac SelectionEdits.swift finishPixelMove).
+    bool beginSelectionTransform(bool duplicate = false, const QString &historyName = {});
     bool commitSelectionTransform();
     bool cancelSelectionTransform();
     [[nodiscard]] bool hasFloatingSelection() const { return floating_.has_value(); }
@@ -163,7 +167,11 @@ public:
                     double tracking = 0.0, double leading = 0.0);
     // Style-centric variants: the style carries content, base face and color, per-letter runs, tracking and leading.
     bool addText(const TextStyle &style, const QRectF &box, bool bold, bool italic, bool underline, bool areaText);
-    bool updateText(const QUuid &id, const TextStyle &style, const QRectF &box, bool bold, bool italic, bool underline, bool areaText);
+    bool updateText(const QUuid &id, const TextStyle &style, const QRectF &box, bool bold, bool italic, bool underline, bool areaText,
+                    const QString &historyName = QStringLiteral("Edit Text"));
+    // Fill with a palette color on live text recolors its letters and keeps them editable (mac TypeTool.swift recolorText).
+    // False when the layer is not live text or could not be redrawn, so the caller fills as usual.
+    bool recolorText(const QUuid &id, const QColor &color);
     void redrawSelectedShapes();
     bool addNoiseToActiveLayer(float amount, bool gaussian, bool monochromatic, quint32 seed);
     bool distortActiveLayer(double amount);
@@ -448,6 +456,10 @@ private:
         bool duplicate = false;
     };
     std::optional<FloatingSelectionState> floating_;
+    // Moving an outline is lossless: what leaves the canvas comes back when the outline is moved back (mac keeps the path
+    // unclipped). `base` is the mask before the first of a run of moves; valid while the document's selection is `resultKey`.
+    struct SelectionMoveRun { QImage base; QPoint offset; qint64 resultKey = 0; };
+    std::optional<SelectionMoveRun> selectionMoveRun_;
     int selectionFeatherAmount_ = 6;
     int objectSelectionEdgeOffset_ = 0;
     bool objectSelectionSmoothEdges_ = true;

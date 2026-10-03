@@ -1972,7 +1972,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (session_.nudgeSelectedPixels(offset)) syncDocumentViews();
     });
     connect(canvas_, &CanvasWidget::selectedPixelsDragStarted, this, [this](bool duplicate) {
-        if (session_.beginSelectionTransform(duplicate)) syncDocumentViews();
+        if (session_.beginSelectionTransform(duplicate, duplicate ? tr("Duplicate Pixels") : tr("Move Pixels"))) syncDocumentViews();
     });
     connect(canvas_, &CanvasWidget::magicWandRequested, this, [this, wandTolerance, wandSampleSize, wandSample, wandContiguous, selectionAntialias](const QPoint &point, int mode) {
         session_.magicWand(point, wandTolerance->value(), wandSampleSize->currentIndex(), wandContiguous->isChecked(),
