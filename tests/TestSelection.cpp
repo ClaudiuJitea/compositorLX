@@ -502,7 +502,7 @@ private slots:
         const QUuid folder = *s.document()->activeLayerId;
         QVERIFY(s.document()->layers.at(s.document()->layers.size() - 1).group || true);
         s.selectLayer(folder);
-        const auto ids = s.copyableLayerIds();
+        const auto ids = s.copiedLayerIds();
         QCOMPARE(int(ids.size()), 1);
         QVERIFY(s.duplicateLayers(ids, "Paste"));
         QCOMPARE(s.history().undoName(), QString("Paste"));
@@ -520,8 +520,8 @@ private slots:
         // Several plain layers, each copied above its own original.
         s.selectLayers({a, b}, b);
         const int n = int(s.document()->layers.size());
-        QVERIFY(s.duplicateLayers(s.copyableLayerIds()));
-        QCOMPARE(int(s.document()->layers.size()), n + int(s.copyableLayerIds().size()) * 0 + 2);
+        QVERIFY(s.duplicateLayers(s.copiedLayerIds()));
+        QCOMPARE(int(s.document()->layers.size()), n + int(s.copiedLayerIds().size()) * 0 + 2);
     }
     void colorRangeMatchesMac()
     {
