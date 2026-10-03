@@ -205,6 +205,8 @@ if(ONNXRUNTIME_ROOT)
 endif()
 install(FILES packaging/compositor-lx.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES packaging/compositor-lx.metainfo.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
+install(FILES packaging/icons/compositor-lx.svg
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 foreach(icon_size 16 32 48 64 128 256 512 1024)
     install(FILES packaging/icons/compositor-lx-${icon_size}.png
             DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${icon_size}x${icon_size}/apps

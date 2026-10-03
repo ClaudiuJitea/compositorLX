@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 128 128">
+  <title>CompositorLX</title>
+  <desc>LX suite blue tile with stacked image layers and LX lettering.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#529fff"/>
+      <stop offset="1" stop-color="#2859d9"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#tile)"/>
+  <rect x="28" y="35" width="59" height="69" rx="7" fill="#153b91" opacity=".2"/>
+  <rect x="28" y="32" width="59" height="69" rx="7" fill="#a8ceff"/>
+  <rect x="36" y="24" width="59" height="69" rx="7" fill="#f4f8ff"/>
+  <rect x="44" y="32" width="43" height="22" rx="3" fill="#d6e7ff"/>
+  <circle cx="77" cy="38" r="3" fill="#529fff"/>
+  <path d="m44 49 11-12 12 13 7-7 13 11H44z" fill="#729ff0"/>
+  <path d="m44 49 11-12 12 13 7-7 13 11H44z" fill="#2859d9" opacity=".22"/>
+  <path d="M43 58h6v23h12v6H43z" fill="#30333c"/>
+  <path d="m63 58 8 10 8-10h7L75 72l12 15h-8l-8-10-8 10h-7l11-15-11-14z" fill="#3268e1"/>
+</svg>

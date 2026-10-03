@@ -25,7 +25,7 @@ done
 
 cmake -S "$source_dir" -B "$work_dir" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release
-cmake --build "$work_dir" --parallel "$(nproc)"
+cmake --build "$work_dir" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
 ctest --test-dir "$work_dir" --output-on-failure
 
 mkdir -p "$output_dir"

@@ -37,6 +37,7 @@ Brings CompositorLX up to date with the macOS app through Compositor 1.4.5.
 - **Painting tools**: Smudge without ghost trails, Liquify that keeps pixels sharp, a separate Radius for the Blur brush, and brushes that explain why they cannot paint.
 - **Photoshop-accurate rendering**: Hue/Saturation positive saturation, Soft Light, Camera Raw parametric and tone curves (with a draggable point-curve graph), and PSD import fixes for levels, hue/saturation and layer masks.
 - **Smaller things**: Move-bar values apply on their own as one undo step, "N more tabs" menu, New Canvas preset sizes, zoomable JPEG export preview.
+- **LX suite icon**: a blue tile with stacked image layers and LX lettering, matching pdfLX's icon style.
 
 Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Sparkle updater.
 
@@ -112,6 +113,8 @@ You can also build packages locally:
 ```
 
 Finished files land in `artifacts/`. Packages include the executable, the local subject-removal runtime and model, a freedesktop launcher, AppStream metadata, a HiDPI icon set (16×16 through 1024×1024), and third-party license texts.
+
+The editable suite icon is `packaging/icons/compositor-lx.svg`. After changing it, regenerate the packaged PNG sizes with `python3 packaging/icons/generate-icons.py` (requires CairoSVG). The SVG is also installed as the scalable desktop icon.
 
 ## Build from source
 
