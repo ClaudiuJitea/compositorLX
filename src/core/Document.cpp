@@ -16,6 +16,35 @@ bool LayerTransform::isValid() const
         && std::abs(origin.x()) <= 1000000.0 && std::abs(origin.y()) <= 1000000.0;
 }
 
+LayerTransform resizedByHandle(const LayerTransform &start, const QPoint &sign, const QPointF &startPoint,
+                               const QPointF &point, bool fromCenter, bool lockRatio)
+{
+    QTransform rotation, inverseRotation;
+    rotation.rotate(start.rotation);
+    inverseRotation.rotate(-start.rotation);
+    const QSizeF s = start.size;
+    const QPointF initialHandle = start.center() + rotation.map(QPointF(sign.x() * s.width() / 2.0, sign.y() * s.height() / 2.0));
+    const QPointF anchor = fromCenter ? start.center()
+                                      : start.center() + rotation.map(QPointF(-sign.x() * s.width() / 2.0, -sign.y() * s.height() / 2.0));
+    const QPointF local = inverseRotation.map(initialHandle + point - startPoint - anchor) * (fromCenter ? 2.0 : 1.0);
+    double width = sign.x() ? std::max(1.0, local.x() * sign.x()) : s.width();
+    double height = sign.y() ? std::max(1.0, local.y() * sign.y()) : s.height();
+    if (lockRatio) {
+        const double factor = !sign.x() ? height / s.height()
+            : !sign.y() ? width / s.width()
+            : std::max(1.0 / std::min(s.width(), s.height()),
+                       (local.x() * sign.x() * s.width() + local.y() * sign.y() * s.height())
+                           / (s.width() * s.width() + s.height() * s.height()));
+        width = s.width() * factor;
+        height = s.height() * factor;
+    }
+    const QPointF center = fromCenter ? anchor : anchor + rotation.map(QPointF(sign.x() * width / 2.0, sign.y() * height / 2.0));
+    LayerTransform out = start;
+    out.size = QSizeF(width, height);
+    out.origin = center - QPointF(width / 2.0, height / 2.0);
+    return out;
+}
+
 QPointF LayerTransform::center() const
 {
     return origin + QPointF(size.width() / 2.0, size.height() / 2.0);

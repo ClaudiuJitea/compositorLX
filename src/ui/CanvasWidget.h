@@ -235,6 +235,10 @@ private:
     QHash<QUuid,LayerTransform> transformOriginals_;
     QHash<QUuid,LayerTransform> maskPlacementOriginals_;
     double rotateStartAngle_ = 0.0;
+    // Marquee and shape points snap to View > Snap To, as moved layers do (Control drags freely); a selection being
+    // moved snaps its edges and middle.
+    QPointF snapDragPoint(const QPointF &point, Qt::KeyboardModifiers modifiers);
+    QPoint snapSelectionMoveEnd(const QPoint &current, Qt::KeyboardModifiers modifiers);
     std::optional<double> snapGuideX_;
     std::optional<double> snapGuideY_;
     QPoint resizeSign_;

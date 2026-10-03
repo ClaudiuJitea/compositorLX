@@ -618,6 +618,12 @@ struct LayerTransform {
     bool operator==(const LayerTransform &) const = default;
 };
 
+// `start` resized by dragging the handle at `sign` (-1/0/1 per axis) from `startPoint` to `point`, in document pixels:
+// from the opposite handle, or from the centre with `fromCenter`; `lockRatio` keeps the aspect ratio. Only size and
+// origin change. One definition for the drag itself and for snapping, which re-evaluates it at other pointer positions.
+[[nodiscard]] LayerTransform resizedByHandle(const LayerTransform &start, const QPoint &sign, const QPointF &startPoint,
+                                             const QPointF &point, bool fromCenter, bool lockRatio);
+
 struct Layer {
     QUuid id;
     QString name;

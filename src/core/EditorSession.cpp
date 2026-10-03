@@ -3812,6 +3812,88 @@ double EditorSession::snappedGuidePosition(double position, CanvasGuide::Axis ax
     return best.value_or(position);
 }
 
+static std::optional<double> nearestTarget(double value, const QVector<double> &lines, double tolerance)
+{
+    std::optional<double> best;
+    for (const double line : lines)
+        if (std::abs(line - value) <= tolerance && (!best || std::abs(line - value) < std::abs(*best - value))) best = line;
+    return best;
+}
+
+QPointF EditorSession::snappedResizePoint(const QPointF &point, const LayerTransform &start, const QPointF &startPoint,
+                                          const QPoint &sign, bool fromCenter, bool lockRatio, const QSet<QUuid> &moving,
+                                          double tolerance, std::optional<double> *guideX, std::optional<double> *guideY) const
+{
+    if (guideX) guideX->reset();
+    if (guideY) guideY->reset();
+    if (!snapEnabled_ || !document_ || start.rotation != 0.0) return point;
+    const SnapTargets targets = transformSnapTargets(moving);
+    const QPointF handlePoint = start.center() + QPointF(sign.x() * start.size.width() / 2.0, sign.y() * start.size.height() / 2.0);
+    const QPointF at = handlePoint + point - startPoint;   // where the dragged handle is, to tell its edge from the far one
+    const auto edge = [&](const LayerTransform &t, bool horizontal) {
+        const QRectF box(t.origin, t.size);
+        return horizontal ? (std::abs(box.left() - at.x()) <= std::abs(box.right() - at.x()) ? box.left() : box.right())
+                          : (std::abs(box.top() - at.y()) <= std::abs(box.bottom() - at.y()) ? box.top() : box.bottom());
+    };
+    const auto update = [&](const QPointF &p) { return resizedByHandle(start, sign, startPoint, p, fromCenter, lockRatio); };
+    const LayerTransform draft = update(point);
+    struct Snap { bool horizontal; double target; };
+    QVector<Snap> snaps;
+    if (sign.x() != 0) if (const auto x = nearestTarget(edge(draft, true), targets.xs, tolerance)) snaps.append({true, *x});
+    if (sign.y() != 0) if (const auto y = nearestTarget(edge(draft, false), targets.ys, tolerance)) snaps.append({false, *y});
+    if (lockRatio && snaps.size() == 2) {
+        const Snap nearer = std::abs(snaps[0].target - edge(draft, snaps[0].horizontal)) <= std::abs(snaps[1].target - edge(draft, snaps[1].horizontal)) ? snaps[0] : snaps[1];
+        snaps = {nearer};
+    }
+    // An edge follows the pointer in a straight line along each axis, so one step measured across a pixel lands it.
+    QPointF result = point;
+    for (const Snap &snap : snaps) {
+        const double before = edge(update(result), snap.horizontal);
+        QPointF nudged = result;
+        (snap.horizontal ? nudged.rx() : nudged.ry()) += 1.0;
+        const double perPixel = edge(update(nudged), snap.horizontal) - before;
+        if (std::abs(perPixel) <= 0.01) continue;
+        (snap.horizontal ? result.rx() : result.ry()) += (snap.target - before) / perPixel;
+        if (snap.horizontal) { if (guideX) *guideX = snap.target; } else if (guideY) *guideY = snap.target;
+    }
+    return result;
+}
+
+QPointF EditorSession::snappedPoint(const QPointF &point, double tolerance, std::optional<double> *guideX, std::optional<double> *guideY) const
+{
+    if (guideX) guideX->reset();
+    if (guideY) guideY->reset();
+    if (!snapEnabled_ || !document_) return point;
+    const SnapTargets targets = cropSnapTargets();
+    const auto x = nearestTarget(point.x(), targets.xs, tolerance), y = nearestTarget(point.y(), targets.ys, tolerance);
+    if (guideX) *guideX = x;
+    if (guideY) *guideY = y;
+    return QPointF(x.value_or(point.x()), y.value_or(point.y()));
+}
+
+QPointF EditorSession::snappedSelectionOffset(const QRectF &box, const QPointF &offset, double tolerance, bool horizontal, bool vertical,
+                                              std::optional<double> *guideX, std::optional<double> *guideY) const
+{
+    if (guideX) guideX->reset();
+    if (guideY) guideY->reset();
+    const QPointF rounded(std::round(offset.x()), std::round(offset.y()));
+    if (!snapEnabled_ || !document_) return rounded;
+    const SnapTargets targets = cropSnapTargets();
+    const QRectF moved = box.translated(rounded);
+    QPointF result = rounded;
+    const auto snapAxis = [&](const QVector<double> &lines, double a, double mid, double b, double &out, std::optional<double> *guide) {
+        std::optional<double> best; double delta = 0;
+        for (const double edge : {a, mid, b}) {
+            const auto t = nearestTarget(edge, lines, tolerance);
+            if (t && (!best || std::abs(*t - edge) < std::abs(delta))) { best = t; delta = *t - edge; }
+        }
+        if (best) { out += delta; if (guide) *guide = best; }
+    };
+    if (horizontal) snapAxis(targets.xs, moved.left(), moved.center().x(), moved.right(), result.rx(), guideX);
+    if (vertical) snapAxis(targets.ys, moved.top(), moved.center().y(), moved.bottom(), result.ry(), guideY);
+    return result;
+}
+
 EditorSession::SnapTargets EditorSession::alignmentSnapTargets(const QSet<QUuid> &excludingLayers, bool includeCenters) const
 {
     if (!snapEnabled_ || !document_) return {};

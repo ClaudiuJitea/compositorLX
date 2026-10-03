@@ -332,6 +332,23 @@ public:
     [[nodiscard]] SnapTargets alignmentSnapTargets(const QSet<QUuid> &excludingLayers = {}, bool includeCenters = true) const;
     [[nodiscard]] SnapTargets transformSnapTargets(const QSet<QUuid> &excludingLayers = {}) const { return alignmentSnapTargets(excludingLayers, true); }
     [[nodiscard]] SnapTargets cropSnapTargets() const { return alignmentSnapTargets({}, false); }
+    // A resize handle dragged to `point`: the pointer nudged so the edges the handle moves land on a nearby target
+    // (canvas, other layers, guides, per View > Snap To) within `tolerance` document pixels, as a moved layer's do
+    // (mac c459f88). Each edge snaps on its own; with the ratio locked only the nearer one does and the other follows
+    // it. An upright layer only: a turned one's edges don't run along the targets. `guideX/guideY` get the targets hit.
+    [[nodiscard]] QPointF snappedResizePoint(const QPointF &point, const LayerTransform &start, const QPointF &startPoint,
+                                             const QPoint &sign, bool fromCenter, bool lockRatio, const QSet<QUuid> &moving,
+                                             double tolerance, std::optional<double> *guideX = nullptr,
+                                             std::optional<double> *guideY = nullptr) const;
+    // `point` moved onto the nearest crop target within `tolerance`, each axis on its own: where a marquee or shape
+    // starts and where its corner is dragged to (mac d6e3e93).
+    [[nodiscard]] QPointF snappedPoint(const QPointF &point, double tolerance, std::optional<double> *guideX = nullptr,
+                                       std::optional<double> *guideY = nullptr) const;
+    // A selection being moved by `offset`, nudged so its edges or middle meet a nearby target, each axis on its own;
+    // an axis Shift has locked doesn't snap (mac 8b1369a).
+    [[nodiscard]] QPointF snappedSelectionOffset(const QRectF &selectionBounds, const QPointF &offset, double tolerance,
+                                                 bool horizontal = true, bool vertical = true,
+                                                 std::optional<double> *guideX = nullptr, std::optional<double> *guideY = nullptr) const;
     [[nodiscard]] QVector<double> cropSnapTargetsX() const;
     [[nodiscard]] QVector<double> cropSnapTargetsY() const;
 

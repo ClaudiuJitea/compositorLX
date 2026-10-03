@@ -812,7 +812,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
                 emit magicWandRequested(point, mode);
             }
         } else {
-            selectionDragging_ = true; selectionAnchor_ = point; selectionCurrent_ = point; update();
+            selectionDragging_ = true;
+            if (tool_ == Tool::Marquee) { const QPointF snapped = snapDragPoint(QPointF(point), event->modifiers()); selectionAnchor_ = selectionCurrent_ = snapped.toPoint(); }
+            else { selectionAnchor_ = point; selectionCurrent_ = point; }
+            update();
         }
         event->accept(); return;
     }
@@ -862,7 +865,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
         if (tool_ == Tool::Gradient && gradientHandle_ != 0) {
             creationAnchor_ = pendingGradient_->first;
             creationCurrent_ = pendingGradient_->second;
-        } else creationAnchor_ = creationCurrent_ = point;
+        } else creationAnchor_ = creationCurrent_ = (tool_ == Tool::Shape ? snapDragPoint(point, event->modifiers()) : point);
         creationSquare_ = event->modifiers().testFlag(Qt::ShiftModifier);
         creationFromCenter_ = event->modifiers().testFlag(Qt::AltModifier);
         creationDragging_ = true; update(); event->accept(); return;
@@ -1042,6 +1045,24 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
     QWidget::mousePressEvent(event);
 }
 
+QPointF CanvasWidget::snapDragPoint(const QPointF &point, Qt::KeyboardModifiers modifiers)
+{
+    snapGuideX_.reset(); snapGuideY_.reset();
+    if (!session_ || modifiers.testFlag(Qt::ControlModifier)) return point;
+    return session_->snappedPoint(point, 10.0 / zoom_, &snapGuideX_, &snapGuideY_);
+}
+
+QPoint CanvasWidget::snapSelectionMoveEnd(const QPoint &current, Qt::KeyboardModifiers modifiers)
+{
+    snapGuideX_.reset(); snapGuideY_.reset();
+    const QPoint offset = current - selectionAnchor_;
+    if (!session_ || modifiers.testFlag(Qt::ControlModifier)) return current;
+    const auto bounds = session_->selectionBounds();
+    if (!bounds) return current;
+    const QPointF snapped = session_->snappedSelectionOffset(QRectF(*bounds), QPointF(offset), 10.0 / zoom_, true, true, &snapGuideX_, &snapGuideY_);
+    return selectionAnchor_ + snapped.toPoint();
+}
+
 void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 {
     if (document_) cursorDocument_ = (event->position() - canvasRect().topLeft()) / zoom_;
@@ -1075,6 +1096,8 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
     if (pixelDragging_ && document_ && document_->activeLayerId) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
         pixelDragOffset_ = QPoint(qRound(point.x() - pixelDragStart_.x()), qRound(point.y() - pixelDragStart_.y()));
+        // Shift keeps moved pixels on a straight line, across or down, whichever the drag has gone further along (mac 60bde4f).
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) { if (std::abs(pixelDragOffset_.x()) >= std::abs(pixelDragOffset_.y())) pixelDragOffset_.setY(0); else pixelDragOffset_.setX(0); }
         for (Layer &layer : document_->layers) if (layer.id == *document_->activeLayerId) { layer.transform.origin = pixelDragOriginalOrigin_ + pixelDragOffset_; break; }
         renderDirty_ = true; update(); event->accept(); return;
     }
@@ -1169,27 +1192,16 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
                 rotationDelta = std::round((angle - rotateStartAngle_) * 180.0 / M_PI);
                 if (event->modifiers().testFlag(Qt::ShiftModifier)) rotationDelta = std::round(rotationDelta / 15.0) * 15.0;
             } else if (transformDrag_ == TransformDrag::Resize) {
-                snapGuideX_.reset(); snapGuideY_.reset();
                 const bool fromCenter = event->modifiers().testFlag(Qt::AltModifier);
-                const QPointF initialHandle = transformStart_.center() + QPointF(resizeSign_.x() * transformStart_.size.width() / 2.0,
-                                                                                 resizeSign_.y() * transformStart_.size.height() / 2.0);
-                const QPointF anchor = fromCenter ? transformStart_.center()
-                    : transformStart_.center() - QPointF(resizeSign_.x() * transformStart_.size.width() / 2.0,
-                                                         resizeSign_.y() * transformStart_.size.height() / 2.0);
-                const QPointF local = (initialHandle + point - moveStartDocument_ - anchor) * (fromCenter ? 2.0 : 1.0);
-                double width = resizeSign_.x() ? std::max(1.0, local.x() * resizeSign_.x()) : transformStart_.size.width();
-                double height = resizeSign_.y() ? std::max(1.0, local.y() * resizeSign_.y()) : transformStart_.size.height();
-                if (lockTransformRatio_ != event->modifiers().testFlag(Qt::ShiftModifier)) {
-                    const double factor = !resizeSign_.x() ? height / transformStart_.size.height()
-                        : !resizeSign_.y() ? width / transformStart_.size.width()
-                        : std::max(1.0 / std::min(transformStart_.size.width(), transformStart_.size.height()),
-                            (local.x() * resizeSign_.x() * transformStart_.size.width() + local.y() * resizeSign_.y() * transformStart_.size.height())
-                            / (transformStart_.size.width() * transformStart_.size.width() + transformStart_.size.height() * transformStart_.size.height()));
-                    width = transformStart_.size.width() * factor; height = transformStart_.size.height() * factor;
-                }
-                const QPointF center = fromCenter ? anchor : anchor + QPointF(resizeSign_.x() * width / 2.0, resizeSign_.y() * height / 2.0);
-                group.size = QSizeF(width, height);
-                group.origin = center - QPointF(width / 2.0, height / 2.0);
+                const bool lock = lockTransformRatio_ != event->modifiers().testFlag(Qt::ShiftModifier);
+                QPointF resizePoint = point;
+                snapGuideX_.reset(); snapGuideY_.reset();
+                if (session_ && !event->modifiers().testFlag(Qt::ControlModifier))   // Control drags freely
+                    resizePoint = session_->snappedResizePoint(point, transformStart_, moveStartDocument_, resizeSign_, fromCenter, lock,
+                                                               QSet<QUuid>(transformOriginals_.keyBegin(), transformOriginals_.keyEnd()),
+                                                               10.0 / zoom_, &snapGuideX_, &snapGuideY_);
+                const LayerTransform resized = resizedByHandle(transformStart_, resizeSign_, moveStartDocument_, resizePoint, fromCenter, lock);
+                group.size = resized.size; group.origin = resized.origin;
             }
             const double scaleX = group.size.width() / transformStart_.size.width();
             const double scaleY = group.size.height() / transformStart_.size.height();
@@ -1246,28 +1258,16 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
                 edited.rotation = std::round(std::atan2(delta.y(), delta.x()) * 180.0 / M_PI + 90.0);
                 if (event->modifiers().testFlag(Qt::ShiftModifier)) edited.rotation = std::round(edited.rotation / 15.0) * 15.0;
             } else if (transformDrag_ == TransformDrag::Resize) {
-                snapGuideX_.reset(); snapGuideY_.reset();
                 const bool fromCenter = event->modifiers().testFlag(Qt::AltModifier);
-                QTransform rotation, inverseRotation; rotation.rotate(transformStart_.rotation); inverseRotation.rotate(-transformStart_.rotation);
-                const QPointF initialHandle = transformStart_.center() + rotation.map(QPointF(resizeSign_.x() * transformStart_.size.width() / 2.0,
-                                                                                               resizeSign_.y() * transformStart_.size.height() / 2.0));
-                const QPointF anchor = fromCenter ? transformStart_.center()
-                    : transformStart_.center() + rotation.map(QPointF(-resizeSign_.x() * transformStart_.size.width() / 2.0,
-                                                                      -resizeSign_.y() * transformStart_.size.height() / 2.0));
-                const QPointF local = inverseRotation.map(initialHandle + point - moveStartDocument_ - anchor) * (fromCenter ? 2.0 : 1.0);
-                double width = resizeSign_.x() ? std::max(1.0, local.x() * resizeSign_.x()) : transformStart_.size.width();
-                double height = resizeSign_.y() ? std::max(1.0, local.y() * resizeSign_.y()) : transformStart_.size.height();
-                if (lockTransformRatio_ != event->modifiers().testFlag(Qt::ShiftModifier)) {
-                    const double factor = !resizeSign_.x() ? height / transformStart_.size.height()
-                        : !resizeSign_.y() ? width / transformStart_.size.width()
-                        : std::max(1.0 / std::min(transformStart_.size.width(), transformStart_.size.height()),
-                            (local.x() * resizeSign_.x() * transformStart_.size.width() + local.y() * resizeSign_.y() * transformStart_.size.height())
-                            / (transformStart_.size.width() * transformStart_.size.width() + transformStart_.size.height() * transformStart_.size.height()));
-                    width = transformStart_.size.width() * factor; height = transformStart_.size.height() * factor;
-                }
-                const QPointF center = fromCenter ? anchor : anchor + rotation.map(QPointF(resizeSign_.x() * width / 2.0, resizeSign_.y() * height / 2.0));
-                edited.size = QSizeF(width, height);
-                edited.origin = center - QPointF(width / 2.0, height / 2.0);
+                const bool lock = lockTransformRatio_ != event->modifiers().testFlag(Qt::ShiftModifier);
+                QPointF resizePoint = point;
+                snapGuideX_.reset(); snapGuideY_.reset();
+                if (session_ && !transformMask_ && !event->modifiers().testFlag(Qt::ControlModifier))
+                    resizePoint = session_->snappedResizePoint(point, transformStart_, moveStartDocument_, resizeSign_, fromCenter, lock,
+                                                               selectedLayerIds_.isEmpty() ? QSet<QUuid>{layer.id} : selectedLayerIds_,
+                                                               10.0 / zoom_, &snapGuideX_, &snapGuideY_);
+                const LayerTransform resized = resizedByHandle(transformStart_, resizeSign_, moveStartDocument_, resizePoint, fromCenter, lock);
+                edited.size = resized.size; edited.origin = resized.origin;
             }
             if(!transformMask_&&!layer.mask.isNull()&&layer.mask.size()!=QSize(1,1)){if(layer.maskLinked){if(maskPlacementStart_)layer.maskPlacement=maskPlacementStart_->following(transformStart_,layer.transform);else layer.maskPlacement.reset();}else layer.maskPlacement=maskPlacementStart_.value_or(transformStart_);}
             break;
@@ -1278,7 +1278,8 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         return;
     }
     if (movingSelection_) {
-        selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint(); update(); event->accept(); return;
+        selectionCurrent_ = snapSelectionMoveEnd(((event->position() - canvasRect().topLeft()) / zoom_).toPoint(), event->modifiers());
+        update(); event->accept(); return;
     }
     if (selectionDragging_) {
         if (tool_ == Tool::Lasso && !polygonalLasso_) {
@@ -1287,6 +1288,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
             update(); event->accept(); return;
         }
         selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
+        if (tool_ == Tool::Marquee) selectionCurrent_ = snapDragPoint(QPointF(selectionCurrent_), event->modifiers()).toPoint();
         update(); event->accept(); return;
     }
     if (brushDrawing_) {
@@ -1294,7 +1296,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
     }
     if (creationDragging_) {
         if (tool_ == Tool::Gradient && gradientHandle_ == 1) creationAnchor_ = *cursorDocument_;
-        else creationCurrent_ = *cursorDocument_;
+        else creationCurrent_ = tool_ == Tool::Shape ? snapDragPoint(*cursorDocument_, event->modifiers()) : *cursorDocument_;
         creationSquare_ = event->modifiers().testFlag(Qt::ShiftModifier);
         creationFromCenter_ = event->modifiers().testFlag(Qt::AltModifier);
         if (tool_ == Tool::Gradient && QLineF(creationAnchor_, creationCurrent_).length() >= .5)
@@ -1414,7 +1416,9 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
     if (movingSelection_ && event->button() == Qt::LeftButton) {
-        movingSelection_ = false; selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
+        movingSelection_ = false;
+        selectionCurrent_ = snapSelectionMoveEnd(((event->position() - canvasRect().topLeft()) / zoom_).toPoint(), event->modifiers());
+        snapGuideX_.reset(); snapGuideY_.reset();
         const QPoint offset = selectionCurrent_ - selectionAnchor_; if (!offset.isNull()) emit selectionMoveRequested(offset);
         update(); event->accept(); return;
     }
@@ -1426,6 +1430,8 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
             emit polygonSelectionRequested(points, lassoMode_, selectionAntialiased_); update(); event->accept(); return;
         }
         selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
+        if (tool_ == Tool::Marquee) selectionCurrent_ = snapDragPoint(QPointF(selectionCurrent_), event->modifiers()).toPoint();
+        snapGuideX_.reset(); snapGuideY_.reset();
         const QRect rect = QRect(selectionAnchor_, selectionCurrent_).normalized();
         if (tool_ == Tool::Crop) emit cropRequested(rect);
         else if (ellipticalMarquee_) emit ellipticalSelectionRequested(rect, mode, selectionAntialiased_);
@@ -1440,7 +1446,9 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
     if (creationDragging_ && event->button() == Qt::LeftButton) {
         creationDragging_ = false;
         if (tool_ == Tool::Gradient && gradientHandle_ == 1) creationAnchor_ = (event->position() - canvasRect().topLeft()) / zoom_;
-        else creationCurrent_ = (event->position() - canvasRect().topLeft()) / zoom_;
+        else creationCurrent_ = tool_ == Tool::Shape ? snapDragPoint((event->position() - canvasRect().topLeft()) / zoom_, event->modifiers())
+                                                     : (event->position() - canvasRect().topLeft()) / zoom_;
+        if (tool_ == Tool::Shape) { snapGuideX_.reset(); snapGuideY_.reset(); }
         if (tool_ == Tool::Gradient) {
             if (QLineF(creationAnchor_, creationCurrent_).length() < .5) {
                 pendingGradient_.reset(); emit gradientCancelRequested();

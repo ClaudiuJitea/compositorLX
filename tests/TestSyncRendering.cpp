@@ -32,6 +32,11 @@ private slots:
     void psdHueSaturationReadsMasterAndEachRange();
     void psdMaskPatchSitsWhereItIsOnTheCanvas();
     void paintRefusalsExplainThemselves();
+    // c459f88 / d6e3e93 / 8b1369a: ResizeSnapTests and marquee/selection snapping
+    void aSideHandleSnapsItsEdge();
+    void aProportionalCornerSnapsItsNearerEdgeAndKeepsTheRatio();
+    void aTurnedLayerDoesntSnap();
+    void marqueePointsAndSelectionMovesSnap();
     // 1318f1e: GroupTests.ungroup*
     void ungroupRestoresChildrenAtTheFoldersSpotAndUndoes();
     void ungroupPreservesClippingBetweenTwoOfAFoldersOwnChildren();
@@ -381,6 +386,83 @@ void TestSyncRendering::ungroupingReleasesClippingThatNoLongerMakesSense()
     session.ungroupLayers();
     QCOMPARE(ids(session), (QVector<QUuid>{outsideBase, between, childSource}));
     QVERIFY(!layerById(session, childSource).maskSourceId);   // no longer next to its base, so the clip goes
+}
+
+// A 300x200 canvas: the layer being resized, 100x100 at (10,10), and another whose left edge is at x 150.
+static QUuid resizeFixture(EditorSession &session)
+{
+    session.createDocument(300, 200);
+    QImage image(20, 20, QImage::Format_RGBA8888_Premultiplied);
+    image.fill(Qt::red);
+    session.insertImage(image, QStringLiteral("Other"));
+    session.activeLayer()->transform = LayerTransform{QPointF(150, 150), QSizeF(40, 40)};
+    session.insertImage(image, QStringLiteral("Resized"));
+    session.activeLayer()->transform = LayerTransform{QPointF(10, 10), QSizeF(100, 100)};
+    return session.activeLayer()->id;
+}
+static LayerTransform snappedResize(EditorSession &session, const QUuid &layer, QPoint sign, QPointF from, QPointF to, bool lock)
+{
+    const LayerTransform start = session.activeLayer()->transform;
+    const QPointF snapped = session.snappedResizePoint(to, start, from, sign, false, lock, {layer}, 5.0);
+    LayerTransform result = resizedByHandle(start, sign, from, snapped, false, lock);
+    result.origin = QPointF(qRound(result.origin.x()), qRound(result.origin.y()));
+    result.size = QSizeF(qRound(result.size.width()), qRound(result.size.height()));
+    return result;
+}
+
+void TestSyncRendering::aSideHandleSnapsItsEdge()
+{
+    EditorSession session;
+    const QUuid layer = resizeFixture(session);
+    // The right edge dragged to 147, three pixels short of the other layer's left edge.
+    LayerTransform r = snappedResize(session, layer, QPoint(1, 0), QPointF(110, 60), QPointF(147, 60), false);
+    QCOMPARE(r.origin.x() + r.size.width(), 150.0);
+    QCOMPARE(r.size.height(), 100.0);   // only the dragged edge moves
+    r = snappedResize(session, layer, QPoint(1, 0), QPointF(110, 60), QPointF(130, 60), false);
+    QCOMPARE(r.origin.x() + r.size.width(), 130.0);   // out of reach, it doesn't
+}
+
+void TestSyncRendering::aProportionalCornerSnapsItsNearerEdgeAndKeepsTheRatio()
+{
+    EditorSession session;
+    const QUuid layer = resizeFixture(session);
+    // Bottom right dragged toward (146, 148): the bottom edge is nearer 150 than the right edge is.
+    const LayerTransform r = snappedResize(session, layer, QPoint(1, 1), QPointF(110, 110), QPointF(146, 148), true);
+    QCOMPARE(r.origin.y() + r.size.height(), 150.0);
+    QVERIFY2(std::abs(r.size.width() - r.size.height()) <= 1, "still square");
+}
+
+void TestSyncRendering::aTurnedLayerDoesntSnap()
+{
+    EditorSession session;
+    const QUuid layer = resizeFixture(session);
+    session.activeLayer()->transform.rotation = 20;
+    const LayerTransform start = session.activeLayer()->transform;
+    const QPointF point(147, 60);
+    QCOMPARE(session.snappedResizePoint(point, start, QPointF(110, 60), QPoint(1, 0), false, false, {layer}, 5.0), point);
+}
+
+void TestSyncRendering::marqueePointsAndSelectionMovesSnap()
+{
+    EditorSession session;
+    resizeFixture(session);
+    std::optional<double> gx, gy;
+    // Near the other layer's left edge (150) and the canvas top (0): both axes snap on their own.
+    QPointF p = session.snappedPoint(QPointF(147, 3), 5.0, &gx, &gy);
+    QCOMPARE(p.x(), 150.0);
+    QCOMPARE(p.y(), 0.0);
+    QVERIFY(gx && gy);
+    p = session.snappedPoint(QPointF(120, 80), 5.0, &gx, &gy);   // out of reach: untouched
+    QCOMPARE(p, QPointF(120, 80));
+    QVERIFY(!gx && !gy);
+    // A 20x20 selection at (60, 60) dragged right by 67: its right edge (147) is 3 short of 150... its middle/edges snap.
+    const QPointF moved = session.snappedSelectionOffset(QRectF(60, 60, 20, 20), QPointF(67, 0), 5.0);
+    QCOMPARE((60 + moved.x() + 20), 150.0);
+    // An axis locked by Shift doesn't snap.
+    const QPointF locked = session.snappedSelectionOffset(QRectF(60, 60, 20, 20), QPointF(67, 0), 5.0, false, true);
+    QCOMPARE(locked.x(), 67.0);
+    session.setSnapEnabled(false);
+    QCOMPARE(session.snappedPoint(QPointF(147, 3), 5.0), QPointF(147, 3));
 }
 
 QTEST_MAIN(TestSyncRendering)
