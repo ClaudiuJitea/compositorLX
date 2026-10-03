@@ -34,6 +34,7 @@
 #include <QAbstractItemDelegate>
 #include <QCheckBox>
 #include <QColorDialog>
+#include "ui/ColorPickerDialog.h"
 #include <QColorSpace>
 #include <QClipboard>
 #include <QCloseEvent>
@@ -2490,21 +2491,18 @@ void MainWindow::openColorPicker(bool background)
     const QColor startingColor = background ? session_.backgroundColor() : session_.foregroundColor();
     if (colorPicker_) {
         colorPickerBackground_ = background;
-        colorPicker_->setWindowTitle(background ? tr("Background Color") : tr("Foreground Color"));
+        colorPicker_->setWindowTitle(background ? tr("Color Picker (Background Color)") : tr("Color Picker (Foreground Color)"));
         colorPicker_->setCurrentColor(startingColor);
         colorPicker_->raise();
         colorPicker_->activateWindow();
         return;
     }
 
-    auto *picker = new QColorDialog(startingColor, this);
+    auto *picker = new ColorPickerDialog(startingColor, this);
     picker->setObjectName(QStringLiteral("paletteColorPicker"));
-    picker->setWindowTitle(background ? tr("Background Color") : tr("Foreground Color"));
-    picker->setOption(QColorDialog::ShowAlphaChannel, false);
-    picker->setOption(QColorDialog::DontUseNativeDialog, true);
+    picker->setWindowTitle(background ? tr("Color Picker (Background Color)") : tr("Color Picker (Foreground Color)"));
     picker->setAttribute(Qt::WA_DeleteOnClose);
     picker->setWindowModality(Qt::NonModal);
-    attachColorDialogScrubbing(picker);
     colorPicker_ = picker;
     colorPickerBackground_ = background;
     colorPickerPreviousTool_ = int(canvas_->tool());
@@ -2521,11 +2519,11 @@ void MainWindow::openColorPicker(bool background)
     // is selected): the picker previews on them, and Cancel takes the preview back.
     const QPointer<InlineTextEditor> textEditor = background ? nullptr : inlineTextEditor();
     if (textEditor) {
-        connect(picker, &QColorDialog::currentColorChanged, textEditor, [textEditor](const QColor &color) {
+        connect(picker, &ColorPickerDialog::currentColorChanged, textEditor, [textEditor](const QColor &color) {
             textEditor->previewLetterFormat([textEditor, color] { textEditor->applyColor(color.toRgb()); });
         });
     }
-    connect(picker, &QColorDialog::finished, this, [this, picker, textEditor](int result) {
+    connect(picker, &QDialog::finished, this, [this, picker, textEditor](int result) {
         colorPickerPosition_ = picker->pos();
         if (textEditor) {
             textEditor->endPreview(false);
@@ -3752,8 +3750,8 @@ void MainWindow::gradientMapDialog()
         shadowButton->setStyleSheet(QStringLiteral("text-align:left;padding-left:32px;background:%1;").arg(shadows.name())); highlightButton->setStyleSheet(QStringLiteral("text-align:left;padding-left:32px;background:%1;").arg(highlights.name()));
     };
     const auto pickColor = [&](QColor &color, const QString &title) {
-        const QColor original = color; QColorDialog picker(color, &dialog); picker.setWindowTitle(title); picker.setOption(QColorDialog::DontUseNativeDialog); picker.setWindowModality(Qt::NonModal);
-        connect(&picker, &QColorDialog::currentColorChanged, &dialog, [&](const QColor &next) { if (!next.isValid()) return; color = next.toRgb(); refreshGradient(); preview(); });
+        const QColor original = color; ColorPickerDialog picker(color, &dialog); picker.setWindowTitle(tr("Color Picker (%1)").arg(title)); picker.setCanvasSamplingHint(false); picker.setWindowModality(Qt::NonModal);
+        connect(&picker, &ColorPickerDialog::currentColorChanged, &dialog, [&](const QColor &next) { if (!next.isValid()) return; color = next.toRgb(); refreshGradient(); preview(); });
         if (runFloatingDialog(picker) != QDialog::Accepted) { color = original; refreshGradient(); preview(); }
     };
     connect(shadowButton, &QPushButton::clicked, &dialog, [&] { pickColor(shadows, tr("Shadow Color")); });
@@ -4303,11 +4301,11 @@ void MainWindow::vignetteDialog()
 
     connect(colorBtn, &QPushButton::clicked, &dialog, [&] {
         const QColor originalColor = edgeColor;
-        QColorDialog picker(edgeColor, &dialog);
-        picker.setWindowTitle(tr("Vignette Edge Color"));
-        picker.setOption(QColorDialog::DontUseNativeDialog);
+        ColorPickerDialog picker(edgeColor, &dialog);
+        picker.setWindowTitle(tr("Color Picker (Vignette Color)"));
+        picker.setCanvasSamplingHint(false);
         picker.setWindowModality(Qt::NonModal);
-        connect(&picker, &QColorDialog::currentColorChanged, &dialog, [&](const QColor &next) {
+        connect(&picker, &ColorPickerDialog::currentColorChanged, &dialog, [&](const QColor &next) {
             if (!next.isValid()) return;
             edgeColor = next.toRgb();
             updateSwatch();
@@ -4624,8 +4622,9 @@ void MainWindow::ditherDialog()
         refresh();
     });
     const auto pickColor = [&dialog, settings, toColor, swatchStyle, refresh](QPushButton *button, DitherColor DitherSettings::*field) {
-        QColorDialog picker(toColor((*settings).*field), &dialog);
-        picker.setWindowTitle(field == &DitherSettings::dark ? tr("Dither Dark Color") : tr("Dither Light Color"));
+        ColorPickerDialog picker(toColor((*settings).*field), &dialog);
+        picker.setCanvasSamplingHint(false);
+        picker.setWindowTitle(field == &DitherSettings::dark ? tr("Color Picker (Dither Dark Color)") : tr("Color Picker (Dither Light Color)"));
         if (picker.exec() != QDialog::Accepted) return;
         const QColor color = picker.selectedColor();
         (*settings).*field = DitherColor{color.redF(), color.greenF(), color.blueF()};
@@ -6091,7 +6090,7 @@ void MainWindow::exportPng(bool jpegDefault)
         QTimer previewTimer(&dialog); previewTimer.setSingleShot(true); previewTimer.setInterval(200);
         connect(&previewTimer, &QTimer::timeout, &dialog, updatePreview);
         connect(qualityField, &QSlider::valueChanged, &dialog, [=, &previewTimer](int value) { qualityValue->setText(QStringLiteral("%1%").arg(value)); previewTimer.start(); });
-        connect(background, &QPushButton::clicked, &dialog, [this, &matte, &previewTimer] { const QColor chosen = QColorDialog::getColor(matte, this, tr("Background for Transparency")); if (chosen.isValid()) { matte = chosen; previewTimer.start(); } });
+        connect(background, &QPushButton::clicked, &dialog, [this, &matte, &previewTimer] { const QColor chosen = ColorPickerDialog::getColor(matte, this, tr("Color Picker (Background for Transparency)")); if (chosen.isValid()) { matte = chosen; previewTimer.start(); } });
         updatePreview();
         if (dialog.exec() != QDialog::Accepted || !encoded) return;
         settings.setValue(QStringLiteral("jpegExportQuality"), qualityField->value()); jpegData = std::move(encoded->data);

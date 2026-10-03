@@ -4,7 +4,11 @@
 #include "core/Document.h"
 #include "core/EditorSession.h"
 #include "ui/CanvasWidget.h"
+#include "ui/ColorPickerDialog.h"
 #include "ui/MainWindow.h"
+#include <QLineEdit>
+#include <QSpinBox>
+#include <QPushButton>
 
 #include <QDoubleSpinBox>
 #include <QLabel>
@@ -415,16 +419,15 @@ private slots:
         QVERIFY(s.maskPaintWhite()); QVERIFY(fg->styleSheet().contains("#ffffff"));
     }
     // Growth for erase, blur and heal strokes: the same mechanism as paint, and nothing is left behind when nothing changes.
-    void blurAcrossALayerEdgeSpillsOutsideAndGrowsTheLayer()
+    void blurAcrossALayerEdgeSoftensInsideAndLeavesTheLayerSize()
     {
         EditorSession s; s.createDocument(100, 100);
         QImage image(20, 20, QImage::Format_RGBA8888_Premultiplied); image.fill(Qt::red);
         QVERIFY(s.insertImage(image, "Patch", QPointF(50, 50)));
         const QRectF box(s.activeLayer()->transform.origin, s.activeLayer()->transform.size);
-        QVERIFY(s.beginBlurStroke(QPointF(box.right(), 50), 40, 1, 1, 8)); s.continueBrushStroke(QPointF(box.right(), 52)); QVERIFY(s.endBrushStroke());
-        QVERIFY(alphaAt(s, int(box.right()) + 3, 50) > 0);
-        QVERIFY(s.activeLayer()->image.width() > 20);
-        QCOMPARE(px(s, int(box.left()) + 1, int(box.top()) + 1).red(), 255);
+        QVERIFY(s.beginBlurStroke(QPointF(box.right(), 50), 40, 1, 1, 8)); s.continueBrushStroke(QPointF(box.right(), 52)); s.endBrushStroke();
+        QCOMPARE(s.activeLayer()->image.size(), QSize(20, 20));          // the sample is the layer's own pixels
+        QCOMPARE(alphaAt(s, int(box.right()) + 3, 50), 0);
     }
     void eraseAndHealOutsideTheLayerLeaveItAlone()
     {
@@ -541,6 +544,44 @@ private slots:
         const QColor inside = shot.pixelColor(r.at(150, 50));
         QVERIFY2(inside.red() > 150 && inside.blue() < 120, qPrintable(inside.name()));   // red under the cursor, not the blue canvas
         QVERIFY(shot.pixelColor(r.at(170, 50) + QPoint(10, 0)).blue() > 150);               // outside the circle
+    }
+    void colorPickerPanelHexSamplingCancelCommitAndPosition()
+    {
+        Rig r; r.window.resize(1100, 800); r.window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&r.window));
+        r.session().createDocument(100, 100);
+        QImage image(100, 100, QImage::Format_RGBA8888_Premultiplied);
+        for (int y = 0; y < 100; ++y) for (int x = 0; x < 100; ++x) image.setPixelColor(x, y, y < 50 ? QColor(0, 0, 255) : QColor(255, 128, 0));
+        QVERIFY(r.session().insertImage(image, "Split")); r.window.syncDocumentViews(); r.canvas()->setZoom(1.0);
+        r.window.openColorPicker(false); QCoreApplication::processEvents();
+        auto *picker = r.window.findChild<ColorPickerDialog *>("paletteColorPicker"); QVERIFY(picker && picker->isVisible());
+        // hex entry
+        auto *hex = picker->findChild<QLineEdit *>("colorPickerHex"); hex->setFocus(); hex->setText("#FF8000"); emit hex->editingFinished();
+        QCOMPARE(picker->currentColor(), QColor(255, 128, 0));
+        QCOMPARE(picker->findChild<QSpinBox *>("colorGreenSpin")->value(), 128);
+        hex->setText("zzz"); emit hex->editingFinished();                       // invalid: back to the last colour
+        QCOMPARE(picker->currentColor(), QColor(255, 128, 0));
+        // sampling the canvas loads into the picker only; nothing is committed
+        r.press(50, 10); r.release(50, 10);
+        QCOMPARE(picker->currentColor(), QColor(0, 0, 255)); QCOMPARE(r.session().foregroundColor(), QColor(Qt::black));
+        // saturation/brightness field and hue strip drive the colour
+        auto *field = picker->findChild<QWidget *>("colorPickerField");
+        QTest::mousePress(field, Qt::LeftButton, {}, QPoint(1, 1));              // white corner
+        QVERIFY(picker->currentColor().red() > 250 && picker->currentColor().green() > 250 && picker->currentColor().blue() > 250);
+        auto *strip = picker->findChild<QWidget *>("colorPickerHue");
+        QTest::mousePress(field, Qt::LeftButton, {}, QPoint(field->width() - 2, 1));
+        QTest::mousePress(strip, Qt::LeftButton, {}, QPoint(10, strip->height() - 2));   // hue ~0 = red
+        QVERIFY(picker->currentColor().red() > 240 && picker->currentColor().green() < 12 && picker->currentColor().blue() < 12);
+        // Cancel rolls back; the position is remembered for the next opening
+        picker->move(123, 77); QCoreApplication::processEvents();
+        picker->findChild<QPushButton *>("colorPickerCancel")->click(); QCoreApplication::processEvents();
+        QCOMPARE(r.session().foregroundColor(), QColor(Qt::black));
+        r.window.openColorPicker(true); QCoreApplication::processEvents();
+        picker = r.window.findChild<ColorPickerDialog *>("paletteColorPicker"); QVERIFY(picker);
+        QCOMPARE(picker->pos(), QPoint(123, 77));
+        picker->setCurrentColor(QColor(10, 20, 30));
+        picker->findChild<QPushButton *>("colorPickerOk")->click(); QCoreApplication::processEvents();
+        QCOMPARE(r.session().backgroundColor(), QColor(10, 20, 30)); QCOMPARE(r.session().foregroundColor(), QColor(Qt::black));
     }
     // SpotHealingTests (all modes) and CloneStampTests
     static QImage blemished()

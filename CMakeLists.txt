@@ -162,6 +162,8 @@ add_library(compositor_ui STATIC
     src/ui/CanvasRulerWidget.cpp
     src/ui/CanvasRulerWidget.h
     src/ui/CanvasWidget.cpp
+    src/ui/ColorPickerDialog.cpp
+    src/ui/ColorPickerDialog.h
     src/ui/CanvasWidget.h
     src/ui/EffectsDialog.cpp
     src/ui/EffectsDialog.h

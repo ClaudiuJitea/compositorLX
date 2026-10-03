@@ -38,6 +38,7 @@ extern "C" {
 #include "ui/InlineTextEditor.h"
 #include <QCheckBox>
 #include <QColorDialog>
+#include "ui/ColorPickerDialog.h"
 #include <QRadioButton>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -10536,7 +10537,7 @@ void TestProjectFormat::testSection10NumericScrubInteractionAndParity()
         window.openColorPicker(false);
         QCoreApplication::processEvents();
 
-        auto *picker = window.findChild<QColorDialog *>(QStringLiteral("paletteColorPicker"));
+        auto *picker = window.findChild<ColorPickerDialog *>(QStringLiteral("paletteColorPicker"));
         QVERIFY(picker != nullptr);
         QVERIFY(picker->isVisible());
 

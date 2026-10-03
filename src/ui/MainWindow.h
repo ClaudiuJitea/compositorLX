@@ -34,6 +34,7 @@ class QMenu;
 namespace compositor {
 
 class CanvasWidget;
+class ColorPickerDialog;
 class CanvasRulerWidget;
 class CanvasRulerCornerWidget;
 class Document;
@@ -315,7 +316,7 @@ private:
     int currentTab_ = 0;
     bool suggestClipboardOnEmpty_ = false;
     std::function<void(const QPoint &)> colorSampleOverride_;
-    QPointer<QColorDialog> colorPicker_;
+    QPointer<ColorPickerDialog> colorPicker_;
     std::optional<QPoint> colorPickerPosition_;
     int colorPickerPreviousTool_ = -1;
     bool colorPickerBackground_ = false;

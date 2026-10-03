@@ -1994,7 +1994,10 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
         }
         sourceRect = QRect(QPoint(), target.image.size());
         // Painting past the layer's edge grows it over the canvas, without moving its pixels (or its mask).
-        if (const auto offset = growLayerOverCanvas(target, document_->canvasSize)) { grown = true; sourceRect.translate(*offset); }
+        // Blur softens the layer's own pixels (mac: the sample is the layer, so nothing is painted past it) and so does not grow it.
+        if (healMode != 3) {
+            if (const auto offset = growLayerOverCanvas(target, document_->canvasSize)) { grown = true; sourceRect.translate(*offset); }
+        }
         if (blank) sourceRect = QRect();
     } else if (document_->layers.at(index).mask.size() == QSize(1, 1)) {
         const QSize size = (layer->image.isNull() ? layer->transform.size.toSize() : layer->image.size()).expandedTo(QSize(1, 1));
