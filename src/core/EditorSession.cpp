@@ -2759,17 +2759,49 @@ bool EditorSession::transformSelectedLayers(const QRectF &input, double rotation
     redrawSelectedShapes(); endEdit(); return true;
 }
 
+static bool finiteDistortion(const std::array<QPointF, 4> &corners)
+{
+    for (const QPointF &a : corners)
+        if (!std::isfinite(a.x()) || !std::isfinite(a.y()) || std::abs(a.x()) > 1000000 || std::abs(a.y()) > 1000000) return false;
+    return true;
+}
+
+static double triangleArea(const QPointF &a, const QPointF &b, const QPointF &c)
+{
+    return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
+}
+
+// Four finite corners with some area to them. A convex shape is warped in perspective; anything else - a corner pulled
+// past its neighbours, which folds the shape over - is warped as two triangles instead (mac DistortWarp.isUsable).
 static bool usableDistortion(const std::array<QPointF, 4> &corners)
 {
+    return finiteDistortion(corners) && std::abs(triangleArea(corners[0], corners[1], corners[2])) > 0.01
+        && std::abs(triangleArea(corners[0], corners[2], corners[3])) > 0.01;
+}
+
+// A shape a perspective warp can take: convex, wound consistently either way (so a mirrored one counts).
+static bool convexDistortion(const std::array<QPointF, 4> &corners)
+{
+    if (!usableDistortion(corners)) return false;
     double sign = 0;
     for (int i = 0; i < 4; ++i) {
         const QPointF &a = corners[size_t(i)], &b = corners[size_t((i + 1) % 4)], &c = corners[size_t((i + 2) % 4)];
-        if (!std::isfinite(a.x()) || !std::isfinite(a.y()) || std::abs(a.x()) > 1000000 || std::abs(a.y()) > 1000000) return false;
         const double cross = (b.x() - a.x()) * (c.y() - b.y()) - (b.y() - a.y()) * (c.x() - b.x());
         if (std::abs(cross) <= .01) return false;
-        if (sign == 0) sign = cross; else if ((cross < 0) != (sign < 0)) return false;
+        if (sign == 0) sign = cross < 0 ? -1 : 1; else if ((cross < 0) != (sign < 0)) return false;
     }
     return true;
+}
+
+// The affine map taking three source points to three destination points.
+static std::optional<QTransform> affineFrom(const std::array<QPointF, 3> &from, const std::array<QPointF, 3> &to)
+{
+    const QPointF u = from[1] - from[0], v = from[2] - from[0], uu = to[1] - to[0], vv = to[2] - to[0];
+    const double det = u.x() * v.y() - v.x() * u.y();
+    if (std::abs(det) < 1e-9) return std::nullopt;
+    const double a = (uu.x() * v.y() - vv.x() * u.y()) / det, c = (vv.x() * u.x() - uu.x() * v.x()) / det;
+    const double b = (uu.y() * v.y() - vv.y() * u.y()) / det, d = (vv.y() * u.x() - uu.y() * v.x()) / det;
+    return QTransform(a, b, c, d, to[0].x() - (a * from[0].x() + c * from[0].y()), to[0].y() - (b * from[0].x() + d * from[0].y()));
 }
 
 static QRect alphaBounds(const QImage &image);
@@ -2797,12 +2829,33 @@ static std::optional<WarpedRaster> warpRaster(const QImage &source, const LayerT
     std::swap(target[2], target[3]);
     const QPolygonF sourceQuad{QPointF(0, 0), QPointF(source.width(), 0),
                                QPointF(source.width(), source.height()), QPointF(0, source.height())};
-    QTransform mapping;
-    if (!QTransform::quadToQuad(sourceQuad, target, mapping)) return std::nullopt;
     QImage output(size, mask ? QImage::Format_Grayscale8 : QImage::Format_RGBA8888_Premultiplied);
     output.fill(mask ? background : 0);
     QPainter painter(&output); painter.setRenderHint(QPainter::SmoothPixmapTransform, placement.sampling != Sampling::Nearest);
-    painter.setTransform(mapping); painter.drawImage(QPointF(0, 0), source); painter.end();
+    if (convexDistortion(corners)) {
+        QTransform mapping;
+        if (!QTransform::quadToQuad(sourceQuad, target, mapping)) return std::nullopt;
+        painter.setTransform(mapping); painter.drawImage(QPointF(0, 0), source);
+    } else {
+        // A folded shape has no perspective that takes the image to it, so each half is taken there on its own, as two
+        // triangles meeting along the shape's diagonal (mac DistortWarp.warpFolded).
+        const std::array<QPointF, 4> src{sourceQuad[0], sourceQuad[1], sourceQuad[2], sourceQuad[3]};
+        const std::array<std::array<int, 3>, 2> halves{{{0, 1, 2}, {0, 2, 3}}};
+        for (const auto &half : halves) {
+            const std::array<QPointF, 3> from{src[size_t(half[0])], src[size_t(half[1])], src[size_t(half[2])]};
+            const std::array<QPointF, 3> to{target[half[0]], target[half[1]], target[half[2]]};
+            const auto map = affineFrom(from, to);
+            if (!map) continue;
+            painter.save();
+            QPainterPath triangle; triangle.addPolygon(QPolygonF{to[0], to[1], to[2], to[0]}); triangle.closeSubpath();
+            painter.setRenderHint(QPainter::Antialiasing, false);
+            painter.setClipPath(triangle);
+            painter.setTransform(*map);
+            painter.drawImage(QPointF(0, 0), source);
+            painter.restore();
+        }
+    }
+    painter.end();
     QRect crop = forcedCrop.value_or(mask ? output.rect() : alphaBounds(output));
     crop = crop.intersected(output.rect());
     if (crop.isEmpty()) crop = output.rect();
@@ -2815,21 +2868,38 @@ bool EditorSession::distortSelectedLayers(const std::array<QPointF, 4> &corners,
 {
     if (!document_ || !usableDistortion(corners)) return false;
     Layer *active = activeLayer();
-    if (!active || active->group || (maskOnly && active->mask.isNull())) return false;
-    QSet<QUuid> ids = maskOnly ? QSet<QUuid>{active->id} : selectedLayerIds_;
-    if (ids.isEmpty()) ids.insert(active->id);
-    QRectF groupBounds = selectedLayersBounds();
-    if (maskOnly) {
-        const auto maskCorners = layerCorners(active->maskPlacement.value_or(active->transform));
-        double left = maskCorners[0].x(), right = left, top = maskCorners[0].y(), bottom = top;
-        for (const QPointF &point : maskCorners) { left = std::min(left, point.x()); right = std::max(right, point.x()); top = std::min(top, point.y()); bottom = std::max(bottom, point.y()); }
-        groupBounds = QRectF(QPointF(left, top), QPointF(right, bottom));
+    if (!active || (maskOnly && (active->group || active->mask.isNull()))) return false;
+    QSet<QUuid> ids;
+    if (maskOnly) ids.insert(active->id);
+    else {
+        ids = selectedTransformLayerIds();
+        if (ids.isEmpty() && !active->group) ids.insert(active->id);
     }
+    if (ids.isEmpty()) return false;
+    // One layer (or one mask) is warped from its own corners, which the shape the person dragged started as; several
+    // layers, or a folder, from the upright box around them, each point carried as the box's is.
+    const bool single = maskOnly || (ids.size() == 1 && !active->group);
+    std::array<QPointF, 4> sourceCorners;
+    if (single) sourceCorners = layerCorners(maskOnly ? active->maskPlacement.value_or(active->transform) : active->transform);
+    else {
+        const QRectF box = selectedLayersBounds();
+        sourceCorners = {box.topLeft(), box.topRight(), box.bottomRight(), box.bottomLeft()};
+    }
+    const QRectF groupBounds = QPolygonF{sourceCorners[0], sourceCorners[1], sourceCorners[2], sourceCorners[3]}.boundingRect();
     if (groupBounds.width() <= 0 || groupBounds.height() <= 0) return false;
-    QTransform groupWarp;
-    const QPolygonF groupSource{groupBounds.topLeft(), groupBounds.topRight(), groupBounds.bottomRight(), groupBounds.bottomLeft()};
-    const QPolygonF groupTarget{corners[0], corners[1], corners[2], corners[3]};
-    if (!QTransform::quadToQuad(groupSource, groupTarget, groupWarp)) return false;
+    QTransform quadMap;
+    const bool perspective = QTransform::quadToQuad(QPolygonF{sourceCorners[0], sourceCorners[1], sourceCorners[2], sourceCorners[3]},
+                                                    QPolygonF{corners[0], corners[1], corners[2], corners[3]}, quadMap)
+                             && convexDistortion(corners);
+    // Where a point of the original box lands in the distorted shape: by perspective when the shape allows it, else
+    // by bilinear blending of its corners (a folded shape has no perspective).
+    const auto groupWarp = [&](const QPointF &p) {
+        if (perspective) return quadMap.map(p);
+        const QPointF ex = sourceCorners[1] - sourceCorners[0], ey = sourceCorners[3] - sourceCorners[0], d = p - sourceCorners[0];
+        const double det = ex.x() * ey.y() - ex.y() * ey.x();
+        const double u = det == 0 ? 0 : (d.x() * ey.y() - d.y() * ey.x()) / det, v = det == 0 ? 0 : (ex.x() * d.y() - ex.y() * d.x()) / det;
+        return corners[0] * (1 - u) * (1 - v) + corners[1] * u * (1 - v) + corners[2] * u * v + corners[3] * (1 - u) * v;
+    };
 
     struct Result { int index; QImage image; LayerTransform transform; QImage mask; std::optional<LayerTransform> maskPlacement; bool maskOnly; };
     QVector<Result> results;
@@ -2839,7 +2909,7 @@ bool EditorSession::distortSelectedLayers(const std::array<QPointF, 4> &corners,
         if (maskOnly) {
             const LayerTransform old = layer.maskPlacement.value_or(layer.transform);
             const auto oldCorners = layerCorners(old);
-            std::array<QPointF, 4> moved; for (int i = 0; i < 4; ++i) moved[size_t(i)] = groupWarp.map(oldCorners[size_t(i)]);
+            std::array<QPointF, 4> moved; for (int i = 0; i < 4; ++i) moved[size_t(i)] = single ? corners[size_t(i)] : groupWarp(oldCorners[size_t(i)]);
             int background = 0; if (!layer.mask.isNull()) { int total = 0, count = 0; for (int x = 0; x < layer.mask.width(); ++x) { total += qGray(layer.mask.pixel(x, 0)); total += qGray(layer.mask.pixel(x, layer.mask.height() - 1)); count += 2; } background = count && total * 2 >= count * 255 ? 255 : 0; }
             const auto warped = warpRaster(layer.mask, old, moved, true, background); if (!warped) return false;
             results.push_back({index, {}, {}, warped->image, warped->placement, true});
@@ -2847,17 +2917,19 @@ bool EditorSession::distortSelectedLayers(const std::array<QPointF, 4> &corners,
         }
         if (layer.image.isNull()) continue;
         const auto oldCorners = layerCorners(layer.transform);
-        std::array<QPointF, 4> moved; for (int i = 0; i < 4; ++i) moved[size_t(i)] = groupWarp.map(oldCorners[size_t(i)]);
+        std::array<QPointF, 4> moved; for (int i = 0; i < 4; ++i) moved[size_t(i)] = single ? corners[size_t(i)] : groupWarp(oldCorners[size_t(i)]);
         const auto warped = warpRaster(layer.image, layer.transform, moved, false); if (!warped) return false;
         QImage newMask = layer.mask; std::optional<LayerTransform> newMaskPlacement = layer.maskPlacement;
         if (!layer.mask.isNull() && layer.maskLinked) {
-            if (!layer.maskPlacement) {
+            if (!layer.maskPlacement && layer.mask.size() == QSize(1, 1)) {
+                // A uniform 1 x 1 mask already covers any shape.
+            } else if (!layer.maskPlacement) {
                 const auto warpedMask = warpRaster(layer.mask, layer.transform, moved, true, 0, warped->crop);
                 if (!warpedMask) return false;
                 newMask = warpedMask->image; newMaskPlacement.reset();
             } else {
                 const auto maskCorners = layerCorners(*layer.maskPlacement); std::array<QPointF, 4> movedMask;
-                for (int i = 0; i < 4; ++i) movedMask[size_t(i)] = groupWarp.map(maskCorners[size_t(i)]);
+                for (int i = 0; i < 4; ++i) movedMask[size_t(i)] = groupWarp(maskCorners[size_t(i)]);
                 const auto warpedMask = warpRaster(layer.mask, *layer.maskPlacement, movedMask, true, 255);
                 if (!warpedMask) return false;
                 newMask = warpedMask->image; newMaskPlacement = warpedMask->placement;
@@ -2905,7 +2977,11 @@ bool EditorSession::resizeImage(const QSize &size, double resolution, Sampling s
         for (const QPointF &p : corners) { left = std::min(left, p.x() * sx); right = std::max(right, p.x() * sx); top = std::min(top, p.y() * sy); bottom = std::max(bottom, p.y() * sy); }
         const QRectF bounds(QPointF(std::floor(left), std::floor(top)), QPointF(std::ceil(right), std::ceil(bottom)));
         if (!layer.image.isNull()) layer.image = rasterizedScaled(layer.image, layer.transform, sx, sy, bounds, sampling, false);
-        if (!layer.mask.isNull() && layer.mask.size() != QSize(1, 1)) layer.mask = rasterizedScaled(layer.mask, layer.transform, sx, sy, bounds, sampling, true);
+        // A mask on its own placement keeps its pixels, and the placement scales with the canvas; any other mask is
+        // resampled over the layer (a uniform 1 x 1 mask is resolution independent).
+        if (layer.maskPlacement) layer.maskPlacement = layer.maskPlacement->placing(layer.maskPlacement->unitToDocument() * QTransform::fromScale(sx, sy));
+        else if (!layer.mask.isNull() && layer.mask.size() != QSize(1, 1)) layer.mask = rasterizedScaled(layer.mask, layer.transform, sx, sy, bounds, sampling, true);
+        if (!layer.image.isNull()) rasterizeLayer(layer);
         layer.transform.origin = bounds.topLeft(); layer.transform.size = bounds.size(); layer.transform.rotation = 0;
         layer.transform.flipX = false; layer.transform.flipY = false; layer.transform.sampling = sampling;
     }
@@ -2960,7 +3036,11 @@ bool EditorSession::flipCanvas(bool horizontally)
     if (!document_) return false;
     const double axis = horizontally ? document_->canvasSize.width() / 2.0 : document_->canvasSize.height() / 2.0;
     beginEdit(horizontally ? QStringLiteral("Flip Canvas Horizontal") : QStringLiteral("Flip Canvas Vertical"));
-    for (Layer &layer : document_->layers) layer.transform = mirroredTransform(layer.transform, horizontally, axis);
+    for (Layer &layer : document_->layers) {
+        layer.transform = mirroredTransform(layer.transform, horizontally, axis);
+        // A mask placed apart from its layer is part of the canvas too, and mirrors with it (mac LayerFlip.flipCanvas).
+        if (layer.maskPlacement) layer.maskPlacement = mirroredTransform(*layer.maskPlacement, horizontally, axis);
+    }
     for (CanvasGuide &guide : document_->guides) guide = guide.mirrored(horizontally, axis);
     if (document_->selection) document_->selection = document_->selection->flipped(
         horizontally ? Qt::Horizontal : Qt::Vertical);

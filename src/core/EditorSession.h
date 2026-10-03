@@ -6,6 +6,7 @@
 #include "core/ImageTrim.h"
 #include "rendering/RasterOperations.h"
 #include "rendering/SubjectRemoval.h"
+#include "core/ToolDefaults.h"
 
 
 #include <QSet>
@@ -300,29 +301,35 @@ public:
     bool previewCameraRaw(const QUuid &id, const CameraRawSettings &settings,
                           CameraRawClipping clipping = CameraRawClipping::None);
 
+    // Where a tab's canvas was zoomed and panned to when it was last shown, so switching tabs brings it back as it was
+    // (mac keeps a viewport per session).
+    struct ViewState { bool valid = false; double zoom = 1.0; QPointF pan; bool fit = true; };
+    [[nodiscard]] const ViewState &viewState() const { return viewState_; }
+    void setViewState(const ViewState &state) { viewState_ = state; }
+
     [[nodiscard]] bool showsGuides() const { return showsGuides_; }
 
-    void setShowsGuides(bool shows) { showsGuides_ = shows; }
+    void setShowsGuides(bool shows) { showsGuides_ = shows; ToolDefaults::set(QStringLiteral("guides"), showsGuides_); }
     [[nodiscard]] bool locksGuides() const { return locksGuides_; }
-    void setLocksGuides(bool locks) { locksGuides_ = locks; }
+    void setLocksGuides(bool locks) { locksGuides_ = locks; ToolDefaults::set(QStringLiteral("lockGuides"), locksGuides_); }
     [[nodiscard]] bool showsRulers() const { return showsRulers_; }
-    void setShowsRulers(bool shows) { showsRulers_ = shows; }
+    void setShowsRulers(bool shows) { showsRulers_ = shows; ToolDefaults::set(QStringLiteral("rulers"), showsRulers_); }
     [[nodiscard]] const LayoutGrid &layoutGrid() const { return layoutGrid_; }
     void setLayoutGrid(const LayoutGrid &grid) { layoutGrid_ = grid; }
     [[nodiscard]] const GridAppearance &gridAppearance() const { return gridAppearance_; }
     void setGridAppearance(const GridAppearance &appearance) { gridAppearance_ = appearance; }
     [[nodiscard]] bool showsGrid() const { return showsGrid_; }
-    void setShowsGrid(bool shows) { showsGrid_ = shows; }
+    void setShowsGrid(bool shows) { showsGrid_ = shows; ToolDefaults::set(QStringLiteral("grid"), showsGrid_); }
     [[nodiscard]] bool snapEnabled() const { return snapEnabled_; }
-    void setSnapEnabled(bool enabled) { snapEnabled_ = enabled; }
+    void setSnapEnabled(bool enabled) { snapEnabled_ = enabled; ToolDefaults::set(QStringLiteral("snap"), snapEnabled_); }
     [[nodiscard]] bool snapToGuides() const { return snapToGuides_; }
-    void setSnapToGuides(bool enabled) { snapToGuides_ = enabled; }
+    void setSnapToGuides(bool enabled) { snapToGuides_ = enabled; ToolDefaults::set(QStringLiteral("snapGuides"), snapToGuides_); }
     [[nodiscard]] bool snapToGrid() const { return snapToGrid_; }
-    void setSnapToGrid(bool enabled) { snapToGrid_ = enabled; }
+    void setSnapToGrid(bool enabled) { snapToGrid_ = enabled; ToolDefaults::set(QStringLiteral("snapGrid"), snapToGrid_); }
     [[nodiscard]] bool snapToDocumentBounds() const { return snapToDocumentBounds_; }
-    void setSnapToDocumentBounds(bool enabled) { snapToDocumentBounds_ = enabled; }
+    void setSnapToDocumentBounds(bool enabled) { snapToDocumentBounds_ = enabled; ToolDefaults::set(QStringLiteral("snapBounds"), snapToDocumentBounds_); }
     [[nodiscard]] bool snapToLayers() const { return snapToLayers_; }
-    void setSnapToLayers(bool enabled) { snapToLayers_ = enabled; }
+    void setSnapToLayers(bool enabled) { snapToLayers_ = enabled; ToolDefaults::set(QStringLiteral("snapLayers"), snapToLayers_); }
 
     [[nodiscard]] std::optional<GuideDrag> guideDrag() const { return guideDrag_; }
     [[nodiscard]] QVector<CanvasGuide> displayedGuides() const;
@@ -452,23 +459,24 @@ private:
     int objectSelectionEdgeOffset_ = 0;
     bool objectSelectionSmoothEdges_ = true;
     bool objectSelectionSampleAllLayers_ = true;
-    bool showsGuides_ = true;
-    bool locksGuides_ = false;
-    bool showsRulers_ = false;
-    bool showsGrid_ = false;
+    bool showsGuides_ = ToolDefaults::boolean(QStringLiteral("guides"), true);
+    bool locksGuides_ = ToolDefaults::boolean(QStringLiteral("lockGuides"), false);
+    bool showsRulers_ = ToolDefaults::boolean(QStringLiteral("rulers"), false);
+    bool showsGrid_ = ToolDefaults::boolean(QStringLiteral("grid"), false);
     // The grid is how the app shows every project, not part of one: shared by all sessions (tabs), set in Grid Settings.
     static inline LayoutGrid layoutGrid_;
     static inline GridAppearance gridAppearance_;
-    bool snapEnabled_ = true;
-    bool snapToGuides_ = true;
-    bool snapToGrid_ = true;
-    bool snapToDocumentBounds_ = true;
-    bool snapToLayers_ = true;
+    bool snapEnabled_ = ToolDefaults::boolean(QStringLiteral("snap"), true);
+    bool snapToGuides_ = ToolDefaults::boolean(QStringLiteral("snapGuides"), true);
+    bool snapToGrid_ = ToolDefaults::boolean(QStringLiteral("snapGrid"), false);
+    bool snapToDocumentBounds_ = ToolDefaults::boolean(QStringLiteral("snapBounds"), true);
+    bool snapToLayers_ = ToolDefaults::boolean(QStringLiteral("snapLayers"), true);
     std::optional<QPointF> smoothedBrushPoint(const QPointF &point);
     void continueBrushStrokeInternal(const QPointF &documentPoint);
 
     double brushSmoothing_ = 0.0;
     double viewportZoom_ = 1.0;
+    ViewState viewState_;
     std::optional<QPointF> brushAnchor_;
     std::optional<QPointF> brushPointer_;
     bool brushSmoothingEnabled_ = false;

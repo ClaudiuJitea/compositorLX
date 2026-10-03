@@ -683,6 +683,12 @@ struct LayerTransform {
     [[nodiscard]] bool isValid() const;
     [[nodiscard]] QPointF center() const;
     [[nodiscard]] LayerTransform following(const LayerTransform &oldPlacement, const LayerTransform &newPlacement) const;
+    [[nodiscard]] LayerTransform placing(const QTransform &unitSquareMap) const;
+    [[nodiscard]] QTransform unitToDocument() const;
+    [[nodiscard]] double scalePercent(const QSizeF &pixelSize) const { return size.width() / std::max(1.0, pixelSize.width()) * 100.0; }
+    [[nodiscard]] LayerTransform scaled(double percent, const QSizeF &pixelSize) const;
+    [[nodiscard]] LayerTransform rounded() const;
+    [[nodiscard]] LayerTransform mirrored(bool horizontally, double axis) const;
     [[nodiscard]] bool samePlacement(const LayerTransform &other) const;
     bool operator==(const LayerTransform &) const = default;
 };

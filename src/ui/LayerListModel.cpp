@@ -50,7 +50,9 @@ static QImage maskThumbnail(const Layer &layer, const QSize &canvas)
     qint64 sum = 0, count = 0;
     for (int y = 0; y < mask.height(); ++y) for (int x = 0; x < mask.width(); ++x)
         if (y == 0 || y + 1 == mask.height() || x == 0 || x + 1 == mask.width()) { sum += mask.constScanLine(y)[x]; ++count; }
-    const int edge = count ? int(sum / count) : 255;
+    // White or black, whichever most of the edge is, as the canvas treats a mask past its pixels - never a gray average
+    // (mac CanvasThumbnail.mask / LayerMask.background).
+    const int edge = count && sum * 2 < count * 255 ? 0 : 255;
     const QSize size = thumbnailSize(canvas);
     QImage result(size, QImage::Format_Grayscale8); result.fill(edge);
     QPainter painter(&result);

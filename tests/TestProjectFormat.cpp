@@ -9425,6 +9425,8 @@ void TestProjectFormat::testSection10CropGapsAndSelectionInitialization()
     canvas->setTool(CanvasWidget::Tool::Crop);
     canvas->resolvePendingCrop(false);
     cropRatio->setCurrentIndex(0); // Free
+    canvas->setZoom(1.0); // applying a crop refits the view (mac applyDocumentSize), so ask for 100% again
+    canvas->setPanOffset(QPointF(0, 0));
     QCoreApplication::processEvents();
 
     // Center is (400, 300). Drag with Alt from (400, 300) to (460, 340)

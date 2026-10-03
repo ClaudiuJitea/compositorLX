@@ -27,8 +27,13 @@ LayerTransform resizedByHandle(const LayerTransform &start, const QPoint &sign, 
     const QPointF anchor = fromCenter ? start.center()
                                       : start.center() + rotation.map(QPointF(-sign.x() * s.width() / 2.0, -sign.y() * s.height() / 2.0));
     const QPointF local = inverseRotation.map(initialHandle + point - startPoint - anchor) * (fromCenter ? 2.0 : 1.0);
-    double width = sign.x() ? std::max(1.0, local.x() * sign.x()) : s.width();
-    double height = sign.y() ? std::max(1.0, local.y() * sign.y()) : s.height();
+    // Dragging a handle past the opposite side turns the layer over rather than stopping at nothing: the size stays
+    // positive and the layer is flipped on that axis, as a negative scale would (mac TransformDrag.updated).
+    const double rawWidth = sign.x() ? local.x() * sign.x() : s.width();
+    const double rawHeight = sign.y() ? local.y() * sign.y() : s.height();
+    const bool mirroredX = rawWidth < 0, mirroredY = rawHeight < 0;
+    double width = std::max(1.0, std::abs(rawWidth));
+    double height = std::max(1.0, std::abs(rawHeight));
     if (lockRatio) {
         const double factor = !sign.x() ? height / s.height()
             : !sign.y() ? width / s.width()
@@ -38,9 +43,14 @@ LayerTransform resizedByHandle(const LayerTransform &start, const QPoint &sign, 
         width = s.width() * factor;
         height = s.height() * factor;
     }
-    const QPointF center = fromCenter ? anchor : anchor + rotation.map(QPointF(sign.x() * width / 2.0, sign.y() * height / 2.0));
+    // Turned over, the box lies on the other side of the anchor.
+    const double offsetX = sign.x() * width / 2.0 * (mirroredX ? -1 : 1);
+    const double offsetY = sign.y() * height / 2.0 * (mirroredY ? -1 : 1);
+    const QPointF center = fromCenter ? anchor : anchor + rotation.map(QPointF(offsetX, offsetY));
     LayerTransform out = start;
     out.size = QSizeF(width, height);
+    if (mirroredX) out.flipX = !out.flipX;
+    if (mirroredY) out.flipY = !out.flipY;
     out.origin = center - QPointF(width / 2.0, height / 2.0);
     return out;
 }
@@ -50,7 +60,7 @@ QPointF LayerTransform::center() const
     return origin + QPointF(size.width() / 2.0, size.height() / 2.0);
 }
 
-static QTransform unitToDocument(const LayerTransform &value)
+static QTransform unitMap(const LayerTransform &value)
 {
     QTransform map;
     map.translate(value.center().x(), value.center().y());
@@ -70,16 +80,59 @@ LayerTransform LayerTransform::following(const LayerTransform &oldPlacement, con
         return moved;
     }
     bool ok = false;
-    const QTransform carry = unitToDocument(oldPlacement).inverted(&ok) * unitToDocument(newPlacement);
+    const QTransform carry = unitMap(oldPlacement).inverted(&ok) * unitMap(newPlacement);
     if (!ok) return *this;
-    const QTransform map = unitToDocument(*this) * carry;
+    return placing(unitMap(*this) * carry);
+}
+
+// A transform placing the unit square as `map` does: a rotated, maybe flipped rectangle (shear, which only uneven
+// scaling of something rotated adds, is dropped). Mac LayerTransform.placing.
+LayerTransform LayerTransform::placing(const QTransform &map) const
+{
+    const double sign = flipX ? -1.0 : 1.0;
+    const double angle = std::atan2(map.m12() * sign, map.m11() * sign);
+    const double along = -map.m21() * std::sin(angle) + map.m22() * std::cos(angle);
     const QPointF middle = map.map(QPointF(0.5, 0.5));
-    const QPointF x0 = map.map(QPointF(0, 0.5)), x1 = map.map(QPointF(1, 0.5));
-    const QPointF y0 = map.map(QPointF(0.5, 0)), y1 = map.map(QPointF(0.5, 1));
     LayerTransform result = *this;
-    result.size = QSizeF(QLineF(x0, x1).length(), QLineF(y0, y1).length());
-    result.rotation = std::atan2(x1.y() - x0.y(), x1.x() - x0.x()) * 180 / M_PI + (flipX ? 180 : 0);
+    result.size = QSizeF(std::hypot(map.m11(), map.m12()), std::abs(along));
+    const double degrees = angle * 180.0 / M_PI;
+    result.rotation = degrees + std::round((rotation - degrees) / 360.0) * 360.0;
+    result.flipY = along < 0;
     result.origin = middle - QPointF(result.size.width() / 2.0, result.size.height() / 2.0);
+    return result;
+}
+
+QTransform LayerTransform::unitToDocument() const { return unitMap(*this); }
+
+LayerTransform LayerTransform::scaled(double percent, const QSizeF &pixelSize) const
+{
+    LayerTransform result = *this;
+    const QPointF middle = center();
+    result.size = QSizeF(pixelSize.width() * percent / 100.0, pixelSize.height() * percent / 100.0);
+    result.origin = middle - QPointF(result.size.width() / 2.0, result.size.height() / 2.0);
+    return result;
+}
+
+LayerTransform LayerTransform::rounded() const
+{
+    LayerTransform result = *this;
+    result.origin = QPointF(std::round(origin.x()), std::round(origin.y()));
+    result.size = QSizeF(std::max(1.0, std::round(size.width())), std::max(1.0, std::round(size.height())));
+    result.rotation = std::round(rotation);
+    return result;
+}
+
+LayerTransform LayerTransform::mirrored(bool horizontally, double axis) const
+{
+    LayerTransform result = *this;
+    if (horizontally) {
+        result.flipX = !flipX;
+        result.origin.setX(2 * axis - center().x() - size.width() / 2);
+    } else {
+        result.flipY = !flipY;
+        result.origin.setY(2 * axis - center().y() - size.height() / 2);
+    }
+    result.rotation = -rotation;
     return result;
 }
 

@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "core/ToolDefaults.h"
 #include "io/ImageExporter.h"
 
 #include "io/ProjectReader.h"
@@ -1109,7 +1110,7 @@ MainWindow::MainWindow(QWidget *parent)
     widthLabel_->setToolTip(tr("Layer width in pixels")); heightLabel_->setToolTip(tr("Layer height in pixels"));
     xField_->setFixedWidth(64); yField_->setFixedWidth(64); widthField_->setFixedWidth(68); heightField_->setFixedWidth(68);
     auto *link = new QToolButton(transformBar); link->setObjectName(QStringLiteral("transformRatioLock")); link->setIcon(editorIcon(16)); link->setIconSize(QSize(18, 18)); link->setCheckable(true); link->setChecked(true); link->setToolTip(tr("Keep width and height proportional")); link->setFixedSize(29, 29);
-    scaleField_ = numberField(transformBar, QStringLiteral("Scale"), 3200); scaleField_->setObjectName(QStringLiteral("transformScale")); scaleField_->setSuffix(QStringLiteral(" %")); scaleField_->setRange(0.1, 3200); scaleField_->setValue(100); scaleField_->setFixedWidth(105);
+    scaleField_ = numberField(transformBar, QStringLiteral("Scale"), 3200); scaleField_->setObjectName(QStringLiteral("transformScale")); scaleField_->setSuffix(QStringLiteral(" %")); scaleField_->setRange(0.1, 30000); scaleField_->setValue(100); scaleField_->setFixedWidth(105);
     rotationField_ = numberField(transformBar, QStringLiteral("°"), 360, &rotationLabel_, 1.0, 1.0); rotationField_->setObjectName(QStringLiteral("transformRotation")); rotationField_->setRange(-360, 360); rotationField_->setFixedWidth(64); rotationField_->setToolTip(tr("Rotation"));
     rotationLabel_->setObjectName(QStringLiteral("transformRotationLabel")); rotationLabel_->setToolTip(tr("Rotation"));
     sampling_ = new SegmentedControl({tr("High quality"), tr("Smooth"), tr("Nearest")}, transformBar); sampling_->setObjectName(QStringLiteral("transformSampling")); sampling_->setToolTip(tr("Resampling quality"));
@@ -1220,6 +1221,14 @@ MainWindow::MainWindow(QWidget *parent)
 
     canvas_ = new CanvasWidget(workspace);
     canvas_->setEditorSession(&session_);
+    // Auto Select, the transform box and the pixel grid are the person's, not the project's: remembered across launches
+    // (mac ToolDefaults).
+    autoSelect->setChecked(ToolDefaults::boolean(QStringLiteral("autoSelect"), false));
+    canvas_->setTransformAutoSelect(autoSelect->isChecked());
+    showTransformControls_->setChecked(ToolDefaults::boolean(QStringLiteral("transformControls"), true));
+    canvas_->setShowTransformControls(showTransformControls_->isChecked());
+    connect(autoSelect, &QCheckBox::toggled, this, [](bool on) { ToolDefaults::set(QStringLiteral("autoSelect"), on); });
+    connect(showTransformControls_, &QCheckBox::toggled, this, [](bool on) { ToolDefaults::set(QStringLiteral("transformControls"), on); });
     connect(autoSelect, &QCheckBox::toggled, canvas_, &CanvasWidget::setTransformAutoSelect);
     connect(link, &QToolButton::toggled, canvas_, &CanvasWidget::setLockTransformRatio);
     connect(showTransformControls_, &QCheckBox::toggled, canvas_, &CanvasWidget::setShowTransformControls);
@@ -1982,7 +1991,7 @@ MainWindow::MainWindow(QWidget *parent)
         selectObjectRequested(point, mode, objectEdgeOffset->value(), objectSmoothEdges->isChecked(), wandSample->currentIndex() == 1);
     });
     connect(canvas_, &CanvasWidget::cropRequested, this, [this](const QRect &rect) {
-        if (session_.crop(rect)) syncDocumentViews();
+        if (session_.crop(rect)) { syncDocumentViews(); canvas_->fitCanvas(); }
     });
     connect(canvas_, &CanvasWidget::zoomChanged, this, [this](double z) {
         session_.setViewportZoom(z);
@@ -2313,6 +2322,8 @@ void MainWindow::beginPersistentTransform(const QString &name)
 void MainWindow::finishPersistentTransform(bool apply)
 {
     if (!transformOriginalDocument_ || !document_) return;
+    // A distortion dragged out inside the transform is part of it: applied with it, dropped with it.
+    canvas_->resolvePendingDistortion(apply);
     if (!apply) *document_ = *transformOriginalDocument_;
     session_.endEdit();
     transformOriginalDocument_.reset();
@@ -2578,9 +2589,16 @@ void MainWindow::createActions()
     transformSelection->setObjectName(QStringLiteral("commandTransform"));
     transformSelection->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
     connect(transformSelection, &QAction::triggered, this, [this] {
-        if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
-        else if (session_.beginSelectionTransform()) canvas_->setTool(CanvasWidget::Tool::Move);
-        syncDocumentViews();
+        // Cmd-T transforms the selected pixels when there is a selection, else the layer: its box waits for Apply (Return)
+        // or Cancel (Escape), with the Move tool chosen (mac EditorSession.transformCommand / beginTransform).
+        if (session_.hasFloatingSelection()) { session_.commitSelectionTransform(); syncDocumentViews(); return; }
+        if (transformOriginalDocument_ || !document_) return;
+        if (document_->selection && session_.beginSelectionTransform()) { canvas_->setTool(CanvasWidget::Tool::Move); syncDocumentViews(); return; }
+        if (!session_.activeLayer()) return;
+        canvas_->resolvePendingCrop(false);
+        canvas_->setTool(CanvasWidget::Tool::Move);
+        beginPersistentTransform(session_.isMaskSelected() ? QStringLiteral("Transform Layer Mask") : QStringLiteral("Transform Layer"));
+        canvas_->setFocus();
     });
 
     auto *layerMenuActions = menuBar()->addMenu(tr("&Layer"));
@@ -2776,8 +2794,8 @@ void MainWindow::createActions()
     image->addSeparator();
     auto *flipCanvasH = image->addAction(tr("Flip Canvas Horizontal"));
     auto *flipCanvasV = image->addAction(tr("Flip Canvas Vertical"));
-    connect(flipCanvasH, &QAction::triggered, this, [this] { if (session_.flipCanvas(true)) syncDocumentViews(); });
-    connect(flipCanvasV, &QAction::triggered, this, [this] { if (session_.flipCanvas(false)) syncDocumentViews(); });
+    connect(flipCanvasH, &QAction::triggered, this, [this] { finishPendingCanvasEdits(); if (session_.flipCanvas(true)) syncDocumentViews(); });
+    connect(flipCanvasV, &QAction::triggered, this, [this] { finishPendingCanvasEdits(); if (session_.flipCanvas(false)) syncDocumentViews(); });
     auto *flatten = image->addAction(tr("Flatten Image"));
     connect(flatten, &QAction::triggered, this, [this] { if (session_.flattenImage()) syncDocumentViews(); });
     image->addSeparator();
@@ -2953,8 +2971,10 @@ void MainWindow::createActions()
     view->addSeparator();
     auto *pixelGrid = view->addAction(tr("Pixel Grid (800% and above)"));
     pixelGrid->setCheckable(true);
-    pixelGrid->setChecked(canvas_->showsPixelGrid());
+    pixelGrid->setChecked(ToolDefaults::boolean(QStringLiteral("pixelGrid"), true));
+    canvas_->setShowPixelGrid(pixelGrid->isChecked());
     connect(pixelGrid, &QAction::toggled, canvas_, &CanvasWidget::setShowPixelGrid);
+    connect(pixelGrid, &QAction::toggled, this, [](bool on) { ToolDefaults::set(QStringLiteral("pixelGrid"), on); });
     auto *sampleRing = view->addAction(tr("Eyedropper Sample Ring")); sampleRing->setCheckable(true); sampleRing->setChecked(true);
     connect(sampleRing, &QAction::toggled, canvas_, &CanvasWidget::setShowSampleRing);
     auto *transformControls = view->addAction(tr("Show Transform Controls"));
@@ -4859,6 +4879,8 @@ void MainWindow::selectObjectRequested(const QPoint &point, int mode, int edgeOf
 void MainWindow::resizeImageDialog()
 {
     if (!document_) return;
+    finishPendingCanvasEdits();
+    if (!document_) return;
     QDialog dialog(this); dialog.setWindowTitle(tr("Image Size"));
     auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
     const QSize originalSize = document_->canvasSize;
@@ -4943,11 +4965,13 @@ void MainWindow::resizeImageDialog()
     if (dialog.exec() != QDialog::Accepted) return;
     const Sampling modes[] = {Sampling::HighQuality, Sampling::Smooth, Sampling::Nearest};
     const QSize resultSize = draft->resample ? QSize(qRound(draft->width), qRound(draft->height)) : originalSize;
-    if (session_.resizeImage(resultSize, draft->resolution, modes[sampling->currentIndex()])) syncDocumentViews();
+    if (session_.resizeImage(resultSize, draft->resolution, modes[sampling->currentIndex()])) { syncDocumentViews(); canvas_->fitCanvas(); }
 }
 
 void MainWindow::resizeCanvasDialog()
 {
+    if (!document_) return;
+    finishPendingCanvasEdits();
     if (!document_) return;
     QDialog dialog(this); dialog.setWindowTitle(tr("Canvas Size"));
     auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
@@ -4966,6 +4990,14 @@ void MainWindow::resizeCanvasDialog()
     fill->addItems({tr("Transparent"), tr("Foreground"), tr("Background"), tr("Black"), tr("White"), tr("Custom")});
     auto *color = new QPushButton(tr("Choose custom color…"), &dialog); QColor extension = Qt::white; color->setEnabled(false);
     connect(fill, &QComboBox::currentIndexChanged, color, [color](int index) { color->setEnabled(index == 5); });
+    const auto paintSwatch = [color, &extension] {
+        QPixmap swatch(14, 14); swatch.fill(extension); color->setIcon(QIcon(swatch));
+    };
+    paintSwatch();
+    connect(color, &QPushButton::clicked, &dialog, [&dialog, &extension, paintSwatch, this] {
+        const QColor chosen = QColorDialog::getColor(extension, &dialog, tr("Extension Color"));
+        if (chosen.isValid()) { extension = chosen; paintSwatch(); }
+    });
     auto *widthLabel = new ScrubLabel(tr("Width"), width, 1.0, std::nullopt, &dialog); widthLabel->setObjectName(QStringLiteral("canvasSizeWidthLabel"));
     auto *heightLabel = new ScrubLabel(tr("Height"), height, 1.0, std::nullopt, &dialog); heightLabel->setObjectName(QStringLiteral("canvasSizeHeightLabel"));
     form->addRow(tr("Units"), units); form->addRow(widthLabel, width); form->addRow(heightLabel, height); form->addRow(tr("Anchor"), anchor);
@@ -5024,11 +5056,13 @@ void MainWindow::resizeCanvasDialog()
     case 5: background = extension; break;
     default: break;
     }
-    if (session_.resizeCanvas(QSize(qRound(draft->width), qRound(draft->height)), anchor->currentIndex(), background)) syncDocumentViews();
+    if (session_.resizeCanvas(QSize(qRound(draft->width), qRound(draft->height)), anchor->currentIndex(), background)) { syncDocumentViews(); canvas_->fitCanvas(); }
 }
 
 void MainWindow::cropDialog()
 {
+    if (!document_) return;
+    finishPendingCanvasEdits();
     if (!document_) return;
     QDialog dialog(this); dialog.setWindowTitle(tr("Crop"));
     auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
@@ -5055,15 +5089,18 @@ void MainWindow::cropDialog()
     form->addRow(xLabel, x); form->addRow(yLabel, y); form->addRow(wLabel, width); form->addRow(hLabel, height); layout->addLayout(form);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
-    if (dialog.exec() == QDialog::Accepted && session_.crop(QRect(x->value(), y->value(), width->value(), height->value()))) syncDocumentViews();
+    if (dialog.exec() == QDialog::Accepted && session_.crop(QRect(x->value(), y->value(), width->value(), height->value()))) { syncDocumentViews(); canvas_->fitCanvas(); }
 }
 
 void MainWindow::trimDialog()
 {
     if (!document_) return;
+    finishPendingCanvasEdits();
+    if (!document_) return;
     TrimDialog dialog(this);
     if (dialog.exec() == QDialog::Accepted && session_.trim(dialog.options())) {
         syncDocumentViews();
+        canvas_->fitCanvas();
     }
 }
 
@@ -6186,9 +6223,22 @@ void MainWindow::refreshTitle()
     setWindowTitle(QStringLiteral("%1 — CompositorLX").arg(displayed));
 }
 
+// A transform, distortion, crop frame or floating selection still waiting for Apply is settled before an operation that
+// changes the canvas itself, as the mac editor refuses to start one while it is open.
+void MainWindow::finishPendingCanvasEdits()
+{
+    if (transformOriginalDocument_) finishPersistentTransform(true);
+    canvas_->resolvePendingDistortion(true);
+    canvas_->resolvePendingCrop(false);
+    if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
+}
+
 void MainWindow::stashCurrentTab()
 {
-    if (currentTab_ >= 0 && currentTab_ < workspaceTabs_.size()) workspaceTabs_[currentTab_] = session_;
+    if (currentTab_ >= 0 && currentTab_ < workspaceTabs_.size()) {
+        if (session_.document()) session_.setViewState(canvas_->viewState());
+        workspaceTabs_[currentTab_] = session_;
+    }
 }
 
 void MainWindow::activateTab(int index)
@@ -6200,6 +6250,7 @@ void MainWindow::activateTab(int index)
     canvas_->resolvePendingGradient(); canvas_->resolvePendingDistortion(); canvas_->resolvePendingCrop(false);
     if (session_.hasFloatingSelection()) session_.commitSelectionTransform();
     stashCurrentTab(); currentTab_ = index; session_ = workspaceTabs_.at(index); syncDocumentViews();
+    canvas_->restoreViewState(session_.viewState());
     if (tabPendingExternalChange_.value(index, false) && tabPendingExternalDigest_.value(index).has_value() && session_.document()) {
         promptExternalChange(index, session_.document()->projectPath, *tabPendingExternalDigest_[index]);
     }

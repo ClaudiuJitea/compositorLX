@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Document.h"
+#include "core/EditorSession.h"
 
 #include <QWidget>
 #include <QSet>
@@ -27,7 +28,11 @@ public:
     [[nodiscard]] EditorSession *editorSession() const { return session_; }
     void setDocument(std::shared_ptr<Document> document, bool invalidate = true);
     void fitCanvas();
+    [[nodiscard]] EditorSession::ViewState viewState() const { return {true, zoom_, panOffset_, fitPending_}; }
+    void restoreViewState(const EditorSession::ViewState &state);
     void actualPixels();
+    // Mac keyboardZoomLevels stepping: the next level above (step > 0) or below the given zoom.
+    [[nodiscard]] static double keyboardZoomTarget(double zoom, int step);
     void zoomIn();
     void zoomOut();
     void setZoom(double zoom) { zoomTo(zoom, rect().center()); }
@@ -182,6 +187,9 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
+    bool event(QEvent *event) override;
     void leaveEvent(QEvent *event) override;
     bool focusNextPrevChild(bool next) override { Q_UNUSED(next); return false; }
 
@@ -193,6 +201,12 @@ private:
     void drawCheckerboard(QPainter &painter, const QRectF &area) const;
     void startBackgroundRender();
     void zoomTo(double value, const QPointF &anchor);
+    void refreshCursor();
+    bool spaceHeld_ = false;
+    int spaceKey_ = 0;
+    bool zoomDragging_ = false, zoomDragMoved_ = false;
+    QPointF zoomDragStart_;
+    double zoomDragOrigin_ = 1.0;
 
     std::shared_ptr<Document> document_;
     QImage renderedDocument_;

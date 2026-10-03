@@ -211,6 +211,7 @@ private:
     void updateCommandStates();
     void selectLayer(const QModelIndex &index);
     void stashCurrentTab();
+    void finishPendingCanvasEdits();
     void installTabCloseButton(int index);
     void installInNewTab(EditorSession session, const QString &title);
     bool copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab);

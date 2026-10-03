@@ -17,6 +17,8 @@
 #include <QResizeEvent>
 #include <QRegion>
 #include <QWheelEvent>
+#include <QNativeGestureEvent>
+#include <QFocusEvent>
 #include <QTimer>
 #include <QDateTime>
 #include <QtConcurrent>
@@ -256,7 +258,15 @@ void CanvasWidget::setEditorInteractionBlocked(bool blocked)
 {
     editorInteractionBlocked_ = blocked;
     if (blocked) { brushDrawing_ = false; creationDragging_ = false; }
-    if (hueTargeting_) setCursor(Qt::SizeHorCursor);
+    refreshCursor();
+    update();
+}
+
+void CanvasWidget::refreshCursor()
+{
+    const bool blocked = editorInteractionBlocked_;
+    if (spaceHeld_) setCursor(panning_ ? Qt::ClosedHandCursor : Qt::OpenHandCursor);
+    else if (hueTargeting_) setCursor(Qt::SizeHorCursor);
     else if (tool_ == Tool::Hand) setCursor(Qt::OpenHandCursor);
     else if (tool_ == Tool::Zoom) setCursor(zoomCursor(false));
     else if (tool_ == Tool::Text) setCursor(Qt::IBeamCursor);
@@ -265,7 +275,6 @@ void CanvasWidget::setEditorInteractionBlocked(bool blocked)
     else if (tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Blur) setCursor(Qt::BlankCursor);
     else if (tool_ == Tool::Marquee || tool_ == Tool::Lasso || tool_ == Tool::Wand || tool_ == Tool::Gradient || tool_ == Tool::Shape || tool_ == Tool::Clone || tool_ == Tool::Crop) setCursor(Qt::CrossCursor);
     else unsetCursor();
-    update();
 }
 
 void CanvasWidget::setCropRatio(double ratio)
@@ -328,12 +337,25 @@ void CanvasWidget::setDocument(std::shared_ptr<Document> document, bool invalida
 void CanvasWidget::fitCanvas()
 {
     if (!document_ || document_->canvasSize.isEmpty() || width() < 1 || height() < 1) return;
-    constexpr double margin = 48.0;
-    zoom_ = std::clamp(std::min((width() - margin) / document_->canvasSize.width(),
-                                (height() - margin) / document_->canvasSize.height()),
+    // The canvas fits with 48 px to spare on every side, as the mac viewport does (view size minus 96).
+    constexpr double margin = 96.0;
+    zoom_ = std::clamp(std::min(std::max(1.0, width() - margin) / document_->canvasSize.width(),
+                                std::max(1.0, height() - margin) / document_->canvasSize.height()),
                        0.001, 32.0);
     fitPending_ = false;
     panOffset_ = {};
+    emit zoomChanged(zoom_);
+    emit viewportChanged();
+    update();
+}
+
+void CanvasWidget::restoreViewState(const EditorSession::ViewState &state)
+{
+    if (!state.valid || !document_) return;
+    if (state.fit) { fitCanvas(); return; }
+    zoom_ = std::clamp(state.zoom, 0.001, 32.0);
+    panOffset_ = state.pan;
+    fitPending_ = false;
     emit zoomChanged(zoom_);
     emit viewportChanged();
     update();
@@ -344,14 +366,28 @@ void CanvasWidget::actualPixels()
     zoomTo(1.0, rect().center());
 }
 
+// Keyboard and menu zoom steps through fixed levels rather than a fixed ratio (mac CanvasViewport.keyboardZoomLevels).
+double CanvasWidget::keyboardZoomTarget(double zoom, int step)
+{
+    static constexpr double levels[] = {0.125, 1.0 / 6.0, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1, 1.25, 1.5, 2, 3, 4, 5, 6, 8, 12, 16};
+    if (step == 0) return zoom;
+    const double tolerance = std::max(1e-9, std::abs(zoom) * 1e-9);
+    if (step > 0) {
+        for (double level : levels) if (level > zoom + tolerance) return level;
+        return zoom;
+    }
+    for (int i = int(std::size(levels)) - 1; i >= 0; --i) if (levels[i] < zoom - tolerance) return levels[i];
+    return zoom;
+}
+
 void CanvasWidget::zoomIn()
 {
-    zoomTo(zoom_ * 1.25, rect().center());
+    zoomTo(keyboardZoomTarget(zoom_, 1), rect().center());
 }
 
 void CanvasWidget::zoomOut()
 {
-    zoomTo(zoom_ / 1.25, rect().center());
+    zoomTo(keyboardZoomTarget(zoom_, -1), rect().center());
 }
 
 void CanvasWidget::zoomTo(double value, const QPointF &anchor)
@@ -777,14 +813,32 @@ void CanvasWidget::resizeEvent(QResizeEvent *event)
 
 void CanvasWidget::wheelEvent(QWheelEvent *event)
 {
-    if (event->modifiers().testFlag(Qt::ControlModifier)) {
-        zoomTo(event->angleDelta().y() > 0 ? zoom_ * 1.25 : zoom_ / 1.25, event->position());
+    if (!document_ || movingLayer_ || cropDrag_ != CropDrag::None || guideDragging_) { event->accept(); return; }
+    // Control (or Option, as on the Mac with Command or Option) turns the wheel into a smooth zoom about the pointer.
+    if (event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::AltModifier)) {
+        const QPoint pixels = event->pixelDelta();
+        const double delta = !pixels.isNull() ? pixels.y() : event->angleDelta().y() / 8.0;
+        if (delta != 0.0) zoomTo(zoom_ * std::exp(delta * 0.015), event->position());
         event->accept();
         return;
     }
     QPoint delta = event->pixelDelta();
     if (delta.isNull()) delta = event->angleDelta() / 4;
     panOffset_ += QPointF(delta.x(), delta.y()); fitPending_ = false; emit viewportChanged(); update(); event->accept();
+}
+
+bool CanvasWidget::event(QEvent *event)
+{
+    // Trackpad pinch zooms about the pointer (mac EditorCanvas.magnify).
+    if (event->type() == QEvent::NativeGesture) {
+        auto *gesture = static_cast<QNativeGestureEvent *>(event);
+        if (gesture->gestureType() == Qt::ZoomNativeGesture && document_ && !movingLayer_ && cropDrag_ == CropDrag::None && !guideDragging_) {
+            zoomTo(zoom_ * (1.0 + gesture->value()), gesture->position());
+            event->accept();
+            return true;
+        }
+    }
+    return QWidget::event(event);
 }
 
 void CanvasWidget::mousePressEvent(QMouseEvent *event)
@@ -800,11 +854,16 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
         event->accept();
         return;
     }
+    if (event->button() == Qt::LeftButton && document_ && spaceHeld_) {
+        panning_ = true; lastMousePosition_ = event->position().toPoint(); setCursor(Qt::ClosedHandCursor); event->accept(); return;
+    }
     if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Hand) {
         panning_ = true; lastMousePosition_ = event->position().toPoint(); setCursor(Qt::ClosedHandCursor); event->accept(); return;
     }
     if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Zoom) {
-        zoomTo(event->modifiers().testFlag(Qt::AltModifier) ? zoom_ / 1.25 : zoom_ * 1.25, event->position()); event->accept(); return;
+        // A click doubles (Alt halves); a drag zooms continuously, doubling for every 100 px dragged to the right.
+        zoomDragging_ = true; zoomDragMoved_ = false; zoomDragStart_ = event->position(); zoomDragOrigin_ = zoom_;
+        event->accept(); return;
     }
     if (event->button() == Qt::LeftButton && document_ && hueTargeting_) {
         const QPointF position = (event->position() - canvasRect().topLeft()) / zoom_;
@@ -1051,6 +1110,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
             const QPointF rotationPoint(0, bounds.top() - 28.0 / zoom_);
             if (transformControlsVisible() && invertible && QLineF(local, rotationPoint).length() <= tolerance) {
                 movingLayer_ = true; transformDrag_ = TransformDrag::Rotate; transformStart_ = displayed; maskPlacementStart_=it->maskPlacement;
+                rotateStartAngle_ = std::atan2(point.y() - displayed.center().y(), point.x() - displayed.center().x());
                 duplicateOnMove_ = false; duplicateIssued_ = false; setCursor(Qt::CrossCursor); emit layerTransformStarted(false); event->accept(); return;
             }
             QPoint handle;
@@ -1130,6 +1190,12 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
     if (hueTargetDragging_) {
         emit hueTargetDragged(event->position().x() - hueTargetStart_.x(), event->modifiers().testFlag(Qt::ControlModifier));
         setCursor(Qt::SizeHorCursor); event->accept(); return;
+    }
+    if (zoomDragging_) {
+        const double dx = event->position().x() - zoomDragStart_.x();
+        if (std::abs(dx) >= 3) zoomDragMoved_ = true;
+        if (zoomDragMoved_) zoomTo(zoomDragOrigin_ * std::pow(2.0, dx / 100.0), zoomDragStart_);
+        event->accept(); return;
     }
     if (panning_) {
         const QPoint position = event->position().toPoint();
@@ -1249,10 +1315,8 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
                                                                QSet<QUuid>(transformOriginals_.keyBegin(), transformOriginals_.keyEnd()),
                                                                10.0 / zoom_, &snapGuideX_, &snapGuideY_);
                 const LayerTransform resized = resizedByHandle(transformStart_, resizeSign_, moveStartDocument_, resizePoint, fromCenter, lock);
-                group.size = resized.size; group.origin = resized.origin;
+                group.size = resized.size; group.origin = resized.origin; group.flipX = resized.flipX; group.flipY = resized.flipY;
             }
-            const double scaleX = group.size.width() / transformStart_.size.width();
-            const double scaleY = group.size.height() / transformStart_.size.height();
             for (Layer &layer : document_->layers) {
                 const auto originalIt = transformOriginals_.constFind(layer.id);
                 if (originalIt == transformOriginals_.cend()) continue;
@@ -1267,12 +1331,8 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
                     edited.origin = center - QPointF(original.size.width() / 2.0, original.size.height() / 2.0);
                     edited.rotation = original.rotation + rotationDelta;
                 } else {
-                    const QPointF relative = original.center() - transformStart_.origin;
-                    const QPointF center(group.origin.x() + relative.x() * scaleX,
-                                         group.origin.y() + relative.y() * scaleY);
-                    edited.size = QSizeF(std::max(1.0, original.size.width() * scaleX),
-                                        std::max(1.0, original.size.height() * scaleY));
-                    edited.origin = center - QPointF(edited.size.width() / 2.0, edited.size.height() / 2.0);
+                    // Each layer follows the box as a point in it would, flips included (mac LayerTransform.following).
+                    edited = original.following(transformStart_, group);
                 }
                 layer.transform = edited;
                 if (!layer.mask.isNull() && layer.mask.size() != QSize(1, 1) && layer.maskLinked) {
@@ -1302,8 +1362,10 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
             }
             else if (transformDrag_ == TransformDrag::Rotate) {
                 snapGuideX_.reset(); snapGuideY_.reset();
+                // Turned by how far the pointer has gone round the centre since the grab, so there is no jump on pressing
+                // (mac TransformDrag .rotate).
                 const QPointF delta = point - transformStart_.center();
-                edited.rotation = std::round(std::atan2(delta.y(), delta.x()) * 180.0 / M_PI + 90.0);
+                edited.rotation = std::round(transformStart_.rotation + (std::atan2(delta.y(), delta.x()) - rotateStartAngle_) * 180.0 / M_PI);
                 if (event->modifiers().testFlag(Qt::ShiftModifier)) edited.rotation = std::round(edited.rotation / 15.0) * 15.0;
             } else if (transformDrag_ == TransformDrag::Resize) {
                 const bool fromCenter = event->modifiers().testFlag(Qt::AltModifier);
@@ -1315,7 +1377,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
                                                                selectedLayerIds_.isEmpty() ? QSet<QUuid>{layer.id} : selectedLayerIds_,
                                                                10.0 / zoom_, &snapGuideX_, &snapGuideY_);
                 const LayerTransform resized = resizedByHandle(transformStart_, resizeSign_, moveStartDocument_, resizePoint, fromCenter, lock);
-                edited.size = resized.size; edited.origin = resized.origin;
+                edited.size = resized.size; edited.origin = resized.origin; edited.flipX = resized.flipX; edited.flipY = resized.flipY;
             }
             if(!transformMask_&&!layer.mask.isNull()&&layer.mask.size()!=QSize(1,1)){if(layer.maskLinked){if(maskPlacementStart_)layer.maskPlacement=maskPlacementStart_->following(transformStart_,layer.transform);else layer.maskPlacement.reset();}else layer.maskPlacement=maskPlacementStart_.value_or(transformStart_);}
             break;
@@ -1352,7 +1414,8 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         update(); event->accept(); return;
     }
     const QPointF hover = cursorDocument_.value_or(QPointF());
-    if (hueTargeting_) setCursor(Qt::SizeHorCursor);
+    if (spaceHeld_) setCursor(Qt::OpenHandCursor);
+    else if (hueTargeting_) setCursor(Qt::SizeHorCursor);
     else if (tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Blur
         || (tool_ == Tool::Clone && cloneSource_ && !event->modifiers().testFlag(Qt::AltModifier))) setCursor(Qt::BlankCursor);
     else if (tool_ == Tool::Hand) setCursor(Qt::OpenHandCursor);
@@ -1433,10 +1496,15 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
         hueTargetDragging_ = false; emit hueTargetFinished();
         setCursor(hueTargeting_ ? Qt::SizeHorCursor : Qt::ArrowCursor); event->accept(); return;
     }
+    if (zoomDragging_ && event->button() == Qt::LeftButton) {
+        zoomDragging_ = false;
+        if (!zoomDragMoved_) zoomTo(zoom_ * (event->modifiers().testFlag(Qt::AltModifier) ? 0.5 : 2.0), zoomDragStart_);
+        event->accept(); return;
+    }
     if (panning_ && (event->button() == Qt::MiddleButton || event->button() == Qt::RightButton
                      || event->button() == Qt::LeftButton)) {
         panning_ = false;
-        unsetCursor();
+        refreshCursor();
         event->accept();
         return;
     }
@@ -1579,6 +1647,12 @@ void CanvasWidget::keyPressEvent(QKeyEvent *event)
     const int effectiveKey = translated.key;
     const Qt::KeyboardModifiers effectiveModifiers = translated.modifiers;
 
+    // Holding Space turns any tool into the Hand until it is let go (mac spaceHeld).
+    if (effectiveKey == Qt::Key_Space && effectiveModifiers == Qt::NoModifier && document_ && !brushDrawing_ && !movingLayer_) {
+        if (!event->isAutoRepeat() && !spaceHeld_) { spaceHeld_ = true; spaceKey_ = event->key(); refreshCursor(); }
+        event->accept();
+        return;
+    }
     if (guideDragging_ && effectiveKey == Qt::Key_Escape) {
         guideDragging_ = false;
         if (session_) session_->cancelGuideDrag();
@@ -1703,6 +1777,23 @@ void CanvasWidget::keyPressEvent(QKeyEvent *event)
         return;
     }
     QWidget::keyPressEvent(event);
+}
+
+void CanvasWidget::keyReleaseEvent(QKeyEvent *event)
+{
+    if (spaceHeld_ && !event->isAutoRepeat() && (event->key() == spaceKey_ || event->key() == Qt::Key_Space)) {
+        spaceHeld_ = false;
+        if (!panning_) refreshCursor();
+        event->accept();
+        return;
+    }
+    QWidget::keyReleaseEvent(event);
+}
+
+void CanvasWidget::focusOutEvent(QFocusEvent *event)
+{
+    if (spaceHeld_) { spaceHeld_ = false; if (!panning_) refreshCursor(); }
+    QWidget::focusOutEvent(event);
 }
 
 } // namespace compositor
