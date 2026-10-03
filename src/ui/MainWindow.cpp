@@ -1860,11 +1860,11 @@ MainWindow::MainWindow(QWidget *parent)
         canvas_->invalidateDocument();
         refreshTitle();
     };
-    connect(xField_, &QDoubleSpinBox::editingFinished, this, changeTransform);
-    connect(yField_, &QDoubleSpinBox::editingFinished, this, changeTransform);
-    connect(widthField_, &QDoubleSpinBox::editingFinished, this, changeTransform);
-    connect(heightField_, &QDoubleSpinBox::editingFinished, this, changeTransform);
-    connect(rotationField_, &QDoubleSpinBox::editingFinished, this, changeTransform);
+    connect(xField_, &QDoubleSpinBox::editingFinished, this, [this, changeTransform] { changeTransform(); if (transformOriginalDocument_) finishPersistentTransform(true); });
+    connect(yField_, &QDoubleSpinBox::editingFinished, this, [this, changeTransform] { changeTransform(); if (transformOriginalDocument_) finishPersistentTransform(true); });
+    connect(widthField_, &QDoubleSpinBox::editingFinished, this, [this, changeTransform] { changeTransform(); if (transformOriginalDocument_) finishPersistentTransform(true); });
+    connect(heightField_, &QDoubleSpinBox::editingFinished, this, [this, changeTransform] { changeTransform(); if (transformOriginalDocument_) finishPersistentTransform(true); });
+    connect(rotationField_, &QDoubleSpinBox::editingFinished, this, [this, changeTransform] { changeTransform(); if (transformOriginalDocument_) finishPersistentTransform(true); });
     connect(xLabel_, &ScrubLabel::scrubValueChanged, this, [changeTransform] { changeTransform(); });
     connect(yLabel_, &ScrubLabel::scrubValueChanged, this, [changeTransform] { changeTransform(); });
     connect(widthLabel_, &ScrubLabel::scrubValueChanged, this, [changeTransform] { changeTransform(); });
@@ -1874,6 +1874,12 @@ MainWindow::MainWindow(QWidget *parent)
     const auto startTransformScrub = [this] {
         beginPersistentTransform(session_.isMaskSelected() ? QStringLiteral("Transform Layer Mask") : QStringLiteral("Transform Layer"));
     };
+    // Values typed or scrubbed in the Move bar show on the canvas as they change and are applied, as one undo step, once
+    // the field is done with them (mac 686d8c7): a transform never resamples pixels, so nothing waits for Apply.
+    for (ScrubLabel *label : {xLabel_, yLabel_, widthLabel_, heightLabel_, rotationLabel_}) {
+        connect(label, &ScrubLabel::dragEnded, this, [this] { if (transformOriginalDocument_) finishPersistentTransform(true); });
+        connect(label, &ScrubLabel::dragCancelled, this, [this] { if (transformOriginalDocument_) finishPersistentTransform(false); });
+    }
     xLabel_->setOnStart(startTransformScrub);
     yLabel_->setOnStart(startTransformScrub);
     widthLabel_->setOnStart(startTransformScrub);
@@ -1895,12 +1901,14 @@ MainWindow::MainWindow(QWidget *parent)
             if (oldMask) layer->maskPlacement = oldMask->following(old, layer->transform); else layer->maskPlacement.reset();
         }
         session_.redrawSelectedShapes(); session_.endEdit(); updateInspector(); canvas_->invalidateDocument(); refreshTitle();
+        if (transformOriginalDocument_) finishPersistentTransform(true);
     });
     connect(sampling_, &SegmentedControl::currentIndexChanged, this, [this](int index) {
         Layer *layer = session_.activeLayer(); if (!layer || sampling_->signalsBlocked()) return;
         beginPersistentTransform(QStringLiteral("Transform Layer"));
         const Sampling modes[] = {Sampling::HighQuality, Sampling::Smooth, Sampling::Nearest};
         session_.beginEdit(QStringLiteral("Change Sampling")); layer->transform.sampling = modes[std::clamp(index, 0, 2)]; session_.endEdit(); canvas_->invalidateDocument(); refreshTitle();
+        if (transformOriginalDocument_) finishPersistentTransform(true);
     });
     connect(newButton, &QToolButton::clicked, this, &MainWindow::newProject);
     connect(tabs_, &QTabBar::currentChanged, this, &MainWindow::activateTab);

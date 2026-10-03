@@ -10047,17 +10047,16 @@ void TestProjectFormat::testSection10NumericScrubInteractionAndParity()
                              Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
         QCoreApplication::sendEvent(rotationLabel, &rRelease);
 
-        // 4. Commit persistent transform & verify single undo step
-        QVERIFY(applyBtn->isEnabled());
-        applyBtn->click();
+        // 4. Scrubbed values are applied on release, one undo step each; nothing waits for Apply (mac 686d8c7)
+        QVERIFY(!applyBtn->isEnabled());
         QCoreApplication::processEvents();
 
         QCOMPARE(session.activeLayer()->transform.origin, QPointF(80, 60));
         QCOMPARE(session.activeLayer()->transform.size, QSizeF(240, 120));
         QCOMPARE(session.activeLayer()->transform.rotation, 45.0);
 
-        // Undo restores initial state
-        session.undo();
+        // Undo restores initial state, one scrubbed field at a time
+        session.undo(); session.undo(); session.undo();
         window.syncDocumentViews();
         QCOMPARE(session.activeLayer()->transform.origin, QPointF(50, 60));
         QCOMPARE(session.activeLayer()->transform.size, QSizeF(200, 100));
@@ -10066,7 +10065,7 @@ void TestProjectFormat::testSection10NumericScrubInteractionAndParity()
         QCOMPARE(widthField->value(), 200.0);
 
         // Redo restores transformed state
-        session.redo();
+        session.redo(); session.redo(); session.redo();
         window.syncDocumentViews();
         QCOMPARE(session.activeLayer()->transform.origin, QPointF(80, 60));
         QCOMPARE(session.activeLayer()->transform.size, QSizeF(240, 120));
