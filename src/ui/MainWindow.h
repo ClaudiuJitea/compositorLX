@@ -250,6 +250,8 @@ private:
     bool autoSelectFlipped_ = false;
     bool ratioLockFlipped_ = false;
     void syncHeldModifiers();
+    void updateTabOverflow();
+    QToolButton *tabOverflow_ = nullptr;
     QSlider *opacitySlider_ = nullptr;
     ScrubLabel *xLabel_ = nullptr;
     ScrubLabel *yLabel_ = nullptr;

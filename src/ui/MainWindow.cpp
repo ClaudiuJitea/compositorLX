@@ -934,6 +934,23 @@ MainWindow::MainWindow(QWidget *parent)
     tabPendingExternalChange_.push_back(false);
     tabPendingExternalDigest_.push_back(std::nullopt);
     tabPendingExternalDoc_.push_back(nullptr);
+    // When the tabs don't all fit, a pill at the far left says how many are out of view and lists them all (mac 1faf7a0);
+    // the selected tab is always scrolled into view. Dragging a tab reorders it (QTabBar is movable).
+    tabOverflow_ = new QToolButton(tabBar); tabOverflow_->setObjectName(QStringLiteral("tabOverflow")); tabOverflow_->setPopupMode(QToolButton::InstantPopup);
+    tabOverflow_->setStyleSheet(QStringLiteral("QToolButton{border:1px solid #4a4c50;border-radius:8px;padding:1px 8px;color:#c8cacd;}QToolButton::menu-indicator{image:none;}"));
+    tabOverflow_->setMenu(new QMenu(tabOverflow_)); tabOverflow_->hide();
+    tabLayout->insertWidget(0, tabOverflow_);
+    auto *overflowTimer = new QTimer(this); overflowTimer->setInterval(400);
+    connect(overflowTimer, &QTimer::timeout, this, &MainWindow::updateTabOverflow); overflowTimer->start();
+    connect(tabOverflow_->menu(), &QMenu::aboutToShow, this, [this] {
+        QMenu *menu = tabOverflow_->menu(); menu->clear();
+        for (int i = 0; i < tabs_->count(); ++i) {
+            const bool modified = i < workspaceTabs_.size() && workspaceTabs_.at(i).isModified();
+            QAction *action = menu->addAction(tabs_->tabText(i) + (modified ? QStringLiteral(" •") : QString()));
+            action->setCheckable(true); action->setChecked(i == tabs_->currentIndex());
+            connect(action, &QAction::triggered, this, [this, i] { if (i < tabs_->count()) { tabs_->setCurrentIndex(i); tabs_->setCurrentIndex(i); } });
+        }
+    });
     tabLayout->addWidget(tabs_);
     tabLayout->addStretch();
     auto *fitTop = new QPushButton(tr("Fit"), tabBar); fitTop->setObjectName(QStringLiteral("toolbarPill"));
@@ -6587,6 +6604,18 @@ void MainWindow::closeEvent(QCloseEvent *event)
         if (QFileInfo(path).isDir() && QFileInfo(path).absoluteFilePath().startsWith(root)) QDir(path).removeRecursively();
     }
     event->accept();
+}
+
+void MainWindow::updateTabOverflow()
+{
+    if (!tabs_ || !tabOverflow_) return;
+    int hidden = 0;
+    for (int i = 0; i < tabs_->count(); ++i) {
+        const QRect rect = tabs_->tabRect(i);
+        if (rect.left() < 0 || rect.right() > tabs_->width()) ++hidden;
+    }
+    tabOverflow_->setVisible(hidden > 0);
+    if (hidden > 0) tabOverflow_->setText(hidden == 1 ? tr("1 more tab") : tr("%1 more tabs").arg(hidden));
 }
 
 // While Control is held the Auto Select box shows flipped, and while Shift is held the aspect lock does, as what a
