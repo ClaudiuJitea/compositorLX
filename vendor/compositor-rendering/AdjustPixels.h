@@ -1,11 +1,10 @@
 #ifndef AdjustPixels_h
 #define AdjustPixels_h
-#include <stdint.h>
-#include <stddef.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
+#include <stdint.h>
+#include <stddef.h>
 // Gradient Map on premultiplied RGBA pixels (4 bytes per pixel, `stride` bytes per row): each pixel's
 // luminance picks a color from `table` (256 × 3 straight sRGB bytes, darkest first). Alpha is kept and
 // fully transparent pixels are left alone.
@@ -52,12 +51,12 @@ void adjust_camera_raw(uint8_t *rgba, size_t width, size_t height, size_t stride
 // the radii match a full-size render. Grain is applied separately. Alpha is kept.
 // Blue over clipped shadows and red over clipped highlights, on top of the grade. Preview only.
 void adjust_camera_raw_clip_overlay(uint8_t *rgba, size_t width, size_t height, size_t stride, int shadows, int highlights);
-// Curve, Color Mixer, and Color Grading after the basic grade. `lumaLut` and the channel LUTs are 256
+// Curve, Color Mixer, and Color Grading after the basic grade. `toneLut` and the channel LUTs are 256
 // entries. `mixer` is 24 floats: hue, saturation, luminance for eight families, −1…1. Each point color is
 // 9 floats (hue, saturation, luminance, three shifts −1…1, three range half-widths). `grade` is four wheels
 // of hue turns, saturation 0…1, and luminance −1…1. `visualize` darkens pixels outside that point color.
 void adjust_camera_raw_curve_color(uint8_t *rgba, size_t width, size_t height, size_t stride,
-                                   const float *lumaLut, const float *redLut, const float *greenLut, const float *blueLut,
+                                   const float *toneLut, const float *redLut, const float *greenLut, const float *blueLut,
                                    double refineSaturation, const float *mixer, int pointCount, const float *points,
                                    const float *grade, double blending, double balance, int visualize);
 void adjust_camera_raw_effects(uint8_t *rgba, size_t width, size_t height, size_t stride,
@@ -98,9 +97,7 @@ void adjust_camera_raw_calibration(uint8_t *rgba, size_t width, size_t height, s
                                    double shadowTint, double redHue, double redSaturation,
                                    double greenHue, double greenSaturation, double blueHue, double blueSaturation,
                                    int processVersion);
-
 #ifdef __cplusplus
 }
 #endif
-
 #endif

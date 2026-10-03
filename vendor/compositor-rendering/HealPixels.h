@@ -1,5 +1,8 @@
 #ifndef HealPixels_h
 #define HealPixels_h
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include <stdint.h>
 #include <stddef.h>
 // Half-open bounds of nonzero bytes in a gray bitmap; all zero when empty.
@@ -16,4 +19,7 @@ void heal_coverage_bounds(const uint8_t *gray, size_t width, size_t height, size
 // by coverage × opacity. Returns 0, or -1 when memory runs out.
 int spot_heal(uint8_t *rgba, const uint8_t *coverage, size_t width, size_t height, size_t stride,
               float opacity, int mode, uint32_t seed);
+#ifdef __cplusplus
+}
+#endif
 #endif

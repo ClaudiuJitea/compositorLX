@@ -110,6 +110,7 @@ add_library(compositor_core
     vendor/compositor-rendering/AdjustPixels.c
     vendor/compositor-rendering/BrushPixels.c
     vendor/compositor-rendering/ContentFill.c
+    vendor/compositor-rendering/DitherPixels.c
     vendor/compositor-rendering/HealPixels.c
     vendor/compositor-rendering/LensPixels.c
     vendor/compositor-rendering/LevelsPixels.c

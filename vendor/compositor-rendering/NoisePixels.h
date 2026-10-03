@@ -1,5 +1,8 @@
 #ifndef NoisePixels_h
 #define NoisePixels_h
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include <stdint.h>
 #include <stddef.h>
 // Adds noise to the color of premultiplied RGBA pixels (4 bytes per pixel, `stride` bytes per
@@ -9,4 +12,10 @@
 // Each pixel's noise depends only on its position and `seed`, so the same seed gives the same grain.
 void noise_add(uint8_t *rgba, size_t width, size_t height, size_t stride,
                float amount, int gaussian, int monochromatic, uint32_t seed);
+void noise_add_at(uint8_t *rgba, size_t width, size_t height, size_t stride,
+                  float amount, int gaussian, int monochromatic, uint32_t seed,
+                  int64_t origin_x, int64_t origin_y);
+#ifdef __cplusplus
+}
+#endif
 #endif
