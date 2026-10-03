@@ -226,6 +226,11 @@ public:
     bool toggleClippingMask(const QUuid &target);
     void selectMaskTarget(bool mask);
     [[nodiscard]] bool isMaskSelected() const { return maskSelected_; }
+    // Option-click on a mask thumbnail shows that mask alone on the canvas, in grayscale, for painting it with nothing
+    // else in the way (mac b3419ab). It ends when the layer's pixels are targeted or another layer is picked, so the id
+    // only counts while its layer is active with its mask targeted.
+    [[nodiscard]] std::optional<QUuid> maskAloneLayerId() const;
+    void toggleMaskAlone(const QUuid &id);
     bool resizeCanvas(const QSize &size, int anchor = 4, const std::optional<QColor> &extension = std::nullopt);
     bool resizeImage(const QSize &size, double resolution, Sampling sampling = Sampling::HighQuality);
     bool crop(const QRect &documentRect);
@@ -429,6 +434,7 @@ private:
     std::optional<QPointF> cloneSource_;
     std::optional<QPointF> cloneOffset_;
     bool maskSelected_ = false;
+    std::optional<QUuid> maskAlone_;
     struct FloatingSelectionState {
         QUuid sourceId;
         QUuid layerId;

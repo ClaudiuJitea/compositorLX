@@ -227,6 +227,7 @@ QVariant LayerListModel::data(const QModelIndex &index, int role) const
     if (role == Qt::UserRole + 3 && !layer.mask.isNull()) return maskThumbnail(layer, document_->canvasSize);
     if (role == Qt::UserRole + 4) return layer.maskSourceId.has_value();
     if (role == Qt::UserRole + 5) return !collapsed_.contains(layer.id);
+    if (role == Qt::UserRole + 6) return maskAlone_ == std::optional<QUuid>(layer.id);
     return {};
 }
 
@@ -483,6 +484,13 @@ bool LayerListModel::dropMimeData(const QMimeData *data, Qt::DropAction action, 
     }
 
     return false;
+}
+
+void LayerListModel::setMaskAlone(const std::optional<QUuid> &id)
+{
+    if (maskAlone_ == id) return;
+    maskAlone_ = id;
+    if (rowCount() > 0) emit dataChanged(index(0), index(rowCount() - 1));
 }
 
 } // namespace compositor

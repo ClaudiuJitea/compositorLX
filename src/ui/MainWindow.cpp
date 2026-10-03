@@ -667,6 +667,7 @@ public:
             p->fillRect(maskRect, QColor(50, 50, 52));
             p->drawImage(maskRect, mask);
             p->setPen(QColor(92, 94, 98)); p->drawRect(maskRect);
+            if (index.data(Qt::UserRole + 6).toBool()) { p->setPen(QPen(Qt::white, 2)); p->setBrush(Qt::NoBrush); p->drawRect(maskRect.adjusted(1, 1, -1, -1)); }
             textStart = maskRect.right() + 8;
         }
 
@@ -1574,7 +1575,13 @@ MainWindow::MainWindow(QWidget *parent)
             return;
         }
         canvas_->resolvePendingGradient(); canvas_->resolvePendingDistortion();
-        session_.selectMaskTarget(!layer.mask.isNull() && x >= thumbnail + 42 && x <= thumbnail + 80);
+        if (modifiers.testFlag(Qt::AltModifier) && !layer.mask.isNull() && x >= thumbnail + 42 && x <= thumbnail + 80) {
+            session_.toggleMaskAlone(layer.id);   // Option-click on a mask thumbnail: that mask alone (Option-drag still copies it)
+        } else {
+            session_.selectMaskTarget(!layer.mask.isNull() && x >= thumbnail + 42 && x <= thumbnail + 80);
+        }
+        layerModel_->setMaskAlone(session_.maskAloneLayerId());
+        canvas_->invalidateDocument();
         updateInspector(); canvas_->update();
     });
     connect(layerView_, &QListView::doubleClicked, this, [this](const QModelIndex &index) {
@@ -1893,6 +1900,9 @@ MainWindow::MainWindow(QWidget *parent)
         if (smearMode->currentIndex() == 1) session_.beginBlurStroke(point, brushDiameter_, brushHardness_, brushOpacity_, blurRadius_);
         else session_.beginWarpStroke(point, smearMode->currentIndex() == 0 ? 0 : 1, brushDiameter_, brushHardness_, brushOpacity_);
         canvas_->invalidateDocument();
+    });
+    connect(canvas_, &CanvasWidget::maskAloneExitRequested, this, [this] {
+        if (const auto id = session_.maskAloneLayerId()) { session_.toggleMaskAlone(*id); layerModel_->setMaskAlone(session_.maskAloneLayerId()); canvas_->invalidateDocument(); canvas_->update(); }
     });
     connect(canvas_, &CanvasWidget::cycleSmearModeRequested, this, &MainWindow::cycleSmearMode);
     connect(canvas_, &CanvasWidget::cycleToolModeRequested, this, &MainWindow::cycleToolMode);

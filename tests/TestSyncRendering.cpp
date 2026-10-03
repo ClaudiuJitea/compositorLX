@@ -45,6 +45,8 @@ private slots:
     void layoutGridKeepsToItsLimits();
     void gridAppearanceColorsAndStyles();
     void gridSnapFollowsTheGridSettings();
+    // b3419ab: MaskAloneTests
+    void maskAloneFollowsTheTargetAndTheActiveLayer();
     // 1318f1e: GroupTests.ungroup*
     void ungroupRestoresChildrenAtTheFoldersSpotAndUndoes();
     void ungroupPreservesClippingBetweenTwoOfAFoldersOwnChildren();
@@ -584,6 +586,30 @@ void TestSyncRendering::gridSnapFollowsTheGridSettings()
     QCOMPARE(session.snappedPoint(QPointF(62, 20), 3.0), QPointF(64, 20));
     QCOMPARE(session.snappedPoint(QPointF(397.5, 9), 3.0, &gx, &gy), QPointF(400, 8));
     QVERIFY(gx && *gx == 400 && gy && *gy == 8);   // the lines met are shown
+}
+
+void TestSyncRendering::maskAloneFollowsTheTargetAndTheActiveLayer()
+{
+    EditorSession session;
+    session.createDocument(20, 10, true);
+    const QUuid first = *session.document()->activeLayerId;
+    QVERIFY(session.addLayerMask(true, false));
+    session.addBlankLayer();
+    const QUuid second = *session.document()->activeLayerId;
+    QVERIFY(!session.maskAloneLayerId());
+    session.toggleMaskAlone(first);                       // Option-click on a mask thumbnail
+    QCOMPARE(session.maskAloneLayerId(), std::optional<QUuid>(first));
+    QVERIFY(session.isMaskSelected());                    // the mask stays the paint target
+    session.toggleMaskAlone(first);                       // again: the composite is back
+    QVERIFY(!session.maskAloneLayerId());
+    session.toggleMaskAlone(first);
+    session.selectMaskTarget(false);                      // target the layer's pixels: back to the image
+    QVERIFY(!session.maskAloneLayerId());
+    session.toggleMaskAlone(first);
+    session.selectLayer(second);                          // pick another layer: back to the image
+    QVERIFY(!session.maskAloneLayerId());
+    session.toggleMaskAlone(second);                      // a layer without a mask has nothing to show alone
+    QVERIFY(!session.maskAloneLayerId());
 }
 
 QTEST_MAIN(TestSyncRendering)

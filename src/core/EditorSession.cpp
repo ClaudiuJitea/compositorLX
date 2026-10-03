@@ -2455,6 +2455,23 @@ void EditorSession::selectMaskTarget(bool mask)
     const Layer *layer = activeLayer(); maskSelected_ = mask && layer && !layer->mask.isNull();
 }
 
+std::optional<QUuid> EditorSession::maskAloneLayerId() const
+{
+    const Layer *layer = activeLayer();
+    if (maskAlone_ && maskSelected_ && layer && layer->id == *maskAlone_ && !layer->mask.isNull()) return maskAlone_;
+    return std::nullopt;
+}
+
+void EditorSession::toggleMaskAlone(const QUuid &id)
+{
+    const bool showing = maskAloneLayerId() == std::optional<QUuid>(id);
+    selectLayer(id);
+    selectMaskTarget(true);
+    const Layer *layer = activeLayer();
+    if (!layer || layer->id != id || !maskSelected_) { maskAlone_.reset(); return; }
+    if (showing) maskAlone_.reset(); else maskAlone_ = id;
+}
+
 bool EditorSession::canLinkMask(const QUuid &source, const QUuid &target) const
 {
     if (!document_ || source == target) return false;

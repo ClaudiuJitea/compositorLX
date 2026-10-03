@@ -29,6 +29,8 @@ public:
     };
 
     void setDocument(std::shared_ptr<Document> document, bool reset = true);
+    // The layer whose mask is shown alone on the canvas; its mask thumbnail is outlined in white.
+    void setMaskAlone(const std::optional<QUuid> &id);
     [[nodiscard]] std::optional<QUuid> layerId(const QModelIndex &index) const;
     [[nodiscard]] bool isEffect(const QModelIndex &index) const;
     [[nodiscard]] std::optional<LayerEffectKind> effectKind(const QModelIndex &index) const;
@@ -62,6 +64,7 @@ signals:
     void effectDropRequested(const QUuid &sourceId, LayerEffectKind kind, const QUuid &targetId);
 
 private:
+    std::optional<QUuid> maskAlone_;
     [[nodiscard]] int layerIndex(int row) const;
     [[nodiscard]] QVector<int> visibleLayerIndexes() const;
     [[nodiscard]] QVector<Item> visibleItems() const;

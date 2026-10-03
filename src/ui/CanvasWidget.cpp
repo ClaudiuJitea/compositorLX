@@ -158,15 +158,40 @@ void CanvasWidget::setBlendModePreview(const std::optional<QUuid> &layerId, cons
     invalidateDocument();
 }
 
+void CanvasWidget::applyPreviewState(Document &snapshot) const
+{
+    if (textEditingLayer_) for (Layer &layer : snapshot.layers) if (layer.id == *textEditingLayer_) layer.visible = false;
+    if (blendModePreview_) for (Layer &layer : snapshot.layers) if (layer.id == blendModePreview_->first) {
+        layer.blendMode = blendModePreview_->second; break;
+    }
+    const auto alone = session_ ? session_->maskAloneLayerId() : std::nullopt;
+    if (!alone) return;
+    for (const Layer &source : snapshot.layers) {
+        if (source.id != *alone || source.mask.isNull()) continue;
+        // Just the mask, opaque and gray, where the mask sits; everything else out of the way.
+        Layer view;
+        view.id = source.id; view.name = source.name;
+        QImage gray = source.mask.convertToFormat(QImage::Format_Grayscale8).convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        view.image = gray;
+        view.transform = source.maskPlacement.value_or(source.transform);
+        if (source.mask.size() == QSize(1, 1)) view.transform.sampling = Sampling::Nearest;
+        snapshot.layers = {view};
+        return;
+    }
+}
+
+QRectF CanvasWidget::maskAloneBadgeRect() const
+{
+    const QSizeF size(220, 26);
+    return QRectF((width() - size.width()) / 2.0, height() - size.height() - 14.0, size.width(), size.height());
+}
+
 void CanvasWidget::startBackgroundRender()
 {
     if (!document_ || renderedDocument_.isNull()) return;
     if (renderWatcher_.isRunning()) return;
     Document snapshot = *document_;
-    if (textEditingLayer_) for (Layer &layer : snapshot.layers) if (layer.id == *textEditingLayer_) layer.visible = false;
-    if (blendModePreview_) for (Layer &layer : snapshot.layers) if (layer.id == blendModePreview_->first) {
-        layer.blendMode = blendModePreview_->second; break;
-    }
+    applyPreviewState(snapshot);
     renderWatcher_.setProperty("generation", QVariant::fromValue(renderGeneration_));
     renderWatcher_.setFuture(QtConcurrent::run([snapshot] { return LayerRenderer::flattened(snapshot); }));
 }
@@ -446,10 +471,7 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
     if (renderDirty_ || renderedDocument_.size() != document_->canvasSize) {
         if (renderedDocument_.isNull() || renderedDocument_.size() != document_->canvasSize) {
             Document snapshot = *document_;
-            if (textEditingLayer_) for (Layer &layer : snapshot.layers) if (layer.id == *textEditingLayer_) layer.visible = false;
-            if (blendModePreview_) for (Layer &layer : snapshot.layers) if (layer.id == blendModePreview_->first) {
-                layer.blendMode = blendModePreview_->second; break;
-            }
+            applyPreviewState(snapshot);
             renderedDocument_ = LayerRenderer::flattened(snapshot);
             renderDirty_ = false;
         } else startBackgroundRender();
@@ -731,6 +753,19 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
         painter.setPen(QPen(QColor(20, 20, 20, 190), 1));
         painter.drawEllipse(center, diameter / 2 + 1, diameter / 2 + 1);
     }
+    if (session_ && session_->maskAloneLayerId()) {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const QRectF badge = maskAloneBadgeRect();
+        painter.setPen(Qt::NoPen); painter.setBrush(QColor(30, 30, 32, 225));
+        painter.drawRoundedRect(badge, 6, 6);
+        painter.setPen(QColor(225, 226, 228));
+        painter.drawText(badge.adjusted(10, 0, -64, 0), Qt::AlignVCenter | Qt::AlignLeft, tr("Mask — Show Image"));
+        painter.setPen(QPen(QColor(120, 170, 235), 1.0)); painter.setBrush(Qt::NoBrush);
+        painter.drawRoundedRect(QRectF(badge.right() - 58, badge.top() + 4, 50, badge.height() - 8), 4, 4);
+        painter.drawText(QRectF(badge.right() - 58, badge.top() + 4, 50, badge.height() - 8), Qt::AlignCenter, tr("Back"));
+        painter.restore();
+    }
 }
 
 void CanvasWidget::resizeEvent(QResizeEvent *event)
@@ -754,6 +789,10 @@ void CanvasWidget::wheelEvent(QWheelEvent *event)
 
 void CanvasWidget::mousePressEvent(QMouseEvent *event)
 {
+    // The badge under a mask shown alone has its own button back to the image.
+    if (event->button() == Qt::LeftButton && session_ && session_->maskAloneLayerId() && maskAloneBadgeRect().contains(event->position())) {
+        emit maskAloneExitRequested(); event->accept(); return;
+    }
     if (event->button() == Qt::MiddleButton || event->button() == Qt::RightButton) {
         panning_ = true;
         lastMousePosition_ = event->position().toPoint();

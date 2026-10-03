@@ -167,6 +167,7 @@ signals:
     void hueTargetStarted(const QPoint &point);
     void hueTargetDragged(double viewDelta, bool adjustsHue);
     void hueTargetFinished();
+    void maskAloneExitRequested();
     void floatingTransformCommitRequested();
     void floatingTransformCancelRequested();
     void layerSelectionRequested(const QUuid &id);
@@ -237,6 +238,10 @@ private:
     double rotateStartAngle_ = 0.0;
     // Marquee and shape points snap to View > Snap To, as moved layers do (Control drags freely); a selection being
     // moved snaps its edges and middle.
+    // The preview-only changes every render of the canvas applies: text being edited hidden, a blend mode being
+    // tried, and a mask shown alone.
+    void applyPreviewState(Document &snapshot) const;
+    QRectF maskAloneBadgeRect() const;
     QPointF snapDragPoint(const QPointF &point, Qt::KeyboardModifiers modifiers);
     QPoint snapSelectionMoveEnd(const QPoint &current, Qt::KeyboardModifiers modifiers);
     std::optional<double> snapGuideX_;
