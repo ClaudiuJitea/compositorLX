@@ -2616,6 +2616,12 @@ bool EditorSession::resizeCanvas(const QSize &size, int anchor, const std::optio
     const QPointF offset(std::floor(double(size.width() - old.width()) * (anchor % 3) / 2.0),
                          std::floor(double(size.height() - old.height()) * (anchor / 3) / 2.0));
     if (size == old && offset.isNull()) return false;
+    if (extension && (size.width() > old.width() || size.height() > old.height())) {
+        // The colored extension is real pixels: refuse what the document's pixel budget cannot hold (mac CanvasResizer).
+        qint64 used = 0;
+        for (const Layer &layer : document_->layers) used += qint64(layer.image.width()) * layer.image.height();
+        if (qint64(size.width()) * size.height() > 100000000LL - used) return false;
+    }
     beginEdit(QStringLiteral("Canvas Size"));
     translateCanvas(size, offset);
     if (extension && (size.width() > old.width() || size.height() > old.height())) {

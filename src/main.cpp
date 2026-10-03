@@ -1,5 +1,6 @@
 #include "ui/MainWindow.h"
 #include "ui/EditorStyle.h"
+#include "ui/SliderJumpStyle.h"
 #include "rendering/SubjectRemoval.h"
 
 #include <QApplication>
@@ -18,7 +19,7 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName(QStringLiteral("Compositor"));
     QApplication::setDesktopFileName(QStringLiteral("compositor-lx"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/compositor-lx.png")));
-    application.setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
+    application.setStyle(new compositor::SliderJumpStyle(QStringLiteral("Fusion")));
     QPalette palette;
     palette.setColor(QPalette::Window, QColor(31, 31, 31));
     palette.setColor(QPalette::WindowText, QColor(232, 232, 232));
