@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CompositorLX VERSION 0.4.0 LANGUAGES C CXX)
+project(CompositorLX VERSION 0.4.5 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(FetchContent)

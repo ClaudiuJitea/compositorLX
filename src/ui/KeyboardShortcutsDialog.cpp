@@ -1,4 +1,7 @@
 #include "ui/KeyboardShortcutsDialog.h"
+
+#include <QDialogButtonBox>
+#include <QStyle>
 #include <QFrame>
 
 namespace compositor {
@@ -37,14 +40,16 @@ void ShortcutRecorderButton::setRecording(bool recording)
 
 void ShortcutRecorderButton::updateAppearance()
 {
+    // Styled by the theme (QPushButton#shortcutRecorder, and [recording="true"] while it listens).
+    setObjectName(QStringLiteral("shortcutRecorder"));
     if (recording_) {
         setText(tr("Press keys…"));
-        setStyleSheet(QStringLiteral("QPushButton { background-color: #0a84ff; color: #ffffff; border: 1px solid #0060df; border-radius: 4px; font-weight: bold; font-size: 11px; }"));
+        setProperty("recording", true);
     } else {
         setText(sequence_.isEmpty() ? tr("None") : sequence_.toString(QKeySequence::NativeText));
-        setStyleSheet(QStringLiteral("QPushButton { background-color: #2c2c2e; color: #e5e5e7; border: 1px solid #3a3a3c; border-radius: 4px; padding: 2px 8px; font-family: monospace; font-size: 11px; } "
-                                     "QPushButton:hover { background-color: #3a3a3c; border-color: #48484a; }"));
+        setProperty("recording", false);
     }
+    style()->unpolish(this); style()->polish(this);
 }
 
 void ShortcutRecorderButton::keyPressEvent(QKeyEvent *event)
@@ -119,24 +124,24 @@ void KeyboardShortcutsDialog::setupUI()
     mainLayout->setSpacing(10);
 
     auto *instructionLabel = new QLabel(tr("Click a shortcut, then press its new key combination. Changes apply when you save."), this);
-    instructionLabel->setStyleSheet(QStringLiteral("color: #8e8e93; font-size: 12px;"));
+    instructionLabel->setObjectName(QStringLiteral("dialogSubtitle"));
+    instructionLabel->setWordWrap(true);
     mainLayout->addWidget(instructionLabel);
 
     searchEdit_ = new QLineEdit(this);
     searchEdit_->setPlaceholderText(tr("Search shortcuts"));
     searchEdit_->setClearButtonEnabled(true);
-    searchEdit_->setStyleSheet(QStringLiteral("QLineEdit { background-color: #1c1c1e; border: 1px solid #3a3a3c; border-radius: 6px; padding: 6px 10px; color: #ffffff; font-size: 13px; } "
-                                              "QLineEdit:focus { border-color: #0a84ff; }"));
+    searchEdit_->setAccessibleName(tr("Search shortcuts"));
     connect(searchEdit_, &QLineEdit::textChanged, this, &KeyboardShortcutsDialog::onSearchTextChanged);
     mainLayout->addWidget(searchEdit_);
 
     scrollArea_ = new QScrollArea(this);
     scrollArea_->setWidgetResizable(true);
     scrollArea_->setFrameShape(QFrame::NoFrame);
-    scrollArea_->setStyleSheet(QStringLiteral("QScrollArea { background: transparent; } QScrollBar:vertical { width: 8px; background: transparent; } QScrollBar::handle:vertical { background: #3a3a3c; border-radius: 4px; }"));
+    scrollArea_->setObjectName(QStringLiteral("shortcutList"));
 
     auto *container = new QWidget;
-    container->setStyleSheet(QStringLiteral("background: transparent;"));
+    container->setObjectName(QStringLiteral("shortcutListContents"));
     auto *containerLayout = new QVBoxLayout(container);
     containerLayout->setContentsMargins(0, 4, 8, 8);
     containerLayout->setSpacing(4);
@@ -150,7 +155,7 @@ void KeyboardShortcutsDialog::setupUI()
         headerLayout->setContentsMargins(0, 12, 0, 4);
 
         auto *headerLabel = new QLabel(group, headerWidget);
-        headerLabel->setStyleSheet(QStringLiteral("font-weight: bold; font-size: 13px; color: #ffffff;"));
+        headerLabel->setObjectName(QStringLiteral("sectionTitle"));
         headerLayout->addWidget(headerLabel);
 
         containerLayout->addWidget(headerWidget);
@@ -164,12 +169,13 @@ void KeyboardShortcutsDialog::setupUI()
             rowLayout->setContentsMargins(4, 2, 4, 2);
 
             auto *titleLabel = new QLabel(def.title, rowWidget);
-            titleLabel->setStyleSheet(QStringLiteral("color: #e5e5e7; font-size: 12px;"));
             rowLayout->addWidget(titleLabel);
             rowLayout->addStretch();
 
             const QKeySequence currentSeq = draftOverrides_.value(def.id(), def.defaultShortcut);
             auto *recorder = new ShortcutRecorderButton(currentSeq, rowWidget);
+            recorder->setAccessibleName(def.title);
+            titleLabel->setBuddy(recorder);
             rowLayout->addWidget(recorder);
 
             const QString defId = def.id();
@@ -200,64 +206,52 @@ void KeyboardShortcutsDialog::setupUI()
     auto *footerDivider = new QFrame(container);
     footerDivider->setFrameShape(QFrame::HLine);
     footerDivider->setFrameShadow(QFrame::Sunken);
-    footerDivider->setStyleSheet(QStringLiteral("color: #3a3a3c; margin-top: 12px; margin-bottom: 8px;"));
+    containerLayout->addSpacing(12);
     containerLayout->addWidget(footerDivider);
+    containerLayout->addSpacing(8);
 
     auto *footerHeader = new QLabel(tr("Contextual keys & mouse gestures"), container);
-    footerHeader->setStyleSheet(QStringLiteral("font-weight: bold; font-size: 13px; color: #ffffff; margin-top: 4px;"));
+    footerHeader->setObjectName(QStringLiteral("sectionTitle"));
     containerLayout->addWidget(footerHeader);
 
     auto *footerText1 = new QLabel(tr("Text fields keep standard editing keys. Dialogs share the Apply/Cancel assignments above. Numeric fields use Up/Down, with Shift for larger steps. Standard commands include Ctrl+Q to quit. The shortcut editor itself always uses Return to save and Esc to cancel when not recording."), container);
     footerText1->setWordWrap(true);
-    footerText1->setStyleSheet(QStringLiteral("color: #8e8e93; font-size: 11px; margin-top: 4px;"));
+    footerText1->setObjectName(QStringLiteral("dialogSubtitle"));
     containerLayout->addWidget(footerText1);
 
-    auto *footerText2 = new QLabel(tr("Alt temporarily selects the eyedropper in painting tools. Shift constrains shapes/movement or adds to a selection; Alt subtracts from selections or draws from center. Ctrl-drag moves selected pixels; Ctrl-Alt-drag copies them. Alt-drag duplicates layers/folders/effects; Alt-click at a layer boundary toggles clipping. Ctrl-click a thumbnail loads its selection. Control bypasses snapping. Right-drag adjusts brush size. Modifier-and-mouse gestures are fixed."), container);
+    auto *footerText2 = new QLabel(tr("Alt temporarily selects the eyedropper in painting tools. Shift constrains shapes/movement or adds to a selection; Alt subtracts from selections or draws from center. Ctrl-drag moves selected pixels; Ctrl-Alt-drag copies them. Alt-drag duplicates layers/folders/effects; Alt-click at a layer boundary toggles clipping. Ctrl-click a thumbnail loads its selection. Control bypasses snapping. Right-drag adjusts brush size (Shift-right-drag, hardness). Modifier-and-mouse gestures are fixed."), container);
     footerText2->setWordWrap(true);
-    footerText2->setStyleSheet(QStringLiteral("color: #8e8e93; font-size: 11px; margin-top: 4px;"));
+    footerText2->setObjectName(QStringLiteral("dialogSubtitle"));
     containerLayout->addWidget(footerText2);
+
+    // Some desktops (Xfce, Cinnamon, MATE, older Plasma) move windows with Alt-drag, so Alt-clicks never reach the app.
+    auto *footerText3 = new QLabel(tr("If your desktop moves windows with Alt-drag: hold a tool's key to use it for a moment and let go to return (hold I for the eyedropper); "
+                                      "Clone Stamp has Set Source, Zoom has Zoom Out, Shape and Crop have From Center, and the selection tools have Subtract. "
+                                      "Layer › Create Clipping Mask, Layer › Layer Mask › View Mask Alone and Duplicate Layer (Ctrl+J) cover the rest."), container);
+    footerText3->setWordWrap(true);
+    footerText3->setObjectName(QStringLiteral("dialogSubtitle"));
+    containerLayout->addWidget(footerText3);
 
     containerLayout->addStretch();
     scrollArea_->setWidget(container);
     mainLayout->addWidget(scrollArea_);
 
     conflictLabel_ = new QLabel(this);
-    conflictLabel_->setStyleSheet(QStringLiteral("color: #ff9f0a; font-size: 12px; font-weight: 500; min-height: 22px;"));
+    conflictLabel_->setObjectName(QStringLiteral("warningLabel"));
     conflictLabel_->setWordWrap(true);
     conflictLabel_->hide();
     mainLayout->addWidget(conflictLabel_);
 
-    auto *bottomDivider = new QFrame(this);
-    bottomDivider->setFrameShape(QFrame::HLine);
-    bottomDivider->setStyleSheet(QStringLiteral("color: #3a3a3c;"));
-    mainLayout->addWidget(bottomDivider);
-
-    auto *bottomLayout = new QHBoxLayout;
-    bottomLayout->setSpacing(10);
-
-    restoreDefaultsButton_ = new QPushButton(tr("Restore Defaults"), this);
-    restoreDefaultsButton_->setStyleSheet(QStringLiteral("QPushButton { background-color: #2c2c2e; color: #e5e5e7; border: 1px solid #3a3a3c; border-radius: 6px; padding: 6px 12px; font-size: 12px; } "
-                                                         "QPushButton:hover { background-color: #3a3a3c; }"));
-    connect(restoreDefaultsButton_, &QPushButton::clicked, this, &KeyboardShortcutsDialog::onRestoreDefaultsClicked);
-    bottomLayout->addWidget(restoreDefaultsButton_);
-
-    bottomLayout->addStretch();
-
-    cancelButton_ = new QPushButton(tr("Cancel"), this);
-    cancelButton_->setStyleSheet(QStringLiteral("QPushButton { background-color: #2c2c2e; color: #e5e5e7; border: 1px solid #3a3a3c; border-radius: 6px; padding: 6px 12px; font-size: 12px; } "
-                                                "QPushButton:hover { background-color: #3a3a3c; }"));
-    connect(cancelButton_, &QPushButton::clicked, this, &KeyboardShortcutsDialog::onCancelClicked);
-    bottomLayout->addWidget(cancelButton_);
-
-    saveButton_ = new QPushButton(tr("Save"), this);
+    // The desktop's button order (KDE and GNOME place them differently); Return saves and Esc cancels (see keyPressEvent).
+    auto *buttons = new QDialogButtonBox(this);
+    restoreDefaultsButton_ = buttons->addButton(QDialogButtonBox::RestoreDefaults);
+    cancelButton_ = buttons->addButton(QDialogButtonBox::Cancel);
+    saveButton_ = buttons->addButton(QDialogButtonBox::Save);
     saveButton_->setDefault(true);
-    saveButton_->setStyleSheet(QStringLiteral("QPushButton { background-color: #0a84ff; color: #ffffff; border: 1px solid #0060df; border-radius: 6px; padding: 6px 16px; font-weight: bold; font-size: 12px; } "
-                                              "QPushButton:hover { background-color: #0071e3; } "
-                                              "QPushButton:disabled { background-color: #3a3a3c; color: #636366; border-color: #3a3a3c; }"));
+    connect(restoreDefaultsButton_, &QPushButton::clicked, this, &KeyboardShortcutsDialog::onRestoreDefaultsClicked);
+    connect(cancelButton_, &QPushButton::clicked, this, &KeyboardShortcutsDialog::onCancelClicked);
     connect(saveButton_, &QPushButton::clicked, this, &KeyboardShortcutsDialog::onSaveClicked);
-    bottomLayout->addWidget(saveButton_);
-
-    mainLayout->addLayout(bottomLayout);
+    mainLayout->addWidget(buttons);
 }
 
 void KeyboardShortcutsDialog::updateConflictStatus()

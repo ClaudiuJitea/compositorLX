@@ -213,6 +213,8 @@ public:
     // Why a brush, gradient, smudge or liquify cannot paint right now, in words for the user; empty when it can
     // (mac 133c34a). `forMask` is true when the target is the layer's mask.
     [[nodiscard]] QString paintRefusal() const;
+    // Whether the active layer (or its mask) can take paint, a fill, a gradient or a pixel move (mac canPaint).
+    [[nodiscard]] bool canPaint() const { return document_ && activeLayer() && paintRefusal().isEmpty(); }
     bool beginCloneStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1, double opacity = 1,
                           bool aligned = true, bool sampleAllLayers = false);
     bool beginHealingStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1,
@@ -283,6 +285,8 @@ public:
     bool flattenImage();
     void selectLayer(const std::optional<QUuid> &id);
     void selectLayers(const QSet<QUuid> &ids, const std::optional<QUuid> &primary = std::nullopt);
+    // Ctrl-Shift-click on the canvas: adds a layer to the selection, or takes it out again when it is already in it.
+    void extendSelection(const QUuid &id);
     [[nodiscard]] const QSet<QUuid> &selectedLayerIds() const { return selectedLayerIds_; }
     [[nodiscard]] QRectF selectedLayersBounds() const;
     bool transformSelectedLayers(const QRectF &bounds, double rotationDegrees = 0);
@@ -476,9 +480,12 @@ private:
         double settledCarry = 0;   // distance to the next soft dab along the settled path
         // A stroke on a blank layer fills one in, and one past a layer's edge grows it: the layer as it was, to put back
         // when nothing was painted, and where its own pixels sit in the grown grid (empty for a blank layer).
-        struct Restore { bool valid = false; QImage image; LayerTransform transform; QImage mask; };
+        struct Restore { bool valid = false; QImage image; LayerTransform transform; QImage mask; std::optional<LayerTransform> maskPlacement; };
         Restore restore;
         bool blank = false, grown = false;
+        // A brush on a mask grows it over the canvas (mac growsMask): where its old pixels sit in the grown grid.
+        bool maskGrown = false;
+        QRect maskSourceRect;
         QRect sourceRect;
     };
     std::optional<BrushState> brush_;
@@ -496,6 +503,11 @@ private:
         // Liquify: how far each pixel's source lies from it, in tiles allocated as the stroke reaches them.
         QHash<qint64, QVector<float>> offsets;
         bool changed = false;
+        // The layer grown over the canvas so pixels can be pushed past its edge (mac: the warp runs at canvas size): the
+        // layer as it was, and where its own pixels sit in the grown grid.
+        BrushState::Restore restore;
+        bool grown = false;
+        QRect sourceRect;
     };
     std::optional<WarpState> warp_;
     std::optional<QPointF> cloneSource_;

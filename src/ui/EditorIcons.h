@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QGuiApplication>
 #include <QIconEngine>
+#include <QPalette>
 #include <QPainter>
 #include <QPainterPath>
 #include <algorithm>
@@ -27,9 +29,19 @@ public:
         p.scale(side / 24, side / 24);
         p.translate(12, 12); p.scale(1.15, 1.15); p.translate(-12, -12);
         p.setRenderHint(QPainter::Antialiasing);
-        const QColor ink = mode == QIcon::Disabled ? QColor(108, 113, 123)
-            : state == QIcon::On ? QColor(159, 207, 255)
-            : mode == QIcon::Active ? QColor(255, 255, 255) : QColor(222, 228, 237);
+        // Drawn in the theme's text tones, so the glyphs read on a dark and a light scheme alike: the accent's tint
+        // when switched on, the strongest tone under the pointer, the disabled tone when unavailable.
+        const QPalette palette = QGuiApplication::palette();
+        const QColor text = palette.color(QPalette::WindowText), window = palette.color(QPalette::Window);
+        const bool dark = window.lightnessF() < .5;
+        const QColor accent = palette.color(QPalette::Highlight);
+        const auto blend = [](const QColor &a, const QColor &b, double t) {
+            return QColor::fromRgbF(float(a.redF() + (b.redF() - a.redF()) * t), float(a.greenF() + (b.greenF() - a.greenF()) * t),
+                                    float(a.blueF() + (b.blueF() - a.blueF()) * t));
+        };
+        const QColor ink = mode == QIcon::Disabled ? palette.color(QPalette::Disabled, QPalette::WindowText)
+            : state == QIcon::On ? (dark ? blend(accent, Qt::white, .55) : accent.darker(115))
+            : mode == QIcon::Active ? (dark ? QColor(Qt::white) : QColor(Qt::black)) : blend(text, accent, .04);
         p.setPen(QPen(ink, 1.25, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         p.setBrush(Qt::NoBrush);
         const int kind = kind_;

@@ -10853,16 +10853,24 @@ void TestProjectFormat::testSection10RemappableKeyboardShortcuts()
         bad.clear();
         bad[QStringLiteral("Text Editing:Finish editing text")] = QKeySequence(Qt::Key_F);
         QCOMPARE(ShortcutManager::instance().validate(bad),
-                 QStringLiteral("Text-editing shortcuts need Command, Option, or Control so they do not replace normal typing."));
+                 QStringLiteral("Text-editing shortcuts need Ctrl, Alt or Super so they do not replace normal typing."));
 
         // 2c: Reserved system shortcuts
         bad.clear();
         bad[QStringLiteral("Menus:Undo")] = QKeySequence(Qt::CTRL | Qt::Key_Q);
-        QVERIFY(ShortcutManager::instance().validate(bad).contains(QStringLiteral("reserved by macOS")));
+        QVERIFY(ShortcutManager::instance().validate(bad).contains(QStringLiteral("reserved for Quit")));
 
         bad.clear();
-        bad[QStringLiteral("Menus:Undo")] = QKeySequence(Qt::CTRL | Qt::Key_Comma);
-        QVERIFY(ShortcutManager::instance().validate(bad).contains(QStringLiteral("reserved by macOS")));
+        bad[QStringLiteral("Menus:Undo")] = QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_T);
+        QVERIFY(ShortcutManager::instance().validate(bad).contains(QStringLiteral("used by the desktop")));
+
+        bad.clear();
+        bad[QStringLiteral("Menus:Undo")] = QKeySequence(Qt::META | Qt::Key_E);
+        QVERIFY(ShortcutManager::instance().validate(bad).contains(QStringLiteral("used by the desktop")));
+
+        bad.clear();
+        bad[QStringLiteral("Menus:Undo")] = QKeySequence(Qt::CTRL | Qt::Key_Comma);   // Preferences, as the GNOME HIG has it
+        QVERIFY(ShortcutManager::instance().validate(bad).contains(QStringLiteral("reserved for Preferences")));
 
         // 2d: Duplicate assignment conflict
         bad.clear();
@@ -11918,7 +11926,7 @@ void TestProjectFormat::testSection10SmudgeLiquifyAccessAndParity()
     const auto toolButtons = rail->findChildren<QToolButton *>();
     QVERIFY(toolButtons.size() >= 9);
     auto *blurButton = toolButtons[8];
-    QCOMPARE(blurButton->toolTip(), QStringLiteral("Blur"));
+    QCOMPARE(blurButton->toolTip(), QStringLiteral("Blur (R)"));
 
     // Switch to Move tool
     canvas->setTool(CanvasWidget::Tool::Move);

@@ -15,10 +15,13 @@ int main(int argc, char *argv[])
     Q_INIT_RESOURCE(resources);
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("CompositorLX"));
-    QApplication::setApplicationVersion(QStringLiteral("0.4.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.4.5"));
     QApplication::setOrganizationName(QStringLiteral("Compositor"));
     QApplication::setDesktopFileName(QStringLiteral("compositor-lx"));
-    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/compositor-lx.png")));
+    // The installed theme icon (hicolor, or one the icon theme provides), else the bundled vector one.
+    QIcon fallbackIcon(QStringLiteral(":/icons/compositor-lx.svg"));
+    fallbackIcon.addFile(QStringLiteral(":/icons/compositor-lx.png"));
+    QApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("compositor-lx"), fallbackIcon));
     compositor::applyEditorTheme(application);
 
     QCommandLineParser parser;
@@ -39,6 +42,7 @@ int main(int argc, char *argv[])
     }
 
     compositor::MainWindow window;
+    window.restoreWindowState();
     window.show();
     if (!parser.positionalArguments().isEmpty()) window.receiveFiles(parser.positionalArguments());
     return application.exec();

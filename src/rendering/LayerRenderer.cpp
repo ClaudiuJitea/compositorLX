@@ -162,11 +162,13 @@ static std::array<double,3> blendColor(std::array<double,3> backdrop, std::array
 
     for (int c = 0; c < 3; ++c) {
         switch (mode) {
+        // A black backdrop stays black under Color Dodge and a white one white under Color Burn, whatever is blended
+        // over it (the W3C / Photoshop definitions).
         case BlendMode::ColorDodge:
-            source[c] = (source[c] >= 1.0) ? 1.0 : std::min(1.0, backdrop[c] / (1.0 - source[c]));
+            source[c] = backdrop[c] <= 0.0 ? 0.0 : (source[c] >= 1.0) ? 1.0 : std::min(1.0, backdrop[c] / (1.0 - source[c]));
             break;
         case BlendMode::ColorBurn:
-            source[c] = (source[c] <= 0.0) ? 0.0 : std::max(0.0, 1.0 - std::min(1.0, (1.0 - backdrop[c]) / source[c]));
+            source[c] = backdrop[c] >= 1.0 ? 1.0 : (source[c] <= 0.0) ? 0.0 : std::max(0.0, 1.0 - std::min(1.0, (1.0 - backdrop[c]) / source[c]));
             break;
         case BlendMode::LinearBurn:
             source[c] = std::max(0.0, backdrop[c] + source[c] - 1.0);
@@ -325,15 +327,20 @@ static void applyOpacityToImage(QImage &image, double opacity)
     }
 }
 
-static QImage layerCoverage(const Document &document, const Layer &layer, QSet<QUuid> visiting)
+// What `layer` covers as a clipping base: its alpha, with its opacity, raster mask and own upstream clipping, but not its
+// effects, blend mode or visibility. Drawn into a `size` grid that `view` maps document points into (the canvas by default).
+static QImage layerCoverage(const Document &document, const Layer &layer, QSet<QUuid> visiting,
+                            const QSize &gridSize = QSize(), const QTransform &view = QTransform())
 {
+    const QSize size = gridSize.isValid() ? gridSize : document.canvasSize;
     Layer ownLayer = layer;
     ownLayer.effects = std::nullopt;
     ownLayer.blendMode = BlendMode::Normal;
-    QImage image(document.canvasSize, QImage::Format_RGBA8888_Premultiplied);
+    QImage image(size, QImage::Format_RGBA8888_Premultiplied);
     image.fill(Qt::transparent);
     {
         QPainter own(&image);
+        own.setTransform(view);
         drawLayer(own, document, ownLayer, QPainter::CompositionMode_SourceOver);
     }
     if (!layer.maskSourceId || visiting.contains(layer.id)) return image;
@@ -345,24 +352,11 @@ static QImage layerCoverage(const Document &document, const Layer &layer, QSet<Q
         return image;
     }
     visiting.insert(layer.id);
-    const QImage upstreamCoverage = layerCoverage(document, *it, visiting);
+    const QImage upstreamCoverage = layerCoverage(document, *it, visiting, size, view);
     QPainter clip(&image);
     clip.setCompositionMode(QPainter::CompositionMode_DestinationIn);
     clip.drawImage(0, 0, upstreamCoverage);
     return image;
-}
-
-static QImage clippedLayerImage(const Document &document, const Layer &layer, QSet<QUuid> visiting, bool normalizeOwn = false)
-{
-    Layer ownLayer = layer; if (normalizeOwn) ownLayer.opacity = 1; ownLayer.blendMode = BlendMode::Normal;
-    QImage image(document.canvasSize, QImage::Format_RGBA8888_Premultiplied); image.fill(Qt::transparent);
-    { QPainter own(&image); drawLayer(own, document, ownLayer, QPainter::CompositionMode_SourceOver, normalizeOwn ? 1.0 : -1.0); }
-    if (!layer.maskSourceId || visiting.contains(layer.id)) return image;
-    const auto it = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &candidate){ return candidate.id == *layer.maskSourceId; });
-    if (it == document.layers.cend() || !drawable(*it)) { image.fill(Qt::transparent); return image; }
-    visiting.insert(layer.id);
-    const QImage coverage = layerCoverage(document, *it, visiting);
-    QPainter clip(&image); clip.setCompositionMode(QPainter::CompositionMode_DestinationIn); clip.drawImage(0, 0, coverage); return image;
 }
 
 // `clip` is the product of the masks of every enabled folder enclosing the scope (Grayscale8, canvas sized), or null.
@@ -602,9 +596,25 @@ QImage LayerRenderer::flattened(const Document &document)
     return output;
 }
 
+// The layer's own pixels, in their own grid, with the live (clipping) coverage of its source multiplied into their alpha
+// and nothing else: its raster mask, effects, opacity and transform stay as they are (mac LiveMaskBaker.bake).
 QImage LayerRenderer::bakeLiveMask(const Document &document, const Layer &layer)
 {
-    return clippedLayerImage(document, layer, {}, true);
+    if (layer.image.isNull()) return {};
+    QImage own = layer.image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    if (!layer.maskSourceId) return own;
+    const auto it = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &candidate) {
+        return candidate.id == *layer.maskSourceId;
+    });
+    bool invertible = false;
+    const QTransform toGrid = pixelToDocument(layer.transform, own.size()).inverted(&invertible);
+    if (it == document.layers.cend() || !drawable(*it) || !invertible) { own.fill(Qt::transparent); return own; }
+    const QImage coverage = layerCoverage(document, *it, {layer.id}, own.size(), toGrid);
+    QPainter clip(&own);
+    clip.setCompositionMode(QPainter::CompositionMode_DestinationIn);
+    clip.drawImage(0, 0, coverage);
+    clip.end();
+    return own;
 }
 
 } // namespace compositor

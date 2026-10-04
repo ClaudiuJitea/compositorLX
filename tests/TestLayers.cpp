@@ -180,6 +180,13 @@ private slots:
     void optionClickCreatesSharedStackAndDragOutReleases();
     void hiddenBlackSourceSuppliesAlphaAndRasterMasksMultiply();
     void liveMaskCyclesUndoPersistenceBakeAndDelete();
+    void bakeAndDeleteKeepsTheLayersOwnGridMaskAndEffects();
+    void mergeLayersTakesTheTopmostSelectedName();
+    void flipLayersLeavesHiddenLayersAlone();
+    void releasingClippingSkipsAFoldersContents();
+    void copiedPixelsLeaveEffectsBehind();
+    void colorDodgeKeepsBlackAndColorBurnKeepsWhite();
+    void pasteFindsWhereThePixelsCameFrom();
     void movingSourceChangesCoverageAndChainsMultiply();
 
     // MaskAloneTests / MaskTransformTests
@@ -1390,6 +1397,146 @@ void TestLayers::liveMaskCyclesUndoPersistenceBakeAndDelete()
     s.selectLayer(source);
     s.deleteSelectedLayers(false);
     QCOMPARE(alphas(render(s)), (QVector<int>{255, 255, 255, 255}));
+}
+
+// Audit: baking keeps only the live coverage in the pixels. The layer keeps its transform (and its pixels past the
+// canvas), its raster mask and its effects, so its effects are drawn once, not baked in and drawn again (mac LiveMaskBaker).
+void TestLayers::bakeAndDeleteKeepsTheLayersOwnGridMaskAndEffects()
+{
+    EditorSession s;
+    s.createDocument(100, 100);
+    s.insertImage(solid(40, 40, Qt::white), QStringLiteral("Base"), QPointF(50, 50));
+    const QUuid base = active(s);
+    s.insertImage(solid(160, 60, Qt::blue), QStringLiteral("Top"), QPointF(50, 50));   // reaches past the canvas
+    const QUuid top = active(s);
+    QImage mask(160, 60, QImage::Format_Grayscale8); mask.fill(255);
+    for (int y = 0; y < 60; ++y) for (int x = 0; x < 80; ++x) mask.scanLine(y)[x] = 0;    // hides its left half
+    findMutable(s, top)->mask = mask;
+    LayerEffects effects; StrokeEffect stroke; stroke.size = 3; stroke.red = 1; effects.stroke = stroke;
+    QVERIFY(s.setLayerEffects(top, effects, QStringLiteral("Stroke")));
+    QVERIFY(s.toggleClippingMask(top));
+    const LayerTransform placed = find(s, top)->transform;
+    s.selectLayer(base);
+    s.deleteSelectedLayers(true);
+    const Layer *baked = find(s, top);
+    QVERIFY(baked);
+    QCOMPARE(baked->transform, placed);
+    QCOMPARE(baked->image.size(), QSize(160, 60));
+    QCOMPARE(baked->mask, mask);
+    QCOMPARE(baked->effects, std::optional<LayerEffects>(effects));
+    QVERIFY(!baked->maskSourceId.has_value());
+    // Inside the old base the pixels stay; outside it (and past the canvas) the clip took them away.
+    QCOMPARE(qAlpha(baked->image.pixel(80, 30)), 255);
+    QCOMPARE(qAlpha(baked->image.pixel(150, 30)), 0);
+    QCOMPARE(qAlpha(baked->image.pixel(100, 2)), 0);
+}
+
+void TestLayers::mergeLayersTakesTheTopmostSelectedName()
+{
+    EditorSession s;
+    s.createDocument(20, 20);
+    s.insertImage(solid(10, 10, Qt::red), QStringLiteral("Bottom"));
+    const QUuid bottom = active(s);
+    s.insertImage(solid(10, 10, Qt::blue), QStringLiteral("Top"));
+    const QUuid top = active(s);
+    s.selectLayers({bottom, top}, bottom);          // the lower one active
+    QVERIFY(s.mergeLayers());
+    QCOMPARE(s.document()->layers.size(), 1);
+    QCOMPARE(s.document()->layers.first().name, QStringLiteral("Top"));
+}
+
+void TestLayers::flipLayersLeavesHiddenLayersAlone()
+{
+    EditorSession s;
+    s.createDocument(100, 100);
+    s.insertImage(solid(10, 10, Qt::red), QStringLiteral("Shown"), QPointF(20, 50));
+    const QUuid shown = active(s);
+    s.insertImage(solid(10, 10, Qt::blue), QStringLiteral("Hidden"), QPointF(80, 50));
+    const QUuid hidden = active(s);
+    findMutable(s, hidden)->visible = false;
+    const LayerTransform before = find(s, hidden)->transform;
+    s.selectLayers({shown, hidden}, shown);
+    QVERIFY(s.flipLayers(true));
+    QCOMPARE(find(s, hidden)->transform, before);
+    QVERIFY(find(s, shown)->transform.flipX);
+}
+
+void TestLayers::releasingClippingSkipsAFoldersContents()
+{
+    EditorSession s;
+    s.createDocument(20, 20);
+    s.insertImage(solid(10, 10, Qt::red), QStringLiteral("Base"));
+    const QUuid base = active(s);
+    s.insertImage(solid(10, 10, Qt::blue), QStringLiteral("One"));
+    const QUuid one = active(s);
+    s.insertImage(solid(10, 10, Qt::green), QStringLiteral("Two"));
+    const QUuid two = active(s);
+    QVERIFY(s.toggleClippingMask(one));
+    QVERIFY(s.toggleClippingMask(two));
+    QCOMPARE(find(s, two)->maskSourceId, std::optional<QUuid>(base));
+    // A folder's child lying between the clipped siblings in the flat list (not one of their siblings).
+    Layer stray = pixelLayer(QStringLiteral("Stray"), solid(4, 4, Qt::black));
+    s.addGroup();
+    stray.parentId = active(s);
+    s.document()->layers.insert(s.document()->layers.indexOf(*find(s, two)), stray);
+    QVERIFY(s.toggleClippingMask(one));             // releases One and every clipped sibling above it
+    QVERIFY(!find(s, one)->maskSourceId.has_value());
+    QVERIFY(!find(s, two)->maskSourceId.has_value());
+}
+
+void TestLayers::copiedPixelsLeaveEffectsBehind()
+{
+    EditorSession s;
+    s.createDocument(40, 40);
+    s.insertImage(solid(10, 10, Qt::blue), QStringLiteral("Square"), QPointF(20, 20));
+    LayerEffects effects; StrokeEffect stroke; stroke.size = 6; stroke.red = 1; effects.stroke = stroke;
+    QVERIFY(s.setLayerEffects(active(s), effects, QStringLiteral("Stroke")));
+    s.selectAll();
+    const auto copied = s.copiedPixels(false);
+    QVERIFY(copied);
+    QCOMPARE(copied->first.size(), QSize(40, 40));      // the selection's bounds
+    QCOMPARE(qAlpha(copied->first.pixel(20, 20)), 255);
+    QCOMPARE(qAlpha(copied->first.pixel(13, 20)), 0);    // where the stroke shows on the canvas: just the pixels came
+}
+
+void TestLayers::colorDodgeKeepsBlackAndColorBurnKeepsWhite()
+{
+    EditorSession s;
+    s.createDocument(4, 4);
+    s.insertImage(solid(4, 4, Qt::black), QStringLiteral("Black"));
+    s.insertImage(solid(4, 4, Qt::white), QStringLiteral("Dodge"));
+    s.setLayerBlendMode(active(s), BlendMode::ColorDodge);
+    QCOMPARE(QColor(render(s).pixel(1, 1)), QColor(Qt::black));
+    EditorSession b;
+    b.createDocument(4, 4);
+    b.insertImage(solid(4, 4, Qt::white), QStringLiteral("White"));
+    b.insertImage(solid(4, 4, Qt::black), QStringLiteral("Burn"));
+    b.setLayerBlendMode(active(b), BlendMode::ColorBurn);
+    QCOMPARE(QColor(render(b).pixel(1, 1)), QColor(Qt::white));
+}
+
+void TestLayers::pasteFindsWhereThePixelsCameFrom()
+{
+    MainWindow window;
+    EditorSession &s = window.session();
+    s.createDocument(100, 100);
+    s.insertImage(solid(10, 10, Qt::red), QStringLiteral("Square"), QPointF(20, 20));
+    QVERIFY(s.setRectangularSelection(QRect(15, 15, 10, 10)));
+    window.syncDocumentViews();
+    window.findChild<QAction *>(QStringLiteral("commandCopy"))->trigger();
+    // The clipboard holds the picture re-encoded, as a clipboard manager leaves it, with the origin beside it.
+    const QMimeData *held = QGuiApplication::clipboard()->mimeData();
+    QVERIFY(held && held->hasFormat(QStringLiteral("application/x-compositor-pixel-origin")));
+    auto *reencoded = new QMimeData;
+    reencoded->setImageData(qvariant_cast<QImage>(held->imageData()).convertToFormat(QImage::Format_ARGB32));
+    reencoded->setData(QStringLiteral("application/x-compositor-pixel-origin"), held->data(QStringLiteral("application/x-compositor-pixel-origin")));
+    QGuiApplication::clipboard()->setMimeData(reencoded);
+    window.findChild<QAction *>(QStringLiteral("commandPaste"))->trigger();
+    QCOMPARE(s.activeLayer()->transform.origin, QPointF(15, 15));
+    // A picture from elsewhere, with no origin, is centered.
+    QGuiApplication::clipboard()->setImage(solid(10, 10, Qt::blue));
+    window.findChild<QAction *>(QStringLiteral("commandPaste"))->trigger();
+    QCOMPARE(s.activeLayer()->transform.origin, QPointF(45, 45));
 }
 
 void TestLayers::movingSourceChangesCoverageAndChainsMultiply()

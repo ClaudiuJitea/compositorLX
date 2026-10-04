@@ -47,6 +47,9 @@ void restoreLayer(Document *doc, EditorSession &session, const QUuid &target, co
 
 class MainWindow final : public QMainWindow {
 public:
+    // Puts the window back at the size, place and maximized state it was closed in; a first launch takes most of the
+    // screen. Only the real app remembers (tests and tools keep the default).
+    void restoreWindowState();
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 

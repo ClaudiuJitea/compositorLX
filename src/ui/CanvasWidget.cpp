@@ -1,4 +1,5 @@
 #include "ui/CanvasWidget.h"
+#include "ui/EditorStyle.h"
 #include "core/SelectionOps.h"
 
 #include "core/EditorSession.h"
@@ -205,6 +206,16 @@ CanvasWidget::CanvasWidget(QWidget *parent)
             startBackgroundRender();
         }
     });
+    autoscrollTimer_ = new QTimer(this); autoscrollTimer_->setInterval(16);
+    connect(autoscrollTimer_, &QTimer::timeout, this, [this] {
+        const bool marquee = selectionDragging_ && tool_ == Tool::Marquee;
+        const QPointF delta = autoscrollDelta(autoscrollPosition_);
+        if ((!marquee && !movingSelection_) || delta.isNull() || !document_) { autoscrollTimer_->stop(); return; }
+        panOffset_ += delta.toPoint(); fitPending_ = false; emit viewportChanged();
+        // The pointer hasn't moved but the document has under it: the box's corner, or the moved selection, follows.
+        QMouseEvent move(QEvent::MouseMove, autoscrollPosition_, mapToGlobal(autoscrollPosition_), Qt::NoButton, Qt::LeftButton, autoscrollModifiers_);
+        mouseMoveEvent(&move);
+    });
     auto *ants = new QTimer(this); ants->setInterval(120);
     connect(ants, &QTimer::timeout, this, [this] { if (document_ && document_->selection) update(); });
     ants->start();
@@ -306,7 +317,7 @@ void CanvasWidget::setTool(Tool tool)
     if (editorInteractionBlocked_ && tool_ != Tool::Hand && tool_ != Tool::Zoom && tool_ != Tool::Eyedropper && !hueTargeting_) setCursor(Qt::ArrowCursor);
     else if (tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Blur) setCursor(Qt::BlankCursor);
     else if (tool_ == Tool::Hand) setCursor(Qt::OpenHandCursor);
-    else if (tool_ == Tool::Zoom) setCursor(zoomCursor(false));
+    else if (tool_ == Tool::Zoom) setCursor(zoomCursor(zoomOutMode_));
     else if (tool_ == Tool::Text) setCursor(Qt::IBeamCursor);
     else if (tool_ == Tool::Eyedropper) setCursor(eyedropperCursor());
     else if (tool_ == Tool::Marquee || tool_ == Tool::Lasso || tool_ == Tool::Wand || tool_ == Tool::Gradient || tool_ == Tool::Shape || tool_ == Tool::Clone || tool_ == Tool::Crop) setCursor(Qt::CrossCursor);
@@ -339,7 +350,7 @@ void CanvasWidget::refreshCursor()
     if (spaceHeld_) setCursor(panning_ ? Qt::ClosedHandCursor : Qt::OpenHandCursor);
     else if (hueTargeting_) setCursor(Qt::SizeHorCursor);
     else if (tool_ == Tool::Hand) setCursor(Qt::OpenHandCursor);
-    else if (tool_ == Tool::Zoom) setCursor(zoomCursor(false));
+    else if (tool_ == Tool::Zoom) setCursor(zoomCursor(zoomOutMode_));
     else if (tool_ == Tool::Text) setCursor(Qt::IBeamCursor);
     else if (tool_ == Tool::Eyedropper) setCursor(eyedropperCursor());
     else if (blocked) setCursor(Qt::ArrowCursor);
@@ -565,9 +576,13 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
 {
     Q_UNUSED(event)
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(30, 30, 32));
+    // The surround follows the theme: a quiet near-black on a dark scheme, a neutral gray on a light one, so the picture
+    // is judged against the same tones as the rest of the window.
+    const QColor window = palette().color(QPalette::Window), text = palette().color(QPalette::WindowText);
+    const bool darkScheme = window.lightnessF() < .5;
+    painter.fillRect(rect(), theme::mix(window, darkScheme ? QColor(Qt::black) : text, darkScheme ? .05 : .12));
     if (!document_) {
-        painter.setPen(QColor(180, 180, 180));
+        painter.setPen(theme::mix(text, window, .3));
         painter.drawText(rect(), Qt::AlignCenter, tr("Open a Compositor .comp project"));
         return;
     }
@@ -583,12 +598,16 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
             renderDirty_ = false;
         } else startBackgroundRender();
     }
-    const QImage displayImage = DownsampleCache::shared().image(renderedDocument_, zoom_);
+    // Worked out in device pixels, so a scaled display (125%, 150%, 200%) is as sharp as an unscaled one: the reduction
+    // matches what the screen shows, and a whole number of device pixels per image pixel is drawn without smoothing.
+    const double deviceScale = zoom_ * devicePixelRatioF();
+    const QImage displayImage = DownsampleCache::shared().image(renderedDocument_, deviceScale);
     painter.save();
     painter.setClipRect(target);
     painter.translate(target.topLeft());
     painter.scale(zoom_, zoom_);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, zoom_ < 2.0);
+    const bool wholeDevicePixels = std::abs(deviceScale - std::round(deviceScale)) < 1e-3;
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, deviceScale < 2.0 && !wholeDevicePixels);
     painter.drawImage(QRectF(QPointF(), QSizeF(document_->canvasSize)), displayImage);
     painter.restore();
 
@@ -597,7 +616,7 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
     if (showPixelGrid_ && zoom_ >= 8.0) {
         painter.save();
         painter.setClipRect(target);
-        painter.setPen(QPen(QColor(140, 140, 140, 115), 1.0));
+        painter.setPen(QPen(QColor(140, 140, 140, 115), 0));   // one device pixel, however the display is scaled
         const QRectF visible = target.intersected(rect());
         const int firstColumn = std::max(0, int(std::ceil((visible.left() - target.left()) / zoom_)));
         const int lastColumn = std::min(document_->canvasSize.width(),
@@ -921,6 +940,29 @@ void CanvasWidget::wheelEvent(QWheelEvent *event)
 
 bool CanvasWidget::event(QEvent *event)
 {
+    // Hold a tool's key to use it for a moment: the key press (seen here, before its shortcut switches the tool) notes
+    // the tool in use; letting go after holding it puts that tool back, as Photoshop's spring-loaded tools do. A quick
+    // tap just switches. One way to reach the eyedropper, zoom and so on where the desktop keeps Alt-clicks for itself.
+    if (event->type() == QEvent::ShortcutOverride) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if (!key->isAutoRepeat() && key->modifiers() == Qt::NoModifier && key->key() >= Qt::Key_A && key->key() <= Qt::Key_Z
+            && !brushDrawing_ && !movingLayer_) {
+            springKey_ = key->key(); springFrom_ = tool_; springTimer_.start();
+        }
+    }
+    if (event->type() == QEvent::KeyRelease) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if (!key->isAutoRepeat() && springKey_ && key->key() == *springKey_) {
+            const bool held = springTimer_.isValid() && springTimer_.elapsed() >= 350;
+            const Tool from = springFrom_;
+            springKey_.reset();
+            if (held && tool_ != from && !brushDrawing_ && !movingLayer_ && !creationDragging_ && !selectionDragging_) {
+                setTool(from);
+                event->accept();
+                return true;
+            }
+        }
+    }
     // Trackpad pinch zooms about the pointer (mac EditorCanvas.magnify).
     if (event->type() == QEvent::NativeGesture) {
         auto *gesture = static_cast<QNativeGestureEvent *>(event);
@@ -938,6 +980,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
     // The badge under a mask shown alone has its own button back to the image.
     if (event->button() == Qt::LeftButton && session_ && session_->maskAloneLayerId() && maskAloneBadgeRect().contains(event->position())) {
         emit maskAloneExitRequested(); event->accept(); return;
+    }
+    if (event->button() == Qt::RightButton && document_ && isBrushTool() && !brushDrawing_ && !spaceHeld_) {
+        brushTipDrag_ = BrushTipDrag{event->position(), (event->position() - canvasRect().topLeft()) / zoom_, brushDiameter_, brushHardness_};
+        cursorDocument_ = brushTipDrag_->document; update(); event->accept(); return;
     }
     if (event->button() == Qt::MiddleButton || event->button() == Qt::RightButton) {
         panning_ = true;
@@ -1069,12 +1115,12 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
             creationCurrent_ = pendingGradient_->second;
         } else creationAnchor_ = creationCurrent_ = (tool_ == Tool::Shape ? snapDragPoint(point, event->modifiers()) : point);
         creationSquare_ = event->modifiers().testFlag(Qt::ShiftModifier);
-        creationFromCenter_ = event->modifiers().testFlag(Qt::AltModifier);
+        creationFromCenter_ = fromCenter(event->modifiers());
         creationDragging_ = true; update(); event->accept(); return;
     }
     if (event->button() == Qt::LeftButton && document_ && (tool_ == Tool::Brush || tool_ == Tool::Eraser)) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
-        brushDrawing_ = true; cursorDocument_ = point;
+        brushDrawing_ = true; startBrushAxis(point, event->modifiers()); cursorDocument_ = point;
         const bool continued = event->modifiers().testFlag(Qt::ShiftModifier) && lastBrushPoint_ && lastBrushLayerId_ == document_->activeLayerId && lastBrushMask_ == maskTarget_;
         emit brushStrokeStarted(continued ? *lastBrushPoint_ : point, tool_ == Tool::Eraser);
         if (continued) emit brushStrokeContinued(point);
@@ -1083,17 +1129,17 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
     if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Clone) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
         cursorDocument_ = point;
-        if (event->modifiers().testFlag(Qt::AltModifier)) emit cloneSourceRequested(point);
-        else { brushDrawing_ = true; const bool continued = event->modifiers().testFlag(Qt::ShiftModifier) && lastBrushPoint_ && lastBrushLayerId_ == document_->activeLayerId && lastBrushMask_ == maskTarget_; emit cloneStrokeStarted(continued ? *lastBrushPoint_ : point); if (continued) emit brushStrokeContinued(point); }
+        if (event->modifiers().testFlag(Qt::AltModifier) || cloneSourcePickArmed_) { setCloneSourcePickArmed(false); emit cloneSourceRequested(point); }
+        else { brushDrawing_ = true; startBrushAxis(point, event->modifiers()); const bool continued = event->modifiers().testFlag(Qt::ShiftModifier) && lastBrushPoint_ && lastBrushLayerId_ == document_->activeLayerId && lastBrushMask_ == maskTarget_; emit cloneStrokeStarted(continued ? *lastBrushPoint_ : point); if (continued) emit brushStrokeContinued(point); }
         event->accept(); return;
     }
     if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Healing) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
-        brushDrawing_ = true; cursorDocument_ = point; const bool continued = event->modifiers().testFlag(Qt::ShiftModifier) && lastBrushPoint_ && lastBrushLayerId_ == document_->activeLayerId && lastBrushMask_ == maskTarget_; emit healingStrokeStarted(continued ? *lastBrushPoint_ : point); if (continued) emit brushStrokeContinued(point); event->accept(); return;
+        brushDrawing_ = true; startBrushAxis(point, event->modifiers()); cursorDocument_ = point; const bool continued = event->modifiers().testFlag(Qt::ShiftModifier) && lastBrushPoint_ && lastBrushLayerId_ == document_->activeLayerId && lastBrushMask_ == maskTarget_; emit healingStrokeStarted(continued ? *lastBrushPoint_ : point); if (continued) emit brushStrokeContinued(point); event->accept(); return;
     }
     if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Blur) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
-        brushDrawing_ = true; cursorDocument_ = point; const bool continued = event->modifiers().testFlag(Qt::ShiftModifier) && lastBrushPoint_ && lastBrushLayerId_ == document_->activeLayerId && lastBrushMask_ == maskTarget_; emit blurStrokeStarted(continued ? *lastBrushPoint_ : point); if (continued) emit brushStrokeContinued(point); event->accept(); return;
+        brushDrawing_ = true; startBrushAxis(point, event->modifiers()); cursorDocument_ = point; const bool continued = event->modifiers().testFlag(Qt::ShiftModifier) && lastBrushPoint_ && lastBrushLayerId_ == document_->activeLayerId && lastBrushMask_ == maskTarget_; emit blurStrokeStarted(continued ? *lastBrushPoint_ : point); if (continued) emit brushStrokeContinued(point); event->accept(); return;
     }
     if (event->button() == Qt::LeftButton && tool_ == Tool::Move && session_ && session_->canEditGuides()) {
         const QPointF pressPoint = (event->position() - canvasRect().topLeft()) / zoom_;
@@ -1137,7 +1183,10 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
         const bool activeContains = currentActive && !currentActive->group && transformContains(transformMask_ ? currentActive->maskPlacement.value_or(currentActive->transform) : currentActive->transform, pressPoint);
         const bool groupContains = !currentGroupBounds.isEmpty() && currentGroupBounds.contains(pressPoint);
         const bool forcePick = event->modifiers().testFlag(Qt::ControlModifier);
-        if (underPointer && *underPointer != *document_->activeLayerId
+        // Ctrl-Shift-click adds the layer under the pointer to the selection, or takes it out again, whichever way Auto
+        // Select is set (mac extendSelection); the press then drags what is selected.
+        if (forcePick && event->modifiers().testFlag(Qt::ShiftModifier) && underPointer) emit layerSelectionExtendRequested(*underPointer);
+        else if (underPointer && *underPointer != *document_->activeLayerId
             // Control flips Auto Select for as long as it is held (mac bca8f13): with the box off it picks the layer under
             // the pointer; with it on, a press drags the active layer instead of picking.
             && (forcePick ? !transformAutoSelect_ : (transformAutoSelect_ && !activeContains && !groupContains))) {
@@ -1187,8 +1236,12 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
                     setCursor(handle.x() == handle.y() ? Qt::SizeFDiagCursor : handle.x() == -handle.y() ? Qt::SizeBDiagCursor
                                                        : handle.x() == 0 ? Qt::SizeVerCursor : Qt::SizeHorCursor);
                 } else setCursor(drag == TransformDrag::Rotate ? Qt::CrossCursor : Qt::SizeAllCursor);
-                duplicateOnMove_ = false; duplicateIssued_ = false;
-                if (drag != TransformDrag::Distort) emit layerTransformStarted(false);
+                // Alt-dragging several layers (or a folder) duplicates all of them and drags the copies (mac
+                // beginDuplicateTransform).
+                duplicateOnMove_ = drag == TransformDrag::Move && event->modifiers().testFlag(Qt::AltModifier) && !forcePick;
+                duplicateIssued_ = false;
+                if (duplicateOnMove_) setCursor(Qt::DragCopyCursor);
+                if (drag != TransformDrag::Distort) emit layerTransformStarted(duplicateOnMove_);
                 event->accept();
                 return;
             }
@@ -1250,6 +1303,25 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
     QWidget::mousePressEvent(event);
 }
 
+// How far, in screen pixels per frame, the view pans toward a pointer at `position`: nothing well inside the view,
+// speeding up from the last few pixels before the edge to however far past it the pointer has gone (mac
+// marqueeAutoscrollDelta). Past the right edge the document slides left, to bring what's beyond into view.
+QPointF CanvasWidget::autoscrollDelta(const QPointF &position) const
+{
+    constexpr double margin = 12;
+    const auto speed = [](double past) { return past <= 0 ? 0.0 : std::min(40.0, 2 + past * 0.4); };
+    const double left = speed(margin - position.x()), right = speed(position.x() - (width() - margin));
+    const double top = speed(margin - position.y()), bottom = speed(position.y() - (height() - margin));
+    return QPointF(std::round(left - right), std::round(top - bottom));
+}
+
+void CanvasWidget::updateAutoscroll(const QPointF &position, Qt::KeyboardModifiers modifiers)
+{
+    autoscrollPosition_ = position; autoscrollModifiers_ = modifiers;
+    if (autoscrollDelta(position).isNull()) autoscrollTimer_->stop();
+    else if (!autoscrollTimer_->isActive()) autoscrollTimer_->start();
+}
+
 QPointF CanvasWidget::snapDragPoint(const QPointF &point, Qt::KeyboardModifiers modifiers)
 {
     snapGuideX_.reset(); snapGuideY_.reset();
@@ -1270,6 +1342,17 @@ QPoint CanvasWidget::snapSelectionMoveEnd(const QPoint &current, Qt::KeyboardMod
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 {
+    if (brushTipDrag_) {
+        // Left and right resize the tip, its edge following the pointer; with Shift they set its hardness, the full range
+        // across 200 px (mac rightMouseDragged).
+        const double dx = event->position().x() - brushTipDrag_->start.x();
+        double diameter = brushTipDrag_->diameter, hardness = brushTipDrag_->hardness;
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) hardness = std::clamp(brushTipDrag_->hardness + dx / 200.0, 0.0, 1.0);
+        else diameter = std::clamp(std::round(brushTipDrag_->diameter + 2 * dx / std::max(0.0001, zoom_)), 1.0, 2000.0);
+        cursorDocument_ = brushTipDrag_->document;
+        emit brushTipDragged(diameter, hardness);
+        update(); event->accept(); return;
+    }
     if (document_) cursorDocument_ = (event->position() - canvasRect().topLeft()) / zoom_;
     if (samplingColor_ && cursorDocument_) {
         const QPoint pixel(qFloor(cursorDocument_->x()), qFloor(cursorDocument_->y()));
@@ -1319,7 +1402,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
     if (cropDrag_ != CropDrag::None && document_ && tool_ == Tool::Crop) {
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
         const QPointF delta = point - cropStart_;
-        const bool symmetric = event->modifiers().testFlag(Qt::AltModifier);
+        const bool symmetric = fromCenter(event->modifiers());
         QRectF next;
         if (cropDrag_ == CropDrag::Create) {
             double dx = delta.x(), dy = delta.y();
@@ -1370,6 +1453,17 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
         if (duplicateOnMove_ && !duplicateIssued_ && QLineF(point, moveStartDocument_).length() > 0) {
             duplicateIssued_ = true; emit duplicateLayerForTransformRequested();
+            // The copies are selected now, where the originals were: the drag carries them instead.
+            if (!transformOriginals_.isEmpty() && document_) {
+                transformOriginals_.clear(); maskPlacementOriginals_.clear();
+                const QSet<QUuid> targets = transformLayerIds();
+                for (const Layer &layer : document_->layers) {
+                    if (!targets.contains(layer.id)) continue;
+                    transformOriginals_.insert(layer.id, layer.transform);
+                    if (layer.maskPlacement) maskPlacementOriginals_.insert(layer.id, *layer.maskPlacement);
+                }
+            }
+            if (!document_ || !document_->activeLayerId) { event->accept(); return; }
         }
         if (transformDrag_ == TransformDrag::Distort) {
             QPointF delta = point - moveStartDocument_;
@@ -1489,6 +1583,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         return;
     }
     if (movingSelection_) {
+        updateAutoscroll(event->position(), event->modifiers());
         QPoint end = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
         // Shift keeps the move on one axis: whichever way the drag has gone further.
         if (event->modifiers().testFlag(Qt::ShiftModifier)) {
@@ -1504,19 +1599,29 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
             if (lassoPoints_.isEmpty() || QLineF(lassoPoints_.constLast(), point).length() >= .25) lassoPoints_ << point;
             update(); event->accept(); return;
         }
+        if (tool_ == Tool::Marquee) updateAutoscroll(event->position(), event->modifiers());
         selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
         if (tool_ == Tool::Marquee) selectionCurrent_ = snapDragPoint(QPointF(selectionCurrent_), event->modifiers()).toPoint();
         if (!event->modifiers().testFlag(Qt::ShiftModifier)) marqueeConstrainArmed_ = true;
         update(); event->accept(); return;
     }
     if (brushDrawing_) {
-        emit brushStrokeContinued(*cursorDocument_); update(); event->accept(); return;
+        QPointF pixel = *cursorDocument_;
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            const QPointF anchor = brushAxisAnchor_.value_or(brushLastPixel_.value_or(pixel));
+            if (!brushAxisAnchor_) { brushAxisAnchor_ = anchor; brushAxisHorizontal_.reset(); }
+            if (!brushAxisHorizontal_ && QLineF(anchor, pixel).length() >= 3)
+                brushAxisHorizontal_ = std::abs(pixel.x() - anchor.x()) >= std::abs(pixel.y() - anchor.y());
+            pixel = !brushAxisHorizontal_ ? anchor : *brushAxisHorizontal_ ? QPointF(pixel.x(), anchor.y()) : QPointF(anchor.x(), pixel.y());
+        } else { brushAxisAnchor_.reset(); brushAxisHorizontal_.reset(); }
+        brushLastPixel_ = pixel;
+        emit brushStrokeContinued(pixel); update(); event->accept(); return;
     }
     if (creationDragging_) {
         if (tool_ == Tool::Gradient && gradientHandle_ == 1) creationAnchor_ = *cursorDocument_;
         else creationCurrent_ = tool_ == Tool::Shape ? snapDragPoint(*cursorDocument_, event->modifiers()) : *cursorDocument_;
         creationSquare_ = event->modifiers().testFlag(Qt::ShiftModifier);
-        creationFromCenter_ = event->modifiers().testFlag(Qt::AltModifier);
+        creationFromCenter_ = fromCenter(event->modifiers());
         if (tool_ == Tool::Gradient && QLineF(creationAnchor_, creationCurrent_).length() >= .5)
             emit gradientRequested(creationAnchor_, creationCurrent_);
         update(); event->accept(); return;
@@ -1525,9 +1630,9 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
     if (spaceHeld_) setCursor(Qt::OpenHandCursor);
     else if (hueTargeting_) setCursor(Qt::SizeHorCursor);
     else if (tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Blur
-        || (tool_ == Tool::Clone && cloneSource_ && !event->modifiers().testFlag(Qt::AltModifier))) setCursor(Qt::BlankCursor);
+        || (tool_ == Tool::Clone && cloneSource_ && !event->modifiers().testFlag(Qt::AltModifier) && !cloneSourcePickArmed_)) setCursor(Qt::BlankCursor);
     else if (tool_ == Tool::Hand) setCursor(Qt::OpenHandCursor);
-    else if (tool_ == Tool::Zoom) setCursor(zoomCursor(event->modifiers().testFlag(Qt::AltModifier)));
+    else if (tool_ == Tool::Zoom) setCursor(zoomCursor(event->modifiers().testFlag(Qt::AltModifier) != zoomOutMode_));
     else if (tool_ == Tool::Text) setCursor(Qt::IBeamCursor);
     else if (tool_ == Tool::Eyedropper) setCursor(eyedropperCursor());
     else if ((tool_ == Tool::Marquee || tool_ == Tool::Lasso || tool_ == Tool::Wand) && document_) {
@@ -1587,6 +1692,11 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (brushTipDrag_ && event->button() == Qt::RightButton) {
+        brushTipDrag_.reset();
+        if (document_) cursorDocument_ = (event->position() - canvasRect().topLeft()) / zoom_;
+        update(); event->accept(); return;
+    }
     if (guideDragging_ && event->button() == Qt::LeftButton) {
         guideDragging_ = false;
         if (session_) {
@@ -1609,7 +1719,7 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
     }
     if (zoomDragging_ && event->button() == Qt::LeftButton) {
         zoomDragging_ = false;
-        if (!zoomDragMoved_) zoomTo(zoom_ * (event->modifiers().testFlag(Qt::AltModifier) ? 0.5 : 2.0), zoomDragStart_);
+        if (!zoomDragMoved_) zoomTo(zoom_ * (event->modifiers().testFlag(Qt::AltModifier) != zoomOutMode_ ? 0.5 : 2.0), zoomDragStart_);
         event->accept(); return;
     }
     if (panning_ && (event->button() == Qt::MiddleButton || event->button() == Qt::RightButton
@@ -1677,7 +1787,8 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
     }
     if (brushDrawing_ && event->button() == Qt::LeftButton) {
         brushDrawing_ = false;
-        if (cursorDocument_ && document_ && document_->activeLayerId) { lastBrushPoint_ = *cursorDocument_; lastBrushLayerId_ = document_->activeLayerId; lastBrushMask_ = maskTarget_; }
+        if (cursorDocument_ && document_ && document_->activeLayerId) { lastBrushPoint_ = brushLastPixel_.value_or(*cursorDocument_); lastBrushLayerId_ = document_->activeLayerId; lastBrushMask_ = maskTarget_; }
+        brushAxisAnchor_.reset(); brushAxisHorizontal_.reset(); brushLastPixel_.reset();
         emit brushStrokeFinished(); update(); event->accept(); return;
     }
     if (creationDragging_ && event->button() == Qt::LeftButton) {
@@ -1715,13 +1826,12 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
             }
         } else {
             const QRectF shape = dragBox(creationAnchor_, creationCurrent_, event->modifiers().testFlag(Qt::ShiftModifier),
-                                          event->modifiers().testFlag(Qt::AltModifier));
+                                          fromCenter(event->modifiers()));
             if (tool_ == Tool::Text) {
                 const QRectF box = shape.width() >= 12 && shape.height() >= 12 ? shape : QRectF(creationAnchor_, QSizeF(320, 100));
                 emit textBoxRequested(box, shape.width() >= 12 && shape.height() >= 12);
             } else if (shape.width() >= 1 && shape.height() >= 1) {
                 emit shapeCreated(shapeKind_, shape, 0.0, shapeCornerRadius_, std::nullopt, std::nullopt);
-                emit shapeRequested(shape, shapeKind_ == ShapeKind::Ellipse, shapeCornerRadius_);
             }
         }
         update(); event->accept(); return;

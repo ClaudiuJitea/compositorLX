@@ -123,6 +123,9 @@ void MainWindow::copyWholeLayers()
     if (const auto copied = session_.copiedPixels(false)) {
         clipboardImage_ = copied->first; clipboardOrigin_ = copied->second;
         mime->setImageData(clipboardImage_);
+        // Where the pixels came from, so Paste puts them back in place (mac PixelClipboard.origin).
+        mime->setData(QStringLiteral("application/x-compositor-pixel-origin"),
+                      QByteArray::number(clipboardOrigin_.x()) + ',' + QByteArray::number(clipboardOrigin_.y()));
     } else {
         clipboardImage_ = QImage();
     }

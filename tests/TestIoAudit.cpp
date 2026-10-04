@@ -1569,7 +1569,7 @@ void TestIoAudit::shortcutConflictsAndPersistence()
     candidate.clear();
     candidate.insert(QStringLiteral("Text Editing:Increase tracking"), QKeySequence(Qt::Key_K));
     QVERIFY(!manager.validate(candidate).isEmpty());
-    // Quit and Preferences chords are reserved (Command-Q, Command-comma; Command-Option-M for Minimize-All on the Mac).
+    // Quit and Preferences chords are reserved (Ctrl+Q, Ctrl+comma), as are the desktop's own (Super, Ctrl+Alt+T...).
     candidate.clear();
     candidate.insert(QStringLiteral("Menus:Save"), QKeySequence(Qt::CTRL | Qt::Key_Q));
     QVERIFY(!manager.validate(candidate).isEmpty());
@@ -1577,8 +1577,8 @@ void TestIoAudit::shortcutConflictsAndPersistence()
     candidate.insert(QStringLiteral("Menus:Save"), QKeySequence(Qt::CTRL | Qt::Key_Comma));
     QVERIFY(!manager.validate(candidate).isEmpty());
     candidate.clear();
-    candidate.insert(QStringLiteral("Menus:Save"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_M));
-    QVERIFY2(!manager.validate(candidate).isEmpty(), "Command-Option-M is reserved (mac KeyboardShortcuts.problem)");
+    candidate.insert(QStringLiteral("Menus:Save"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_T));
+    QVERIFY2(!manager.validate(candidate).isEmpty(), "Ctrl+Alt+T opens a terminal on most desktops");
     // A valid remap applies to the registered action, persists, and the old chord stops working.
     MainWindow window;
     auto *brush = window.findChild<QAction *>(QStringLiteral("commandSave"));

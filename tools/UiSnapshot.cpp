@@ -31,7 +31,8 @@ int main(int argc, char **argv)
     if (argc > 2) qputenv("QT_SCALE_FACTOR", argv[2]);
     Q_INIT_RESOURCE(resources);
     QApplication app(argc, argv);
-    compositor::applyEditorTheme(app);
+    // Third argument: dark (default), light or system.
+    compositor::applyEditorTheme(app, compositor::themeModeFromKey(argc > 3 ? QString::fromLocal8Bit(argv[3]) : QString()));
     QApplication::setOrganizationName(QStringLiteral("ui-snapshot"));
     const QString out = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QStringLiteral(".");
     QDir().mkpath(out);
@@ -96,8 +97,11 @@ int main(int argc, char **argv)
         QTimer::singleShot(1200, [&, name] {
             QWidget *dialog = nullptr;
             for (QWidget *top : QApplication::topLevelWidgets()) if (top->isVisible() && top != &window && qobject_cast<QDialog *>(top)) dialog = top;
-            if (dialog) { QTest::qWait(300);
-            else qWarning() << "no dialog for" << name;
+            if (dialog) {
+                QTest::qWait(300);
+                dialog->grab().save(QDir(out).filePath(QStringLiteral("dialog-") + QLatin1String(name) + QStringLiteral(".png")));
+                dialog->close();
+            } else qWarning() << "no dialog for" << name;
         });
         action->trigger();
         QApplication::processEvents();

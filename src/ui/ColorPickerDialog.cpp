@@ -94,10 +94,10 @@ ColorPickerDialog::ColorPickerDialog(const QColor &initial, QWidget *parent)
     preview_ = new QLabel(this); preview_->setObjectName(QStringLiteral("colorPickerPreview")); preview_->setFixedSize(64, 64);
     preview_->setToolTip(tr("New color above, current below"));
     top->addWidget(preview_, 0, Qt::AlignTop);
-    auto *buttons = new QVBoxLayout; top->addLayout(buttons);
-    auto *ok = new QPushButton(tr("OK"), this); ok->setDefault(true); ok->setObjectName(QStringLiteral("colorPickerOk"));
-    auto *cancel = new QPushButton(tr("Cancel"), this); cancel->setObjectName(QStringLiteral("colorPickerCancel"));
-    buttons->addWidget(ok); buttons->addWidget(cancel);
+    // Stacked beside the preview, as Photoshop's picker has them, in the order the desktop puts OK and Cancel.
+    auto *buttons = new QDialogButtonBox(Qt::Vertical, this); top->addWidget(buttons, 0, Qt::AlignTop);
+    auto *ok = buttons->addButton(QDialogButtonBox::Ok); ok->setDefault(true); ok->setObjectName(QStringLiteral("colorPickerOk"));
+    auto *cancel = buttons->addButton(QDialogButtonBox::Cancel); cancel->setObjectName(QStringLiteral("colorPickerCancel"));
     connect(ok, &QPushButton::clicked, this, &QDialog::accept);
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
     side->addSpacing(12);

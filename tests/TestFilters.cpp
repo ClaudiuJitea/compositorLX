@@ -15,6 +15,7 @@
 #include "rendering/RasterOperations.h"
 
 #include <QtTest>
+#include <QElapsedTimer>
 #include <QPainter>
 #include <QJsonArray>
 #include <QTemporaryDir>
@@ -95,6 +96,7 @@ private slots:
     void motionBlurGrowsTheLayerAndTrimsItBack();
     void blurHonoursASelectionAndKeepsTheMask();
     void motionBlurStreaksAlongItsAngleCounterclockwiseFromHorizontal();
+    void motionBlurMatchesAnEvenStreakAndStaysFast();
     void addNoiseChangesColorButNeverAlphaAndMonochromaticKeepsGrays();
     void removeDistortionBendsAboutTheCenterAndOnlyPincushionCorrectionOpensTheCorners();
     void lensCorrectionIsOneUndoStepAndZeroIsNone();
@@ -257,6 +259,53 @@ void TestFilters::motionBlurStreaksAlongItsAngleCounterclockwiseFromHorizontal()
     QVERIFY(alphaAt(vertical, 20, 24) > 0 && alphaAt(vertical, 20, 16) > 0 && alphaAt(vertical, 24, 20) == 0);
     const QImage diagonal = streak(45);   // 45 degrees runs up-right and down-left on screen, never up-left
     QVERIFY(alphaAt(diagonal, 23, 17) > 0 && alphaAt(diagonal, 17, 23) > 0 && alphaAt(diagonal, 17, 17) == 0);
+}
+
+// Audit: the running-sum motion blur averages the same even streak the per-pixel version did (exactly along the axes,
+// within a pixel's rounding on a slant), and a long streak on a large layer takes a moment rather than minutes.
+void TestFilters::motionBlurMatchesAnEvenStreakAndStaysFast()
+{
+    QImage image(64, 48, QImage::Format_RGBA8888_Premultiplied);
+    for (int y = 0; y < 48; ++y) for (int x = 0; x < 64; ++x)
+        image.setPixelColor(x, y, QColor((x * 3 + y * 2) % 256, (x * y) % 256, (y * 5 + 40) % 256, (x + y) % 3 == 0 ? 255 : 160));
+    const auto naive = [&](double angle, double distance) {
+        const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        QImage result(source.size(), source.format());
+        const double radians = angle * M_PI / 180, dx = std::cos(radians), dy = -std::sin(radians);
+        const int samples = std::max(2, int(std::ceil(distance)) + 1);
+        for (int y = 0; y < source.height(); ++y) for (int x = 0; x < source.width(); ++x) {
+            double channels[4]{};
+            for (int sample = 0; sample < samples; ++sample) {
+                const double offset = (double(sample) / (samples - 1) - .5) * distance;
+                const int sx = qRound(x + dx * offset), sy = qRound(y + dy * offset);
+                if (sx < 0 || sx >= source.width() || sy < 0 || sy >= source.height()) continue;
+                for (int c = 0; c < 4; ++c) channels[c] += source.constScanLine(sy)[sx * 4 + c];
+            }
+            for (int c = 0; c < 4; ++c) result.scanLine(y)[x * 4 + c] = uchar(std::clamp(qRound(channels[c] / samples), 0, 255));
+        }
+        return result;
+    };
+    const auto meanDifference = [](const QImage &a, const QImage &b) {
+        double total = 0;
+        for (int y = 0; y < a.height(); ++y) for (int x = 0; x < a.width() * 4; ++x) total += std::abs(int(a.constScanLine(y)[x]) - int(b.constScanLine(y)[x]));
+        return total / (a.width() * a.height() * 4);
+    };
+    QCOMPARE(RasterOperations::motionBlur(image, 0, 16), naive(0, 16));
+    QCOMPARE(RasterOperations::motionBlur(image, 90, 16), naive(90, 16));
+    for (const double angle : {-60.0, -30.0, 20.0, 45.0, 75.0})
+        {
+            // Off the axes the line's pixels round a little differently: far less than what the blur itself changes.
+            const QImage reference = naive(angle, 12);
+            const double drift = meanDifference(RasterOperations::motionBlur(image, angle, 12), reference);
+            const double blur = meanDifference(image.convertToFormat(QImage::Format_RGBA8888_Premultiplied), reference);
+            QVERIFY2(drift < blur * .25, qPrintable(QStringLiteral("%1: %2 vs %3").arg(angle).arg(drift).arg(blur)));
+        }
+    QImage large(2000, 1500, QImage::Format_RGBA8888_Premultiplied);
+    large.fill(QColor(120, 60, 200));
+    QElapsedTimer timer; timer.start();
+    const QImage streaked = RasterOperations::motionBlur(large, 30, 1000);
+    QVERIFY2(timer.elapsed() < 5000, qPrintable(QString::number(timer.elapsed())));
+    QCOMPARE(streaked.pixelColor(1000, 750), QColor(120, 60, 200));   // far from the edges an even color stays itself
 }
 
 void TestFilters::addNoiseChangesColorButNeverAlphaAndMonochromaticKeepsGrays()

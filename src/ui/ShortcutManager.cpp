@@ -1,5 +1,6 @@
 #include "ui/ShortcutManager.h"
 
+#include <QCoreApplication>
 #include <QSettings>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -97,14 +98,26 @@ QString ShortcutManager::validate(const QMap<QString, QKeySequence> &candidateOv
 
         if (def.group == QStringLiteral("Text Editing")) {
             if (!mods.testFlag(Qt::ControlModifier) && !mods.testFlag(Qt::AltModifier) && !mods.testFlag(Qt::MetaModifier)) {
-                return QStringLiteral("Text-editing shortcuts need Command, Option, or Control so they do not replace normal typing.");
+                return QCoreApplication::translate("ShortcutManager", "Text-editing shortcuts need Ctrl, Alt or Super so they do not replace normal typing.");
             }
         }
 
-        // Reserved system shortcuts
-        if (chord == QKeySequence(Qt::CTRL | Qt::Key_Q) || chord == QKeySequence(Qt::CTRL | Qt::Key_Comma)
-            || chord == QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_M)) {
-            return QStringLiteral("%1 is reserved by macOS.").arg(chord.toString(QKeySequence::NativeText));
+        // Ctrl+Q quits on every Linux desktop; Super combinations and the Ctrl+Alt keys below belong to the desktop
+        // (launcher, terminal, lock screen, switching to a text console), which takes them before the app ever sees them.
+        if (chord == QKeySequence(Qt::CTRL | Qt::Key_Q)) {
+            return QCoreApplication::translate("ShortcutManager", "%1 is reserved for Quit.").arg(chord.toString(QKeySequence::NativeText));
+        }
+        // Ctrl+comma opens Preferences (GNOME HIG), kept free for it.
+        if (chord == QKeySequence(Qt::CTRL | Qt::Key_Comma)) {
+            return QCoreApplication::translate("ShortcutManager", "%1 is reserved for Preferences.").arg(chord.toString(QKeySequence::NativeText));
+        }
+        const int key = comb.key();
+        const bool ctrlAlt = mods.testFlag(Qt::ControlModifier) && mods.testFlag(Qt::AltModifier);
+        if (mods.testFlag(Qt::MetaModifier)
+            || (ctrlAlt && (key == Qt::Key_T || key == Qt::Key_L || key == Qt::Key_Delete || key == Qt::Key_Backspace
+                            || (key >= Qt::Key_F1 && key <= Qt::Key_F12)))) {
+            return QCoreApplication::translate("ShortcutManager", "%1 is used by the desktop, so the app would never receive it.")
+                .arg(chord.toString(QKeySequence::NativeText));
         }
 
         if (assigned.contains(chord)) {

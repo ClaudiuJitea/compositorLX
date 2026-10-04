@@ -3,6 +3,9 @@
 #include "core/ColorPalette.h"
 #include "core/Document.h"
 #include "core/EditorSession.h"
+#include "io/ProjectWriter.h"
+#include "rendering/LayerRenderer.h"
+#include <QTemporaryDir>
 #include "ui/CanvasWidget.h"
 #include "ui/ColorPickerDialog.h"
 #include "ui/MainWindow.h"
@@ -622,6 +625,203 @@ private slots:
         QCOMPARE(px(s, 66, 20), QColor(255, 0, 0));
         QVERIFY(s.beginCloneStroke(QPointF(50, 10), 6, 1, 1, false)); s.continueBrushStroke(QPointF(50.5, 10)); s.endBrushStroke();
         QVERIFY(px(s, 50, 10) != QColor(0, 0, 255));
+    }
+    // Audit: the session itself refuses paint where macOS's canPaint does, so nothing reaches an adjustment layer (which
+    // could then no longer be saved), a hidden layer, one inside a hidden folder, or several selected layers.
+    void adjustmentLayersRefuseBrushGradientAndFill()
+    {
+        EditorSession s; s.createDocument(100, 100, true);
+        QVERIFY(s.addAdjustment(QStringLiteral("Invert")));
+        QVERIFY(!s.paintRefusal().isEmpty());
+        QVERIFY(!s.beginBrushStroke(QPointF(50, 50), Qt::red, 20, 1, 1, false));
+        QVERIFY(!s.applyGradient(QPointF(0, 0), QPointF(100, 100), Qt::black, Qt::white));
+        QVERIFY(!s.fillSelection(Qt::red));
+        QVERIFY(s.activeLayer()->image.isNull());
+        QVERIFY(ProjectWriter::minimumRequiredVersion(*s.document()) >= 7);
+        QTemporaryDir dir;
+        ProjectWriter::save(*s.document(), dir.filePath(QStringLiteral("adjustment.comp")));   // throws if the layer took pixels
+    }
+    void hiddenLayersAndHiddenFoldersRefusePaint()
+    {
+        EditorSession s; s.createDocument(100, 100, true);
+        const QUuid layer = *s.document()->activeLayerId;
+        s.toggleLayerVisibility(layer);
+        QVERIFY(s.paintRefusal().contains(QStringLiteral("hidden")));
+        QVERIFY(!s.beginBrushStroke(QPointF(50, 50), Qt::red, 20, 1, 1, false));
+        s.toggleLayerVisibility(layer);
+        s.addGroup(); const QUuid folder = *s.document()->activeLayerId;
+        s.addBlankLayer(); const QUuid inner = *s.document()->activeLayerId;
+        QCOMPARE(s.activeLayer()->parentId, std::optional<QUuid>(folder));
+        s.toggleLayerVisibility(folder); s.selectLayer(inner);
+        QVERIFY(s.paintRefusal().contains(QStringLiteral("hidden")));
+        QVERIFY(!s.beginBrushStroke(QPointF(50, 50), Qt::red, 20, 1, 1, false));
+        QVERIFY(!s.fillSelection(Qt::red));
+        QVERIFY(s.activeLayer()->image.isNull());
+    }
+    void severalSelectedLayersRefusePaint()
+    {
+        EditorSession s; s.createDocument(100, 100, true);
+        const QUuid first = *s.document()->activeLayerId;
+        s.addBlankLayer(); const QUuid second = *s.document()->activeLayerId;
+        s.selectLayers({first, second}, second);
+        QVERIFY(s.paintRefusal().contains(QStringLiteral("Several")));
+        QVERIFY(!s.beginBrushStroke(QPointF(50, 50), Qt::red, 20, 1, 1, false));
+        QVERIFY(!s.beginWarpStroke(QPointF(50, 50), 0, 20, 1, 1));
+    }
+    void fillingAMaskUsesItsSwatches()
+    {
+        EditorSession s; s.createDocument(40, 40, true);
+        QVERIFY(s.addLayerMask(true, false)); s.selectMaskTarget(true);
+        s.swapPaletteColors();                                   // X on a mask: the foreground swatch is white
+        QCOMPARE(s.paletteColor(false), QColor(Qt::white));
+        QCOMPARE(s.paletteColor(true), QColor(Qt::black));
+        QImage selection(40, 40, QImage::Format_Grayscale8); selection.fill(0);
+        for (int y = 0; y < 10; ++y) std::fill_n(selection.scanLine(y), 10, uchar(255));
+        s.document()->selection = selection;
+        QVERIFY(s.clearSelectedPixels());                        // clears to the background swatch: black hides
+        QCOMPARE(qGray(s.activeLayer()->mask.pixel(2, 2)), 0);
+        QCOMPARE(qGray(s.activeLayer()->mask.pixel(30, 30)), 255);
+    }
+    // Audit (mac BrushStroke growsMask): the Brush paints a mask anywhere on the canvas, past its layer; what it
+    // paints there takes effect once the layer's pixels reach it. A stroke inside the layer leaves the mask in place.
+    void brushOnAMaskReachesPastItsLayer()
+    {
+        EditorSession s; s.createDocument(100, 100);
+        QImage square(20, 20, QImage::Format_RGBA8888_Premultiplied); square.fill(Qt::red);
+        QVERIFY(s.insertImage(square, "Square", QPointF(20, 20)));
+        QVERIFY(s.addLayerMask(true, false)); s.selectMaskTarget(true);
+        stroke(s, {{20, 20}, {21, 20}}, Qt::black, 4);
+        QVERIFY2(!s.activeLayer()->maskPlacement, "painted inside the layer, the mask still follows its pixels");
+        QCOMPARE(alphaAt(s, 20, 20), 0);
+        stroke(s, {{70, 70}, {71, 70}}, Qt::black, 6);
+        const Layer *layer = s.activeLayer();
+        QVERIFY2(layer->maskPlacement, "painted past its layer, the mask sits on the document on its own");
+        QVERIFY(layer->maskPlacement->size.width() > 50);
+        QCOMPARE(layer->transform.size, QSizeF(20, 20));
+        QCOMPARE(alphaAt(s, 15, 15), 255);           // the layer itself shows as before
+        QCOMPARE(alphaAt(s, 20, 20), 0);
+        // The layer's pixels grow to the painted spot: the mask already hides it there.
+        s.selectMaskTarget(false);
+        stroke(s, {{70, 70}, {71, 70}}, Qt::red, 10);
+        QCOMPARE(alphaAt(s, 70, 70), 0);
+        QVERIFY(alphaAt(s, 70, 66) > 0);
+        s.undo(); s.undo();
+        QVERIFY2(!s.activeLayer()->maskPlacement, "undo puts the mask back on its layer");
+    }
+    void fillingAMaskReachesPastItsLayer()
+    {
+        EditorSession s; s.createDocument(100, 100);
+        QImage square(20, 20, QImage::Format_RGBA8888_Premultiplied); square.fill(Qt::red);
+        QVERIFY(s.insertImage(square, "Square", QPointF(20, 20)));
+        QVERIFY(s.addLayerMask(true, false)); s.selectMaskTarget(true);
+        QVERIFY(s.setRectangularSelection(QRect(60, 60, 10, 10)));
+        QVERIFY(s.fillSelection(Qt::black));
+        const Layer *layer = s.activeLayer();
+        QVERIFY(layer->maskPlacement);
+        const QTransform toMask = LayerRenderer::pixelToDocument(*layer->maskPlacement, layer->mask.size()).inverted();
+        const QPoint inside = toMask.map(QPointF(65, 65)).toPoint(), outside = toMask.map(QPointF(20, 20)).toPoint();
+        QCOMPARE(qGray(layer->mask.pixel(inside)), 0);
+        QCOMPARE(qGray(layer->mask.pixel(outside)), 255);
+        QCOMPARE(alphaAt(s, 20, 20), 255);
+    }
+    static void send(CanvasWidget *canvas, QEvent::Type type, const QPoint &at, Qt::MouseButton button, Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers = {})
+    {
+        QMouseEvent event(type, QPointF(at), canvas->mapToGlobal(QPointF(at)), button, buttons, modifiers);
+        QCoreApplication::sendEvent(canvas, &event);
+    }
+    // Audit (mac rightMouseDragged): right-dragging with a brush tool resizes the tip, its edge following the pointer;
+    // with Shift it sets the hardness instead.
+    void rightDragResizesTheBrush()
+    {
+        Rig r; setup(r, 200, 100);
+        auto *size = r.window.findChild<QDoubleSpinBox *>("brushSize"); auto *hardness = r.window.findChild<QDoubleSpinBox *>("brushHardness");
+        r.canvas()->setTool(CanvasWidget::Tool::Brush); size->setValue(40); hardness->setValue(50);
+        const int undo = r.session().history().undoCount();
+        send(r.canvas(), QEvent::MouseButtonPress, r.at(100, 50), Qt::RightButton, Qt::RightButton);
+        send(r.canvas(), QEvent::MouseMove, r.at(120, 50), Qt::NoButton, Qt::RightButton);
+        QCOMPARE(size->value(), 80.0);
+        send(r.canvas(), QEvent::MouseMove, r.at(140, 50), Qt::NoButton, Qt::RightButton, Qt::ShiftModifier);
+        QCOMPARE(size->value(), 40.0);
+        QCOMPARE(hardness->value(), 70.0);
+        send(r.canvas(), QEvent::MouseButtonRelease, r.at(140, 50), Qt::RightButton, Qt::NoButton);
+        QCOMPARE(r.session().history().undoCount(), undo);     // nothing was painted
+    }
+    // Audit (mac brushAxisAnchor): Shift held during a stroke keeps it straight from where Shift went down.
+    void shiftKeepsAStrokeOnOneAxis()
+    {
+        Rig r; setup(r, 200, 100);
+        auto *size = r.window.findChild<QDoubleSpinBox *>("brushSize"); r.canvas()->setTool(CanvasWidget::Tool::Brush);
+        size->setValue(4); r.session().setForegroundColor(Qt::red); r.window.refreshPaletteSwatches();
+        send(r.canvas(), QEvent::MouseButtonPress, r.at(20, 50), Qt::LeftButton, Qt::LeftButton);
+        send(r.canvas(), QEvent::MouseMove, r.at(60, 52), Qt::NoButton, Qt::LeftButton, Qt::ShiftModifier);
+        send(r.canvas(), QEvent::MouseMove, r.at(140, 70), Qt::NoButton, Qt::LeftButton, Qt::ShiftModifier);
+        send(r.canvas(), QEvent::MouseButtonRelease, r.at(140, 70), Qt::LeftButton, Qt::NoButton, Qt::ShiftModifier);
+        const QImage flat = LayerRenderer_flat(r.session());
+        QCOMPARE(QColor(flat.pixelColor(140, 50)), QColor(Qt::red));
+        QCOMPARE(flat.pixelColor(140, 70).alpha(), 0);
+    }
+    // Audit (mac extendSelection): Ctrl-Shift-click on the canvas adds the layer under the pointer, and takes it out again.
+    void ctrlShiftClickExtendsTheLayerSelection()
+    {
+        Rig r; setup(r, 200, 100);
+        QImage square(20, 20, QImage::Format_RGBA8888_Premultiplied); square.fill(Qt::red);
+        QVERIFY(r.session().insertImage(square, "A", QPointF(30, 50))); const QUuid a = *r.session().document()->activeLayerId;
+        QVERIFY(r.session().insertImage(square, "B", QPointF(150, 50))); const QUuid b = *r.session().document()->activeLayerId;
+        r.session().selectLayer(a); r.window.syncDocumentViews();
+        r.canvas()->setTool(CanvasWidget::Tool::Move);
+        r.press(150, 50, Qt::ControlModifier | Qt::ShiftModifier); r.release(150, 50, Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(r.session().selectedLayerIds(), (QSet<QUuid>{a, b}));
+        r.press(150, 50, Qt::ControlModifier | Qt::ShiftModifier); r.release(150, 50, Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(r.session().selectedLayerIds(), (QSet<QUuid>{a}));
+    }
+    // Audit (mac beginDuplicateTransform): Alt-dragging several selected layers duplicates all of them and moves the copies.
+    void altDragDuplicatesSeveralLayers()
+    {
+        Rig r; setup(r, 200, 100);
+        QImage square(20, 20, QImage::Format_RGBA8888_Premultiplied); square.fill(Qt::red);
+        QVERIFY(r.session().insertImage(square, "A", QPointF(30, 50))); const QUuid a = *r.session().document()->activeLayerId;
+        QVERIFY(r.session().insertImage(square, "B", QPointF(70, 50))); const QUuid b = *r.session().document()->activeLayerId;
+        const int count = r.session().document()->layers.size();
+        r.session().selectLayers({a, b}, b); r.window.syncDocumentViews();
+        r.canvas()->setTool(CanvasWidget::Tool::Move);
+        r.press(50, 50, Qt::AltModifier);
+        send(r.canvas(), QEvent::MouseMove, r.at(50, 80), Qt::NoButton, Qt::LeftButton, Qt::AltModifier);
+        r.release(50, 80, Qt::AltModifier);
+        QCOMPARE(r.session().document()->layers.size(), count + 2);
+        for (const Layer &layer : r.session().document()->layers) {        // the originals stay
+            if (layer.id == a) QCOMPARE(layer.transform.origin, QPointF(20, 40));
+            if (layer.id == b) QCOMPARE(layer.transform.origin, QPointF(60, 40));
+        }
+        int moved = 0;
+        for (const Layer &layer : r.session().document()->layers) if (layer.transform.origin.y() >= 55) ++moved;   // (snapped onto the originals' edge)
+        QCOMPARE(moved, 2);
+    }
+    // Audit (mac marqueeAutoscroll): a Marquee dragged past the view's edge pans the view toward the pointer.
+    void marqueePastTheEdgeScrollsTheView()
+    {
+        Rig r; setup(r, 2000, 1500);
+        r.canvas()->setTool(CanvasWidget::Tool::Marquee);
+        const QPointF before = r.canvas()->canvasRect().topLeft();
+        r.press(10, 10);
+        send(r.canvas(), QEvent::MouseMove, QPoint(r.canvas()->width() + 30, r.canvas()->height() / 2), Qt::NoButton, Qt::LeftButton);
+        QTest::qWait(200);
+        QVERIFY2(r.canvas()->canvasRect().left() < before.x(), "the document slid left to bring what's beyond into view");
+        r.release(10, 10);
+    }
+    // Audit: Smudge and Liquify push pixels past the layer's edge, as the macOS warp (at canvas size) does.
+    void liquifyPushesPixelsPastTheLayerEdge()
+    {
+        EditorSession s; s.createDocument(100, 100);
+        QImage square(20, 20, QImage::Format_RGBA8888_Premultiplied); square.fill(Qt::red);
+        QVERIFY(s.insertImage(square, "Square", QPointF(50, 50)));
+        QVERIFY(s.beginWarpStroke(QPointF(52, 50), 0, 30, 0.5, 1));
+        for (int x = 54; x <= 75; x += 2) s.continueBrushStroke(QPointF(x, 50));
+        QVERIFY(s.endBrushStroke());
+        QVERIFY(s.activeLayer()->transform.size.width() > 20);
+        QVERIFY(alphaAt(s, 63, 50) > 0);
+        QVERIFY(s.activeLayer()->image.width() < 100);       // trimmed back to what's there
+        s.undo();
+        QCOMPARE(s.activeLayer()->transform.size, QSizeF(20, 20));
     }
 };
 

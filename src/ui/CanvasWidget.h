@@ -4,6 +4,7 @@
 #include "core/Document.h"
 #include "core/EditorSession.h"
 
+#include <QElapsedTimer>
 #include <QWidget>
 #include <QSet>
 #include <QHash>
@@ -47,6 +48,14 @@ public:
     void setTool(Tool tool);
     [[nodiscard]] Tool tool() const { return tool_; }
     void setBrushDiameter(double diameter) { brushDiameter_ = diameter; update(); }
+    // Clone Stamp: the next click sets the source (what Alt-click does). Zoom: clicks zoom out (Alt inverts either way).
+    // Shape and Crop: drawn out from the center (Alt inverts).
+    void setCloneSourcePickArmed(bool armed) { if (cloneSourcePickArmed_ == armed) return; cloneSourcePickArmed_ = armed; refreshCursor(); emit cloneSourcePickChanged(armed); }
+    [[nodiscard]] bool cloneSourcePickArmed() const { return cloneSourcePickArmed_; }
+    void setZoomOutMode(bool out) { zoomOutMode_ = out; refreshCursor(); }
+    [[nodiscard]] bool zoomOutMode() const { return zoomOutMode_; }
+    void setDrawFromCenter(bool center) { drawFromCenter_ = center; }
+    [[nodiscard]] bool drawFromCenter() const { return drawFromCenter_; }
     // Clone Stamp's cursor previews what a click would stamp, through the tip's hardness and at the brush's opacity.
     void setBrushTip(double hardness, double opacity) { brushHardness_ = hardness; brushOpacity_ = opacity; update(); }
     [[nodiscard]] double brushDiameter() const { return brushDiameter_; }
@@ -169,6 +178,8 @@ signals:
     void magicWandRequested(const QPoint &point, int mode);
     void objectSelectionRequested(const QPoint &point, int mode);
     void brushStrokeStarted(const QPointF &point, bool erasing);
+    // Right-drag with a brush tool: the tip's new size (and, with Shift, hardness 0-1) (mac rightMouseDragged).
+    void brushTipDragged(double diameter, double hardness);
     void brushStrokeContinued(const QPointF &point);
     void brushStrokeFinished();
     void brushStrokeCancelRequested();
@@ -179,7 +190,6 @@ signals:
     void gradientRequested(const QPointF &start, const QPointF &end);
     void gradientCommitRequested();
     void gradientCancelRequested();
-    void shapeRequested(const QRectF &rect, bool ellipse, double cornerRadius);
     void shapeCreated(ShapeKind kind, const QRectF &rect, double strokeWidth, double cornerRadius,
                       const std::optional<QPointF> &start = std::nullopt,
                       const std::optional<QPointF> &end = std::nullopt);
@@ -196,6 +206,8 @@ signals:
     void floatingTransformCommitRequested();
     void floatingTransformCancelRequested();
     void layerSelectionRequested(const QUuid &id);
+    void layerSelectionExtendRequested(const QUuid &id);
+    void cloneSourcePickChanged(bool armed);
     void guideChanged();
 
 protected:
@@ -224,6 +236,32 @@ private:
     void zoomTo(double value, const QPointF &anchor);
     void refreshCursor();
     bool spaceHeld_ = false;
+    // Right-drag with a brush tool resizes the tip (Shift: hardness) from its size at the press, the circle staying put.
+    struct BrushTipDrag { QPointF start; QPointF document; double diameter = 0, hardness = 0; };
+    std::optional<BrushTipDrag> brushTipDrag_;
+    // Hold-to-use tool keys (see event()): the key held, the tool to go back to, and how long it has been down.
+    std::optional<int> springKey_;
+    Tool springFrom_ = Tool::Move;
+    QElapsedTimer springTimer_;
+    // The options bar's stand-ins for Alt gestures, which a desktop using Alt to move windows keeps for itself.
+    bool cloneSourcePickArmed_ = false, zoomOutMode_ = false, drawFromCenter_ = false;
+    [[nodiscard]] bool fromCenter(Qt::KeyboardModifiers modifiers) const { return modifiers.testFlag(Qt::AltModifier) != drawFromCenter_; }
+    // A Marquee drawn, or a selection moved, against or past the view's edge pans the view toward the pointer.
+    QTimer *autoscrollTimer_ = nullptr;
+    QPointF autoscrollPosition_;
+    Qt::KeyboardModifiers autoscrollModifiers_;
+    [[nodiscard]] QPointF autoscrollDelta(const QPointF &position) const;
+    void updateAutoscroll(const QPointF &position, Qt::KeyboardModifiers modifiers);
+    // Shift during a stroke keeps it on a straight line across or down from where Shift was pressed (or the stroke began),
+    // the axis settled by the first few pixels of movement (mac brushAxisAnchor).
+    std::optional<QPointF> brushAxisAnchor_, brushLastPixel_;
+    std::optional<bool> brushAxisHorizontal_;
+    void startBrushAxis(const QPointF &point, Qt::KeyboardModifiers modifiers)
+    {
+        brushAxisAnchor_ = modifiers.testFlag(Qt::ShiftModifier) ? std::optional<QPointF>(point) : std::nullopt;
+        brushAxisHorizontal_.reset(); brushLastPixel_ = point;
+    }
+    [[nodiscard]] bool isBrushTool() const { return tool_ == Tool::Brush || tool_ == Tool::Eraser || tool_ == Tool::Healing || tool_ == Tool::Clone || tool_ == Tool::Blur; }
     int spaceKey_ = 0;
     bool zoomDragging_ = false, zoomDragMoved_ = false;
     QPointF zoomDragStart_;

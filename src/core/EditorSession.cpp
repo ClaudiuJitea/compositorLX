@@ -281,12 +281,29 @@ std::optional<QPair<QImage, QPoint>> EditorSession::copiedPixels(bool merged) co
     if (merged) canvas = LayerRenderer::flattened(*document_);
     else {
         const Layer *layer = activeLayer(); if (!layer || layer->group) return std::nullopt;
-        Layer copy = *layer; copy.parentId.reset(); copy.maskSourceId.reset(); copy.visible = true; copy.opacity = 1; copy.blendMode = BlendMode::Normal;
+        // The layer's own pixels as they sit on the canvas, without its mask, opacity, blend mode or effects (mac
+        // renderSelectedPixels); a mask comes as opaque gray, where it sits, its edge tone past its pixels.
+        Layer copy = *layer; copy.parentId.reset(); copy.maskSourceId.reset(); copy.visible = true; copy.opacity = 1;
+        copy.blendMode = BlendMode::Normal; copy.effects.reset(); copy.adjustment = {};
         if (maskSelected_) {
             if (copy.mask.isNull()) return std::nullopt;
-            copy.image = copy.mask.convertToFormat(QImage::Format_RGBA8888); copy.mask = {};
-        } else copy.mask = {};
-        Document one = *document_; one.layers = {copy}; one.selection.reset(); canvas = LayerRenderer::flattened(one);
+            const QImage gray = copy.mask.convertToFormat(QImage::Format_Grayscale8);
+            int edge = 0, count = 0;
+            for (int y = 0; y < gray.height(); ++y) for (int x = 0; x < gray.width(); ++x)
+                if (x == 0 || y == 0 || x + 1 == gray.width() || y + 1 == gray.height()) { edge += gray.constScanLine(y)[x]; ++count; }
+            // Covering the layer, a mask is black past it; placed apart, it shows its edge tone (mac LayerMask.background).
+            const int background = !copy.maskPlacement ? 0 : (count && edge * 2 >= count * 255 ? 255 : 0);
+            canvas = QImage(document_->canvasSize, QImage::Format_RGBA8888_Premultiplied);
+            canvas.fill(QColor(background, background, background));
+            if (copy.maskPlacement) copy.transform = *copy.maskPlacement;
+            copy.image = gray.convertToFormat(QImage::Format_RGBA8888); copy.mask = {}; copy.maskPlacement.reset();
+            Document one = *document_; one.layers = {copy}; one.selection.reset();
+            QPainter painter(&canvas); LayerRenderer::draw(painter, one); painter.end();
+        } else {
+            if (copy.image.isNull()) return std::nullopt;
+            copy.mask = {}; copy.maskPlacement.reset();
+            Document one = *document_; one.layers = {copy}; one.selection.reset(); canvas = LayerRenderer::flattened(one);
+        }
     }
     QRect region(QPoint(), document_->canvasSize);
     if (document_->selection) {
@@ -802,6 +819,10 @@ bool EditorSession::invertActiveLayerPixels()
     endEdit(); return true;
 }
 
+static std::optional<QRect> growMaskOverCanvas(Layer &layer, const QSize &canvas);
+static void trimGrownMask(Layer &layer, const QRect &sourceRect, const QRect &painted, const std::optional<LayerTransform> &originalPlacement);
+static QRect nonzeroBounds(const QImage &gray);
+
 static QImage expandedMaskImage(const Layer &layer)
 {
     if (layer.mask.size() != QSize(1, 1)) return layer.mask.convertToFormat(QImage::Format_Grayscale8);
@@ -838,17 +859,36 @@ static QImage clippedGrayscale(const QImage &originalImage, int value, const Lay
 bool EditorSession::fillSelection(const QColor &color)
 {
     Layer *layer = activeLayer();
-    if (!document_ || !layer || layer->group || !color.isValid()) return false;
+    if (!document_ || !layer || !color.isValid() || !canPaint()) return false;
+    if (layer->group && !maskSelected_) return false;
     // A text layer that is still text takes the color as its own, rather than being painted over: the letters change
     // color and stay editable (mac SelectionEdits.swift fillSelection).
     if (!maskSelected_ && !document_->selection && layer->text && recolorText(layer->id, color)) return true;
     const int index = indexOf(layer->id);
     if (maskSelected_) {
         if (layer->mask.isNull() || !layer->maskEnabled) return false;
-        const QImage original = expandedMaskImage(*layer);
-        const QImage result = clippedGrayscale(original, qGray(color.rgb()), *layer, document_->selection);
+        // A fill covers the whole canvas (or the selection on it), past the mask's own area, as the brush does (mac
+        // applyPixelEdit growsMask); the mask keeps only its old pixels and what changed.
+        Layer working = *layer;
+        const std::optional<QRect> old = growMaskOverCanvas(working, document_->canvasSize);
+        const QImage original = old ? working.mask.convertToFormat(QImage::Format_Grayscale8) : expandedMaskImage(*layer);
+        // A mask moved apart from its layer is filled in its own grid, where it sits.
+        Layer placed = working; placed.transform = working.maskPlacement.value_or(working.transform);
+        const QImage result = clippedGrayscale(original, qGray(color.rgb()), placed, document_->selection);
         if (result == original) return false;
-        beginEdit(QStringLiteral("Fill Mask")); document_->layers[index].mask = result; endEdit(); return true;
+        working.mask = result;
+        if (old) {
+            QImage difference(result.size(), QImage::Format_Grayscale8);
+            for (int y = 0; y < result.height(); ++y) {
+                const uchar *a = result.constScanLine(y), *b = original.constScanLine(y); uchar *out = difference.scanLine(y);
+                for (int x = 0; x < result.width(); ++x) out[x] = a[x] != b[x] ? 255 : 0;
+            }
+            trimGrownMask(working, *old, nonzeroBounds(difference), layer->maskPlacement);
+        }
+        beginEdit(QStringLiteral("Fill Mask"));
+        document_->layers[index].mask = working.mask;
+        document_->layers[index].maskPlacement = working.maskPlacement;
+        endEdit(); return true;
     }
     QImage original = layer->image;
     if (original.isNull()) {
@@ -865,8 +905,10 @@ bool EditorSession::fillSelection(const QColor &color)
 bool EditorSession::clearSelectedPixels()
 {
     Layer *layer = activeLayer();
-    if (!document_ || !document_->selection || !layer || layer->group) return false;
-    if (maskSelected_) return fillSelection(Qt::white);
+    if (!document_ || !document_->selection || !layer || !canPaint()) return false;
+    // On a mask the selection fills with the background swatch, as in Photoshop (mac clearSelectedPixels).
+    if (maskSelected_) return fillSelection(paletteColor(true));
+    if (layer->group) return false;
     if (layer->image.isNull()) return false;
     const int index = indexOf(layer->id);
     QImage cleared(layer->image.size(), QImage::Format_RGBA8888_Premultiplied); cleared.fill(Qt::transparent);
@@ -889,7 +931,8 @@ static QTransform pixelToDocument(const LayerTransform &placement, const QSize &
 bool EditorSession::beginSelectionTransform(bool duplicate, const QString &historyName)
 {
     Layer *source = activeLayer();
-    if (!document_ || floating_ || maskSelected_ || !document_->selection || !source || source->group || source->image.isNull()) return false;
+    if (!document_ || floating_ || maskSelected_ || !document_->selection || !source || source->group || source->image.isNull()
+        || !canPaint()) return false;
     const auto copied = copiedPixels(false);
     if (!copied || copied->first.isNull()) return false;
     const int sourceIndex = indexOf(source->id);
@@ -1003,6 +1046,7 @@ bool EditorSession::applyGradient(const QPointF &start, const QPointF &end, cons
                                   bool reversed, double opacity)
 {
     Layer *layer = activeLayer();
+    if (!canPaint()) return false;
     if (!document_ || !layer || layer->group || !foreground.isValid() || !background.isValid()
         || QLineF(start, end).length() < .5 || !std::isfinite(opacity) || opacity < .01 || opacity > 1) return false;
     const int index = indexOf(layer->id);
@@ -1965,28 +2009,23 @@ void EditorSession::raiseFormatVersion()
 
 QString EditorSession::paintRefusal() const
 {
+    // In the order macOS asks (EditorSession+Brush.swift paintRefusal); the empty selection comes last.
     if (!document_) return {};
     const Layer *layer = activeLayer();
     if (!layer) return {};
     const bool paintingMask = maskSelected_;
-    if (document_->selection) {
-        const QImage &sel = *document_->selection;
-        const QImage gray = sel.format() == QImage::Format_Grayscale8 ? sel : sel.convertToFormat(QImage::Format_Grayscale8);
-        bool any = false;
-        for (int y = 0; y < gray.height() && !any; ++y) {
-            const uchar *row = gray.constScanLine(y);
-            for (int x = 0; x < gray.width(); ++x) if (row[x]) { any = true; break; }
-        }
-        if (!any) return QObject::tr("The selection is empty, so there is nowhere to paint. Deselect (Ctrl+D) to paint anywhere.");
-    }
-    if (selectedLayerIds_.size() > 1) return QObject::tr("Several layers are selected. Select one layer to paint on it.");
-    if (!layer->visible) return QObject::tr("The layer is hidden. Show it to paint on it.");
-    if (paintingMask) {
-        if (layer->mask.isNull() || !layer->maskEnabled) return QObject::tr("The layer mask is turned off. Enable it to paint on it.");
-        return {};
-    }
-    if (layer->group) return QObject::tr("A folder has no pixels to paint on. Select a layer inside it, or its mask.");
-    if (!layer->adjustment.isEmpty()) return QObject::tr("An adjustment layer has no pixels to paint on. Paint on its mask instead.");
+    if (selectedLayerIds_.size() > 1) return QObject::tr("Several layers are selected. Select just one to paint on it.");
+    if (layer->group && !paintingMask)
+        return QObject::tr("“%1” is a folder, which has no pixels of its own. Paint on a layer inside it, or on the folder’s mask.").arg(layer->name);
+    // A layer inside a hidden folder is hidden too.
+    if (!LayerRenderer::effectivelyVisible(*document_, *layer))
+        return QObject::tr("“%1” is hidden, or inside a hidden folder. Show it to paint on it.").arg(layer->name);
+    if (paintingMask && (layer->mask.isNull() || !layer->maskEnabled))
+        return QObject::tr("The layer mask is turned off. Shift-click its thumbnail to turn it on, then paint.");
+    if (!paintingMask && !layer->adjustment.isEmpty())
+        return QObject::tr("“%1” is an adjustment layer, with no pixels to paint. Paint on its mask instead.").arg(layer->name);
+    if (document_->selection && !SelectionOps::hasCoverage(*document_->selection))
+        return QObject::tr("Nothing is selected, so there’s nowhere to paint. Choose Select › Deselect (Ctrl+D) to paint anywhere.");
     return {};
 }
 
@@ -2074,12 +2113,102 @@ static bool trimPaintedLayer(Layer &layer, const QRect &sourceRect)
     return true;
 }
 
+// What a mask is past its own pixels: white or black, whichever most of its edge is, so a reveal-all mask keeps revealing
+// and a hide-all mask hiding (mac LayerMask.background).
+static int maskBackground(const QImage &mask)
+{
+    const QImage gray = mask.convertToFormat(QImage::Format_Grayscale8);
+    qint64 total = 0, count = 0;
+    for (int y = 0; y < gray.height(); ++y) {
+        const uchar *row = gray.constScanLine(y);
+        if (y == 0 || y + 1 == gray.height()) { for (int x = 0; x < gray.width(); ++x) total += row[x]; count += gray.width(); }
+        else { total += row[0]; ++count; if (gray.width() > 1) { total += row[gray.width() - 1]; ++count; } }
+    }
+    return count && total * 2 >= count * 255 ? 255 : 0;
+}
+
+// A layer's mask grown to reach the whole canvas, in its own grid, its edge tone filling the new area: a brush or a fill
+// on a mask reaches past its layer, as Photoshop's does (mac BrushStroke growsMask). A uniform 1 x 1 mask is first given
+// the grid it stands for. Returns where the old mask sits in the grown grid, or none when the mask is missing or the grown
+// one would be past the size limits (the mask is then left as it was, apart from a 1 x 1 mask taking its grid).
+static std::optional<QRect> growMaskOverCanvas(Layer &layer, const QSize &canvas)
+{
+    if (layer.mask.isNull() || canvas.isEmpty()) return std::nullopt;
+    const LayerTransform base = layer.maskPlacement.value_or(layer.transform);
+    QImage mask = layer.mask.convertToFormat(QImage::Format_Grayscale8);
+    if (mask.size() == QSize(1, 1)) {
+        const QSize grid = (layer.maskPlacement || layer.image.isNull() ? base.size.toSize() : layer.image.size()).expandedTo(QSize(1, 1));
+        if (qint64(grid.width()) * grid.height() > DocumentLimits::maxSurfacePixels) return std::nullopt;
+        const int value = mask.constScanLine(0)[0];
+        mask = QImage(grid, QImage::Format_Grayscale8); mask.fill(value);
+        layer.mask = mask;
+    }
+    const QSize size = mask.size();
+    if (base.size.width() <= 0 || base.size.height() <= 0) return std::nullopt;
+    bool invertible = false;
+    const QTransform mapping = LayerRenderer::pixelToDocument(base, size);
+    const QTransform inverse = mapping.inverted(&invertible);
+    if (!invertible) return std::nullopt;
+    const QRect extent = QRect(QPoint(), size).united(inverse.mapRect(QRectF(QPointF(), QSizeF(canvas))).toAlignedRect());
+    if (extent == QRect(QPoint(), size)) return QRect(QPoint(), size);
+    if (extent.width() > DocumentLimits::maxSide || extent.height() > DocumentLimits::maxSide
+        || qint64(extent.width()) * extent.height() > DocumentLimits::maxSurfacePixels) return std::nullopt;
+    QImage grown(extent.size(), QImage::Format_Grayscale8);
+    grown.fill(maskBackground(mask));
+    const QPoint offset = -extent.topLeft();
+    for (int y = 0; y < size.height(); ++y) std::copy_n(mask.constScanLine(y), size.width(), grown.scanLine(y + offset.y()) + offset.x());
+    LayerTransform placed = base;
+    placed.size = QSizeF(extent.width() * base.size.width() / size.width(), extent.height() * base.size.height() / size.height());
+    const QPointF center = mapping.map(QRectF(extent).center());
+    placed.origin = QPointF(center.x() - placed.size.width() / 2, center.y() - placed.size.height() / 2);
+    layer.mask = grown;
+    layer.maskPlacement = placed;
+    return QRect(offset, size);
+}
+
+// After a grown mask was painted: it keeps its old pixels and what was painted (`painted`, in the grown grid), and no more.
+// Left on its old pixels it goes back to its old place, following its layer again if it did (mac paintSnapshot: a mask is
+// placed apart only once it reaches past its pixels).
+static void trimGrownMask(Layer &layer, const QRect &sourceRect, const QRect &painted, const std::optional<LayerTransform> &originalPlacement)
+{
+    if (layer.mask.isNull() || !layer.maskPlacement) return;
+    const QRect bounds = (painted.isEmpty() ? sourceRect : sourceRect.united(painted)).intersected(QRect(QPoint(), layer.mask.size()));
+    if (bounds.isEmpty() || bounds == QRect(QPoint(), layer.mask.size())) return;
+    const LayerTransform grown = *layer.maskPlacement;
+    const QTransform mapping = LayerRenderer::pixelToDocument(grown, layer.mask.size());
+    if (bounds == sourceRect) {
+        layer.mask = layer.mask.copy(bounds);
+        layer.maskPlacement = originalPlacement;
+        return;
+    }
+    LayerTransform placed = grown;
+    placed.size = QSizeF(bounds.width() * grown.size.width() / layer.mask.width(), bounds.height() * grown.size.height() / layer.mask.height());
+    const QPointF center = mapping.map(QRectF(bounds).center());
+    placed.origin = QPointF(center.x() - placed.size.width() / 2, center.y() - placed.size.height() / 2);
+    layer.mask = layer.mask.copy(bounds);
+    layer.maskPlacement = placed;
+}
+
+// The bounds of the nonzero pixels of a Grayscale8 image.
+static QRect nonzeroBounds(const QImage &gray)
+{
+    int left = gray.width(), top = gray.height(), right = -1, bottom = -1;
+    for (int y = 0; y < gray.height(); ++y) {
+        const uchar *row = gray.constScanLine(y);
+        for (int x = 0; x < gray.width(); ++x) if (row[x]) { left = std::min(left, x); right = std::max(right, x); top = std::min(top, y); bottom = y; }
+    }
+    return right < left ? QRect() : QRect(QPoint(left, top), QPoint(right, bottom));
+}
+
 bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor &color, double diameter,
                                      double hardness, double opacity, bool erasing, const std::optional<QPointF> &cloneSource,
                                      int healMode, quint32 effectSeed)
 {
     const Layer *layer = activeLayer();
     const bool paintingMask = maskSelected_;
+    // Hidden layers, adjustment layers and several selected layers refuse paint (mac canPaint); an adjustment layer given
+    // pixels could no longer be saved.
+    if (!canPaint()) return false;
     if (brush_ || !layer || (layer->group && !paintingMask) || (paintingMask && (layer->mask.isNull() || !layer->maskEnabled))
         || !std::isfinite(diameter) || diameter < 1 || diameter > 2000
         || !std::isfinite(hardness) || hardness < 0 || hardness > 1 || opacity <= 0 || opacity > 1) return false;
@@ -2091,11 +2220,12 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
                                                               : erasing ? QStringLiteral("Erase") : QStringLiteral("Brush Stroke"));
     // What the layer was before this stroke grew or filled it in, to put back if nothing ends up painted.
     BrushState::Restore restore;
-    bool blank = false, grown = false;
+    bool blank = false, grown = false, maskGrown = false;
+    QRect maskSourceRect;
     QRect sourceRect;
     if (!paintingMask) {
         Layer &target = document_->layers[index];
-        restore = {true, target.image, target.transform, target.mask};
+        restore = {true, target.image, target.transform, target.mask, target.maskPlacement};
         blank = target.image.isNull();
         if (blank) {
             const QSize size(std::max(1, qRound(layer->transform.size.width())), std::max(1, qRound(layer->transform.size.height())));
@@ -2110,12 +2240,19 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
             if (const auto offset = growLayerOverCanvas(target, document_->canvasSize)) { grown = true; sourceRect.translate(*offset); }
         }
         if (blank) sourceRect = QRect();
-    } else if (document_->layers.at(index).mask.size() == QSize(1, 1)) {
-        const QSize size = (layer->image.isNull() ? layer->transform.size.toSize() : layer->image.size()).expandedTo(QSize(1, 1));
-        const int value = qGray(layer->mask.pixel(0, 0)); document_->layers[index].mask = QImage(size, QImage::Format_Grayscale8); document_->layers[index].mask.fill(value);
+    } else {
+        Layer &target = document_->layers[index];
+        restore = {true, target.image, target.transform, target.mask, target.maskPlacement};
+        // The Brush paints a mask anywhere on the canvas, past its layer (mac growsMask: tool == .brush only).
+        if (healMode < 0 && !cloneSource) {
+            if (const auto old = growMaskOverCanvas(target, document_->canvasSize)) { maskGrown = true; maskSourceRect = *old; }
+        } else if (target.mask.size() == QSize(1, 1)) {
+            const QSize size = (layer->image.isNull() ? layer->transform.size.toSize() : layer->image.size()).expandedTo(QSize(1, 1));
+            const int value = qGray(target.mask.pixel(0, 0)); target.mask = QImage(size, QImage::Format_Grayscale8); target.mask.fill(value);
+        }
     }
     const auto abandon = [&] {
-        if (restore.valid) { Layer &target = document_->layers[index]; target.image = restore.image; target.transform = restore.transform; target.mask = restore.mask; }
+        if (restore.valid) { Layer &target = document_->layers[index]; target.image = restore.image; target.transform = restore.transform; target.mask = restore.mask; target.maskPlacement = restore.maskPlacement; }
         endEdit();
         return false;
     };
@@ -2134,6 +2271,7 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
                         maskValue, clonePixel ? *clonePixel - *pixel : QPointF(),
                         healMode, effectSeed, original, original, coverage, coverage, {}, {}, {}, {}};
     brush_->restore = restore; brush_->blank = blank; brush_->grown = grown; brush_->sourceRect = sourceRect;
+    brush_->maskGrown = maskGrown; brush_->maskSourceRect = maskSourceRect;
     if (document_->selection) brush_->selectionCoverage = selectionCoverageForPlacement(placement, original.size(), document_->selection);
 
     // Audit against macOS EditorSession+Brush.swift:
@@ -2183,13 +2321,22 @@ bool EditorSession::beginBlurStroke(const QPointF &documentPoint, double diamete
 bool EditorSession::beginWarpStroke(const QPointF &documentPoint, int mode, double diameter, double hardness, double strength)
 {
     const Layer *layer = activeLayer();
+    if (!canPaint()) return false;
     if (brush_ || warp_ || mode < 0 || mode > 1 || maskSelected_ || !layer || layer->group || layer->image.isNull()
         || diameter < 2 || diameter > 2000 || hardness < 0 || hardness > 1 || strength <= 0 || strength > 1) return false;
-    const auto pixel = documentToPixel(*layer, documentPoint, layer->image.size()); if (!pixel) return false;
+    if (!documentToPixel(*layer, documentPoint, layer->image.size())) return false;
     beginEdit(mode == 0 ? QStringLiteral("Liquify") : QStringLiteral("Smudge"));
-    QImage original = layer->image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    // Grown over the canvas first, so the stroke can push pixels past the layer's edge; trimmed back when it ends.
+    Layer &target = document_->layers[indexOf(layer->id)];
+    const BrushState::Restore restore{true, target.image, target.transform, target.mask, target.maskPlacement};
+    const std::optional<QPoint> offset = growLayerOverCanvas(target, document_->canvasSize);
+    const auto pixel = documentToPixel(target, documentPoint, target.image.size());
+    if (!pixel) { target.image = restore.image; target.transform = restore.transform; target.mask = restore.mask; endEdit(); return false; }
+    QImage original = target.image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     QImage coverage(original.size(), QImage::Format_Grayscale8); coverage.fill(0);
     warp_ = WarpState{layer->id, mode, diameter, std::min(.98, hardness), strength, *pixel, original, original, coverage, {}};
+    warp_->restore = restore; warp_->grown = offset.has_value();
+    warp_->sourceRect = QRect(offset.value_or(QPoint()), restore.image.size());
     if (mode == 1) {
         const double scale = std::max(1e-9, (layer->transform.size.width() / original.width() + layer->transform.size.height() / original.height()) / 2.0);
         const int radius = std::max(1, qCeil(diameter / scale / 2)); const int side = radius * 2 + 1;
@@ -2527,6 +2674,11 @@ bool EditorSession::endBrushStroke()
                 const int amount=(int(coverage[x])*clip[x]+127)/255, inverse=255-amount; for(int c=0;c<4;++c) out[x*4+c]=uchar((int(out[x*4+c])*inverse+int(changed[x*4+c])*amount+127)/255);
             } }
             layer.image=result; warp_->changed=result!=warp_->original; if (warp_->changed) rasterizeLayer(layer);
+            // A grown layer keeps its own pixels and where the stroke pushed pixels to, and no more.
+            if (warp_->grown && (!warp_->changed || !trimPaintedLayer(layer, warp_->sourceRect))) {
+                warp_->changed = false;
+                layer.image = warp_->restore.image; layer.transform = warp_->restore.transform; layer.mask = warp_->restore.mask;
+            }
         }
         const bool changed=warp_->changed; warp_.reset(); endEdit(); return changed;
     }
@@ -2604,6 +2756,14 @@ bool EditorSession::endBrushStroke()
         }
     }
     bool changed = brush_->changed;
+    if (document_ && brush_->mask && brush_->maskGrown) {
+        const int index = indexOf(brush_->layerId);
+        if (index >= 0) {
+            Layer &layer = document_->layers[index];
+            if (!changed) { layer.mask = brush_->restore.mask; layer.maskPlacement = brush_->restore.maskPlacement; }
+            else trimGrownMask(layer, brush_->maskSourceRect, nonzeroBounds(brush_->coverage), brush_->restore.maskPlacement);
+        }
+    }
     if (document_ && (brush_->blank || brush_->grown)) {
         const int index = indexOf(brush_->layerId);
         if (index >= 0) {
@@ -2628,8 +2788,11 @@ bool EditorSession::cancelBrushStroke()
     if (brush_) {
         const int index = indexOf(brush_->layerId);
         if (index >= 0) {
-            if (brush_->mask) document_->layers[index].mask = brush_->original;
-            else if (brush_->restore.valid) {
+            if (brush_->mask) {
+                Layer &layer = document_->layers[index];
+                layer.mask = brush_->restore.valid ? brush_->restore.mask : brush_->original;
+                if (brush_->restore.valid) layer.maskPlacement = brush_->restore.maskPlacement;
+            } else if (brush_->restore.valid) {
                 Layer &layer = document_->layers[index];
                 layer.image = brush_->restore.image; layer.transform = brush_->restore.transform; layer.mask = brush_->restore.mask;
             } else document_->layers[index].image = brush_->original;
@@ -2638,7 +2801,11 @@ bool EditorSession::cancelBrushStroke()
     }
     if (warp_) {
         const int index = indexOf(warp_->layerId);
-        if (index >= 0) document_->layers[index].image = warp_->original;
+        if (index >= 0) {
+            Layer &layer = document_->layers[index];
+            if (warp_->restore.valid) { layer.image = warp_->restore.image; layer.transform = warp_->restore.transform; layer.mask = warp_->restore.mask; }
+            else layer.image = warp_->original;
+        }
         warp_.reset();
     }
     endEdit();
@@ -2870,9 +3037,12 @@ bool EditorSession::toggleClippingMask(const QUuid &target)
     if (targetLayer.maskSourceId) {
         const QUuid source = *targetLayer.maskSourceId;
         beginEdit(QStringLiteral("Release Clipping Mask"));
+        // Releasing a base releases the layers clipped to it above; only siblings count, so a folder's contents lying
+        // between them in the list don't cut the run short (mac removeLiveMask).
         for (int i = targetIndex; i < document_->layers.size(); ++i) {
             Layer &layer = document_->layers[i];
-            if (i != targetIndex && (layer.parentId != targetLayer.parentId || layer.maskSourceId != source)) break;
+            if (layer.parentId != targetLayer.parentId) continue;
+            if (i != targetIndex && layer.maskSourceId != source) break;
             layer.maskSourceId.reset();
         }
         endEdit(); return true;
@@ -3331,7 +3501,8 @@ bool EditorSession::flipLayers(bool horizontally)
     QRectF bounds;
     for (int i = 0; i < document_->layers.size(); ++i) {
         const Layer &layer = document_->layers.at(i);
-        if (!ids.contains(layer.id) || layer.group) continue;
+        // Only what shows and has pixels flips, as only that transforms (mac groupTransformMembers / canTransform).
+        if (!ids.contains(layer.id) || layer.group || layer.image.isNull() || !LayerRenderer::effectivelyVisible(*document_, layer)) continue;
         indices.push_back(i);
         for (const QPointF &corner : layerCorners(layer.transform)) bounds |= QRectF(corner, QSizeF(0, 0));
     }
@@ -3408,7 +3579,10 @@ bool EditorSession::mergeLayers()
     if (selectedLayerIds_.size() > 1) {
         rendered = selectedLayerIds_;
         for (const QUuid &id : selectedLayerIds_) rendered.unite(descendantIds(id));
-        removed = rendered; name = active->name; parent = active->parentId; anchor = active->id; action = QStringLiteral("Merge Layers");
+        // The result takes the name and place of the topmost selected layer, whichever is active (mac mergePlan).
+        const Layer *top = active;
+        for (const Layer &layer : original) if (selectedLayerIds_.contains(layer.id)) top = &layer;
+        removed = rendered; name = top->name; parent = top->parentId; anchor = top->id; action = QStringLiteral("Merge Layers");
     } else if (active->group) {
         rendered = descendantIds(active->id); removed = rendered; removed.insert(active->id);
         name = active->name; parent = active->parentId; anchor = active->id; action = QStringLiteral("Merge Group");
@@ -3481,6 +3655,20 @@ void EditorSession::selectLayers(const QSet<QUuid> &ids, const std::optional<QUu
         : valid.isEmpty() ? std::nullopt : std::optional<QUuid>(*valid.cbegin());
     if (document_->activeLayerId != next || valid.size() != 1) maskSelected_ = false;
     document_->activeLayerId = next;
+}
+
+void EditorSession::extendSelection(const QUuid &id)
+{
+    if (!document_ || indexOf(id) < 0) return;
+    QSet<QUuid> ids = selectedLayerIds_;
+    if (ids.isEmpty() && document_->activeLayerId) ids.insert(*document_->activeLayerId);
+    if (ids.contains(id) && ids.size() > 1) {
+        ids.remove(id);
+        selectLayers(ids, document_->activeLayerId == id ? std::optional<QUuid>(*ids.cbegin()) : document_->activeLayerId);
+    } else {
+        ids.insert(id);
+        selectLayers(ids, id);
+    }
 }
 
 QString EditorSession::nextName(const QString &base) const
@@ -3596,7 +3784,9 @@ bool EditorSession::addAdjustment(const QString &kind, const QJsonObject &settin
 
 bool EditorSession::updateAdjustment(const QUuid &id, const QJsonObject &settings, const QString &historyName)
 {
-    const int index = indexOf(id); if (index < 0 || document_->layers.at(index).adjustment.isEmpty() || settings.value(QStringLiteral("kind")).toString().isEmpty()) return false;
+    // Only a kind the renderer knows: an unknown one could not be drawn or saved.
+    const int index = indexOf(id); if (index < 0 || document_->layers.at(index).adjustment.isEmpty()
+        || !adjustmentKindFromString(settings.value(QStringLiteral("kind")).toString())) return false;
     if (document_->layers.at(index).adjustment == settings) return true;
     beginEdit(historyName);
     const auto optKind = adjustmentKindFromString(settings.value(QStringLiteral("kind")).toString());
@@ -3612,7 +3802,8 @@ bool EditorSession::previewAdjustment(const QUuid &id, const QJsonObject &settin
 {
     if (!document_) return false;
     const int index = indexOf(id);
-    if (index < 0 || document_->layers.at(index).adjustment.isEmpty() || settings.value(QStringLiteral("kind")).toString().isEmpty()) return false;
+    if (index < 0 || document_->layers.at(index).adjustment.isEmpty()
+        || !adjustmentKindFromString(settings.value(QStringLiteral("kind")).toString())) return false;
     document_->layers[index].adjustment = settings;
     advanceRevision();
     return true;
@@ -3743,9 +3934,11 @@ void EditorSession::deleteSelectedLayers(bool bakeLiveMasks)
             beginEdit(QStringLiteral("Bake and Delete Layers"));
             for (Layer &layer : document_->layers) if (targets.contains(layer.id)) {
                 if (layer.image.isNull() || !layer.adjustment.isEmpty()) { layer.maskSourceId.reset(); continue; }
-                layer.image = LayerRenderer::bakeLiveMask(*document_, layer);
-                layer.transform.origin = {}; layer.transform.size = document_->canvasSize; layer.transform.rotation = 0; layer.transform.flipX = layer.transform.flipY = false;
-                layer.mask = {}; layer.maskPlacement.reset(); layer.maskSourceId.reset();
+                // Only the live coverage goes into the pixels, in the layer's own grid; its raster mask, effects and
+                // transform stay (mac LiveMaskBaker), so its look is unchanged once the source is gone.
+                const QImage baked = LayerRenderer::bakeLiveMask(*document_, layer);
+                if (!baked.isNull()) { layer.image = baked; rasterizeLayer(layer); }
+                layer.maskSourceId.reset();
             }
             if (selectedLayerIds_.size() <= 1) deleteActiveLayer(); else deleteIds(selectedLayerIds_, QStringLiteral("Delete Layers"));
             endEdit(); return;

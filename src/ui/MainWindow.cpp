@@ -27,6 +27,7 @@
 #include "ui/TrimDialog.h"
 #include "ui/NumericScrub.h"
 #include "ui/ShortcutManager.h"
+#include "ui/EditorStyle.h"
 #include "ui/KeyboardShortcutsDialog.h"
 #include "ui/InlineTextEditor.h"
 
@@ -76,6 +77,7 @@
 #include <QNetworkRequest>
 #include <QMessageBox>
 #include <QDrag>
+#include <QActionGroup>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QImageWriter>
@@ -93,6 +95,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QScreen>
 #include <QStandardPaths>
 #include <QStandardItemModel>
 #include <QStackedWidget>
@@ -125,7 +128,16 @@ static inline void initCompositorResources()
 
 namespace compositor {
 
+static bool refusePaint(const EditorSession &session, QWidget *anchor);
+
 namespace {
+// A font size `factor` times `font`'s, in points: text that follows the system font (and the user's chosen size).
+double scaledPoints(const QFont &font, double factor)
+{
+    const double base = font.pointSizeF() > 0 ? font.pointSizeF() : (font.pixelSize() > 0 ? font.pixelSize() * 0.75 : 10.0);
+    return std::max(6.0, base * factor);
+}
+
 
 enum class TextEditCommand { Undo, Redo, Cut, Copy, Paste, SelectAll, Delete, DeleteWordBackward, DeleteToBeginning };
 
@@ -292,14 +304,38 @@ int runFloatingDialog(QDialog &dialog)
     QVector<QPair<QAction *, bool>> actionStates;
     QVector<QPair<QWidget *, bool>> widgetStates;
     if (window) {
-        for (QAction *action : window->findChildren<QAction *>()) { actionStates.push_back(qMakePair(action, action->isEnabled())); action->setEnabled(false); }
+        for (QAction *action : window->findChildren<QAction *>()) {
+            if (action->property("availableWhileEditing").toBool()) continue;
+            actionStates.push_back(qMakePair(action, action->isEnabled())); action->setEnabled(false);
+        }
         for (const QString &name : {QStringLiteral("tabBar"), QStringLiteral("transformBar"), QStringLiteral("toolRail"), QStringLiteral("inspector")}) if (QWidget *widget = window->findChild<QWidget *>(name)) { widgetStates.push_back(qMakePair(widget, widget->isEnabled())); widget->setEnabled(false); }
     }
     dialog.setWindowModality(Qt::NonModal);
+    // Opens beside the canvas, at the window's right edge, not over the picture being edited, and comes back where the
+    // person last put it (mac FloatingPanel). The same width for all of them, so their controls line up.
+    static QHash<QString, QPoint> rememberedPositions;
+    const QString positionKey = dialog.objectName().isEmpty() ? QString::fromLatin1(dialog.metaObject()->className()) + dialog.windowTitle() : dialog.objectName();
+    if (window) {
+        dialog.setMinimumWidth(std::max(dialog.minimumWidth(), 360));
+        // A dialog that was given a size keeps it (Camera Raw); the rest take what their layout asks for.
+        QSize size = dialog.testAttribute(Qt::WA_Resized) ? dialog.size() : dialog.sizeHint().expandedTo(QSize(360, 0));
+        size.setHeight(std::min(size.height(), std::max(300, window->height() - 120)));
+        dialog.resize(size.expandedTo(dialog.minimumSize()));
+        // Wayland leaves placing windows to the compositor (a client cannot move its own), so the panel goes wherever it
+        // puts it, attached to the window; where windows can be placed (X11), beside the canvas or where it was left.
+        if (!QGuiApplication::platformName().startsWith(QLatin1String("wayland"))) {
+            QPoint position = rememberedPositions.value(positionKey, window->mapToGlobal(QPoint(window->width() - dialog.width() - 20, 110)));
+            const QRect bounds = window->frameGeometry();
+            position.setX(std::clamp(position.x(), bounds.left(), std::max(bounds.left(), bounds.right() - dialog.width())));
+            position.setY(std::clamp(position.y(), bounds.top(), std::max(bounds.top(), bounds.bottom() - dialog.height())));
+            dialog.move(position);
+        }
+    }
     dialog.show();
     QEventLoop loop;
     QObject::connect(&dialog, &QDialog::finished, &loop, &QEventLoop::quit);
     loop.exec();
+    if (window) rememberedPositions.insert(positionKey, dialog.pos());
     for (const auto &[widget, enabled] : widgetStates) widget->setEnabled(enabled);
     for (const auto &[action, enabled] : actionStates) action->setEnabled(enabled);
     if (canvas) canvas->setEditorInteractionBlocked(canvasWasBlocked);
@@ -320,84 +356,33 @@ QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, c
         }
     }
 
-    QDialog dialog(parent);
-    dialog.setObjectName(QStringLiteral("modernMessageDialog"));
-    dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    dialog.setAttribute(Qt::WA_TranslucentBackground);
-    dialog.setModal(true);
-
-    auto *outer = new QVBoxLayout(&dialog);
-    outer->setContentsMargins(12, 12, 12, 12);
-    auto *panel = new QWidget(&dialog);
-    panel->setObjectName(QStringLiteral("modernMessagePanel"));
-    panel->setMinimumWidth(460);
-    auto *layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(24, 22, 24, 20);
-    layout->setSpacing(0);
-
-    auto *heading = new QLabel(title, panel);
-    heading->setObjectName(QStringLiteral("modernMessageTitle"));
-    layout->addWidget(heading);
-    layout->addSpacing(18);
-    auto *message = new QLabel(text, panel);
-    message->setObjectName(QStringLiteral("modernMessageText"));
-    message->setWordWrap(true);
-    message->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout->addWidget(message);
-    if (!detail.isEmpty()) {
-        layout->addSpacing(9);
-        auto *supporting = new QLabel(detail, panel);
-        supporting->setObjectName(QStringLiteral("modernMessageDetail"));
-        supporting->setWordWrap(true);
-        supporting->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        layout->addWidget(supporting);
-    }
-    layout->addSpacing(22);
-
-    auto *actions = new QHBoxLayout;
-    actions->setSpacing(9);
-    const auto labelFor = [](QMessageBox::StandardButton button) {
-        switch (button) {
-        case QMessageBox::Save: return QObject::tr("Save");
-        case QMessageBox::Cancel: return QObject::tr("Cancel");
-        case QMessageBox::Discard: return QObject::tr("Don't Save");
-        case QMessageBox::Yes: return QObject::tr("Yes");
-        case QMessageBox::No: return QObject::tr("No");
-        case QMessageBox::Open: return QObject::tr("Open");
-        default: return QObject::tr("OK");
-        }
-    };
+    // A standard message box: a real window the desktop can move and read out, its icon saying what kind of message it
+    // is, and its buttons in the desktop's order (KDE and GNOME differ).
+    QMessageBox box(parent);
+    box.setObjectName(QStringLiteral("messageDialog"));
+    box.setWindowModality(Qt::WindowModal);
+    box.setWindowTitle(title);
+    box.setText(QStringLiteral("<b>%1</b>").arg(title.toHtmlEscaped()));
+    box.setInformativeText(detail.isEmpty() ? text.toHtmlEscaped() : QStringLiteral("%1<br><br>%2").arg(text.toHtmlEscaped(), detail.toHtmlEscaped()));
+    box.setTextFormat(Qt::RichText);
+    box.setTextInteractionFlags(Qt::TextSelectableByMouse);
+    const bool asks = buttons.testFlag(QMessageBox::Save) || buttons.testFlag(QMessageBox::Discard) || buttons.testFlag(QMessageBox::Yes)
+        || buttons.testFlag(QMessageBox::No) || buttons.testFlag(QMessageBox::Cancel);
+    box.setIcon(buttons.testFlag(QMessageBox::Discard) ? QMessageBox::Warning : asks ? QMessageBox::Question : QMessageBox::Information);
+    box.setStandardButtons(buttons);
+    if (QAbstractButton *discard = box.button(QMessageBox::Discard)) discard->setText(QObject::tr("Don't Save"));
     if (defaultButton == QMessageBox::NoButton) {
         if (buttons.testFlag(QMessageBox::Save)) defaultButton = QMessageBox::Save;
         else if (buttons.testFlag(QMessageBox::Open)) defaultButton = QMessageBox::Open;
         else if (buttons.testFlag(QMessageBox::Yes)) defaultButton = QMessageBox::Yes;
         else if (buttons.testFlag(QMessageBox::Ok)) defaultButton = QMessageBox::Ok;
     }
-    const auto addButton = [&](QMessageBox::StandardButton standard) {
-        auto *button = new QPushButton(labelFor(standard), panel);
-        button->setMinimumWidth(96);
-        button->setFixedHeight(34);
-        button->setProperty("dialogRole", standard == defaultButton ? QStringLiteral("primary")
-            : standard == QMessageBox::Discard ? QStringLiteral("destructive") : QStringLiteral("secondary"));
-        if (standard == defaultButton) { button->setDefault(true); button->setFocus(); }
-        QObject::connect(button, &QPushButton::clicked, &dialog, [&dialog, standard] { dialog.done(int(standard)); });
-        actions->addWidget(button);
-    };
-    if (buttons.testFlag(QMessageBox::Discard)) addButton(QMessageBox::Discard);
-    actions->addStretch();
-    if (buttons.testFlag(QMessageBox::No)) addButton(QMessageBox::No);
-    if (buttons.testFlag(QMessageBox::Cancel)) addButton(QMessageBox::Cancel);
-    if (buttons.testFlag(QMessageBox::Yes)) addButton(QMessageBox::Yes);
-    if (buttons.testFlag(QMessageBox::Ok)) addButton(QMessageBox::Ok);
-    if (buttons.testFlag(QMessageBox::Open)) addButton(QMessageBox::Open);
-    if (buttons.testFlag(QMessageBox::Save)) addButton(QMessageBox::Save);
-    layout->addLayout(actions);
-    outer->addWidget(panel);
-
-    const int result = dialog.exec();
-    if (result == QDialog::Rejected || result == QMessageBox::NoButton)
-        return buttons.testFlag(QMessageBox::Cancel) ? QMessageBox::Cancel : QMessageBox::NoButton;
-    return QMessageBox::StandardButton(result);
+    if (defaultButton != QMessageBox::NoButton) box.setDefaultButton(defaultButton);
+    if (buttons.testFlag(QMessageBox::Cancel)) box.setEscapeButton(QMessageBox::Cancel);
+    const int result = box.exec();
+    QAbstractButton *clicked = box.clickedButton();
+    if (!clicked) return buttons.testFlag(QMessageBox::Cancel) ? QMessageBox::Cancel : QMessageBox::NoButton;
+    return box.standardButton(clicked) == QMessageBox::NoButton ? QMessageBox::StandardButton(result) : box.standardButton(clicked);
 }
 
 // A named colored track (property "sliderTrack" on the field, e.g. "cyanRed", "spectrum:120") and the double-click reset
@@ -678,25 +663,34 @@ QIcon editorIcon(int kind)
     return QIcon(new EditorIconEngine(kind));
 }
 
-QIcon tabCloseIcon()
-{
-    QIcon icon;
-    const auto addPixmap = [&icon](const QColor &color, QIcon::Mode mode) {
-        QPixmap pixmap(24, 24);
-        pixmap.setDevicePixelRatio(2.0);
-        pixmap.fill(Qt::transparent);
-        QPainter painter(&pixmap);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(QPen(color, 1.25, Qt::SolidLine, Qt::RoundCap));
-        painter.drawLine(QPointF(3.75, 3.75), QPointF(8.25, 8.25));
-        painter.drawLine(QPointF(8.25, 3.75), QPointF(3.75, 8.25));
-        icon.addPixmap(pixmap, mode);
-    };
-    addPixmap(QColor(166, 168, 173), QIcon::Normal);
-    addPixmap(QColor(242, 243, 245), QIcon::Active);
-    addPixmap(QColor(112, 113, 117), QIcon::Disabled);
-    return icon;
-}
+// The tab's close cross, drawn when it is painted, in the theme's tones (so a theme switch carries it along).
+class TabCloseIconEngine final : public QIconEngine {
+public:
+    QIconEngine *clone() const override { return new TabCloseIconEngine; }
+    void paint(QPainter *painter, const QRect &rect, QIcon::Mode mode, QIcon::State) override
+    {
+        const QPalette palette = QGuiApplication::palette();
+        const QColor text = palette.color(QPalette::WindowText), window = palette.color(QPalette::Window);
+        const QColor color = mode == QIcon::Disabled ? palette.color(QPalette::Disabled, QPalette::WindowText)
+            : mode == QIcon::Active ? text : theme::mix(text, window, .3);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        const double unit = std::min(rect.width(), rect.height()) / 12.0;
+        painter->translate(QRectF(rect).center() - QPointF(6 * unit, 6 * unit));
+        painter->setPen(QPen(color, 1.25 * unit, Qt::SolidLine, Qt::RoundCap));
+        painter->drawLine(QPointF(3.75 * unit, 3.75 * unit), QPointF(8.25 * unit, 8.25 * unit));
+        painter->drawLine(QPointF(8.25 * unit, 3.75 * unit), QPointF(3.75 * unit, 8.25 * unit));
+        painter->restore();
+    }
+    QPixmap pixmap(const QSize &size, QIcon::Mode mode, QIcon::State state) override
+    {
+        QPixmap result(size); result.fill(Qt::transparent);
+        QPainter painter(&result); paint(&painter, QRect(QPoint(), size), mode, state);
+        return result;
+    }
+};
+
+QIcon tabCloseIcon() { return QIcon(new TabCloseIconEngine); }
 
 QWidget *createTabCloseButton(QWidget *parent)
 {
@@ -716,6 +710,23 @@ QWidget *createTabCloseButton(QWidget *parent)
     layout->addWidget(closeButton);
     return container;
 }
+
+// The Layers panel's row tones, from the palette, so rows read on a dark and a light scheme alike.
+struct LayerRowColors {
+    QColor selected, eyeOn, eyeOff, textOn, textOff, glyph, clip, thumb, frame, badge, text, maskBg, secondary, strong;
+    explicit LayerRowColors(const QPalette &palette)
+    {
+        const QColor W = palette.color(QPalette::Window), T = palette.color(QPalette::WindowText);
+        const bool dark = W.lightnessF() < .5;
+        selected = theme::mix(W, T, dark ? .16 : .11);
+        eyeOn = theme::mix(T, W, .2); eyeOff = theme::mix(T, W, .6);
+        textOn = theme::mix(T, W, .06); textOff = theme::mix(T, W, .45);
+        glyph = theme::mix(T, W, .22); secondary = theme::mix(T, W, .38);
+        clip = dark ? theme::mix(palette.color(QPalette::Highlight), Qt::white, .45) : palette.color(QPalette::Highlight).darker(110);
+        thumb = theme::mix(W, T, .115); frame = theme::mix(W, T, .3); maskBg = theme::mix(W, T, .095);
+        badge = W; text = T; strong = dark ? QColor(Qt::white) : QColor(Qt::black);
+    }
+};
 
 class LayerDelegate final : public QStyledItemDelegate {
 public:
@@ -749,23 +760,24 @@ public:
 
     void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
+        const LayerRowColors rc(option.palette);
         if (index.data(LayerListModel::IsEffectRole).toBool()) {
             p->save();
             const QRect r = option.rect;
-            if (option.state.testFlag(QStyle::State_Selected)) p->fillRect(r.adjusted(2, 1, -2, -1), QColor(64, 64, 64));
+            if (option.state.testFlag(QStyle::State_Selected)) p->fillRect(r.adjusted(2, 1, -2, -1), rc.selected);
             const bool checked = index.data(Qt::CheckStateRole).toInt() == Qt::Checked;
             const int depth = index.data(Qt::UserRole + 1).toInt();
             const int indent = std::min(depth, 8) * 18;
             const int eyeX = r.left() + 38 + indent;
 
             p->setRenderHint(QPainter::Antialiasing);
-            p->setPen(QPen(checked ? QColor(189, 195, 201) : QColor(102, 106, 111), 1.4));
+            p->setPen(QPen(checked ? rc.eyeOn : rc.eyeOff, 1.4));
             p->drawEllipse(QRectF(eyeX, r.center().y() - 4, 15, 8));
-            if (checked) { p->setBrush(QColor(189, 195, 201)); p->drawEllipse(QPointF(eyeX + 7.5, r.center().y()), 2.1, 2.1); }
+            if (checked) { p->setBrush(rc.eyeOn); p->drawEllipse(QPointF(eyeX + 7.5, r.center().y()), 2.1, 2.1); }
 
             const int textX = eyeX + 24;
-            p->setPen(checked ? QColor(220, 222, 226) : QColor(140, 143, 148));
-            QFont font = option.font; font.setPixelSize(11); p->setFont(font);
+            p->setPen(checked ? rc.textOn : rc.textOff);
+            QFont font = option.font; font.setPointSizeF(scaledPoints(option.font, .92)); p->setFont(font);
             p->drawText(QRect(textX, r.top(), r.right() - textX - 8, r.height()), Qt::AlignVCenter | Qt::AlignLeft, index.data().toString());
             p->restore();
             return;
@@ -773,12 +785,12 @@ public:
 
         p->save();
         const QRect r = option.rect;
-        if (option.state.testFlag(QStyle::State_Selected)) p->fillRect(r.adjusted(2, 1, -2, -1), QColor(64, 64, 64));
+        if (option.state.testFlag(QStyle::State_Selected)) p->fillRect(r.adjusted(2, 1, -2, -1), rc.selected);
         const bool checked = index.data(Qt::CheckStateRole).toInt() == Qt::Checked;
         p->setRenderHint(QPainter::Antialiasing);
-        p->setPen(QPen(checked ? QColor(189, 195, 201) : QColor(102, 106, 111), 1.4));
+        p->setPen(QPen(checked ? rc.eyeOn : rc.eyeOff, 1.4));
         p->drawEllipse(QRectF(r.left() + 9, r.center().y() - 4, 15, 8));
-        if (checked) { p->setBrush(QColor(189, 195, 201)); p->drawEllipse(QPointF(r.left() + 16.5, r.center().y()), 2.1, 2.1); }
+        if (checked) { p->setBrush(rc.eyeOn); p->drawEllipse(QPointF(r.left() + 16.5, r.center().y()), 2.1, 2.1); }
 
         const int depth = index.data(Qt::UserRole + 1).toInt();
         const bool clipped = index.data(Qt::UserRole + 4).toBool();
@@ -786,16 +798,16 @@ public:
         const int indent = std::min(depth, 8) * 18;
         const int thumbX = r.left() + 34 + indent;
         if (group) {
-            p->setPen(QColor(180, 184, 190));
+            p->setPen(rc.glyph);
             p->drawText(QRect(r.left() + 27 + indent, r.top(), 16, r.height()), Qt::AlignCenter,
                         index.data(Qt::UserRole + 5).toBool() ? QStringLiteral("⌄") : QStringLiteral("›"));
-        } else if (clipped) { p->setPen(QColor(145, 190, 235)); p->drawText(QRect(r.left() + 27 + indent, r.top(), 18, r.height()), Qt::AlignCenter, QStringLiteral("↳")); }
+        } else if (clipped) { p->setPen(rc.clip); p->drawText(QRect(r.left() + 27 + indent, r.top(), 18, r.height()), Qt::AlignCenter, QStringLiteral("↳")); }
         QRect thumb(thumbX, r.top() + 9, 36, 36);
-        p->fillRect(thumb, QColor(54, 55, 57));
+        p->fillRect(thumb, rc.thumb);
         const bool adjustmentLayer = index.data(Qt::UserRole).toString().startsWith(QObject::tr("Adjustment"));
         if (group || adjustmentLayer) {
             // Drawn here, in the same line style as the tool icons: system icon themes are missing or foreign-looking.
-            p->setPen(QPen(QColor(176, 180, 187), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p->setBrush(Qt::NoBrush);
+            p->setPen(QPen(rc.glyph, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p->setBrush(Qt::NoBrush);
             const QRectF box = QRectF(thumb).adjusted(8, 9, -8, -9);
             if (group) {
                 QPainterPath folder;
@@ -807,7 +819,7 @@ public:
                 const QPointF c = QRectF(thumb).center(); const double radius = 7.5;
                 p->drawEllipse(c, radius, radius);
                 QPainterPath half; half.moveTo(c.x(), c.y() - radius); half.arcTo(QRectF(c.x() - radius, c.y() - radius, radius * 2, radius * 2), 90, -180); half.closeSubpath();
-                p->setBrush(QColor(176, 180, 187)); p->drawPath(half);
+                p->setBrush(rc.glyph); p->drawPath(half);
             }
         } else {
             const QIcon icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
@@ -815,11 +827,11 @@ public:
         }
         // The eye above leaves a filled brush behind: the frames are outlines only, or they paint over the picture.
         p->setBrush(Qt::NoBrush);
-        p->setPen(QColor(92, 94, 98)); p->drawRect(thumb);
+        p->setPen(rc.frame); p->drawRect(thumb);
         if (index.data(Qt::UserRole + 20).toBool()) {   // editable text badge
             const QRect badge(thumb.right() - 11, thumb.bottom() - 11, 11, 11);
-            p->fillRect(badge, QColor(30, 30, 32)); p->setPen(QColor(235, 237, 240));
-            QFont badgeFont = option.font; badgeFont.setPixelSize(9); badgeFont.setBold(true); p->setFont(badgeFont);
+            p->fillRect(badge, rc.badge); p->setPen(rc.text);
+            QFont badgeFont = option.font; badgeFont.setPointSizeF(scaledPoints(option.font, .75)); badgeFont.setBold(true); p->setFont(badgeFont);
             p->drawText(badge, Qt::AlignCenter, QStringLiteral("T"));
         }
 
@@ -827,38 +839,38 @@ public:
         int textStart = thumb.right() + 10;
         if (!mask.isNull()) {
             QRect maskRect(thumb.right() + 6, r.top() + 9, 36, 36);
-            p->fillRect(maskRect, QColor(50, 50, 52));
+            p->fillRect(maskRect, rc.maskBg);
             p->drawImage(maskRect, mask);
             p->setBrush(Qt::NoBrush);
-            p->setPen(QColor(92, 94, 98)); p->drawRect(maskRect);
+            p->setPen(rc.frame); p->drawRect(maskRect);
             if (index.data(Qt::UserRole + 7).toBool()) { p->setPen(QPen(QColor(226, 80, 80), 2)); p->drawLine(maskRect.bottomLeft() + QPoint(2, -2), maskRect.topRight() + QPoint(-2, 2)); }
             if (index.data(Qt::UserRole + 8).toBool()) {
                 // The chain between the thumbnails while layer and mask are linked; empty (still clickable) once unlinked.
                 if (index.data(Qt::UserRole + 9).toBool()) {
-                    p->setPen(QPen(QColor(160, 164, 170), 1.2)); p->setBrush(Qt::NoBrush);
+                    p->setPen(QPen(rc.secondary, 1.2)); p->setBrush(Qt::NoBrush);
                     const QPointF c(thumb.right() + 3.5, thumb.center().y());
                     p->drawRoundedRect(QRectF(c.x() - 2, c.y() - 6, 4, 7), 2, 2);
                     p->drawRoundedRect(QRectF(c.x() - 2, c.y() - 1, 4, 7), 2, 2);
                 }
             }
-            if (index.data(Qt::UserRole + 6).toBool()) { p->setPen(QPen(Qt::white, 2)); p->setBrush(Qt::NoBrush); p->drawRect(maskRect.adjusted(1, 1, -1, -1)); }
+            if (index.data(Qt::UserRole + 6).toBool()) { p->setPen(QPen(rc.strong, 2)); p->setBrush(Qt::NoBrush); p->drawRect(maskRect.adjusted(1, 1, -1, -1)); }
             textStart = maskRect.right() + 8;
         }
 
         const int textX = textStart;
         const bool hasEffects = index.data(LayerListModel::HasEffectsRole).toBool();
         const int textRight = hasEffects ? r.right() - 36 : r.right() - 7;
-        p->setPen(QColor(235, 237, 240));
-        QFont mainFont = option.font; mainFont.setPixelSize(11); p->setFont(mainFont);
+        p->setPen(rc.text);
+        QFont mainFont = option.font; mainFont.setPointSizeF(scaledPoints(option.font, .92)); p->setFont(mainFont);
         p->drawText(QRect(textX, r.top() + 8, textRight - textX, 21), Qt::AlignVCenter | Qt::AlignLeft, index.data().toString());
-        p->setPen(QColor(145, 148, 153));
-        QFont smallFont = option.font; smallFont.setPixelSize(10); p->setFont(smallFont);
+        p->setPen(rc.secondary);
+        QFont smallFont = option.font; smallFont.setPointSizeF(scaledPoints(option.font, .83)); p->setFont(smallFont);
         p->drawText(QRect(textX, r.top() + 28, textRight - textX, 17), Qt::AlignVCenter | Qt::AlignLeft, index.data(Qt::UserRole).toString());
 
         if (hasEffects) {
             const bool expanded = index.data(LayerListModel::EffectsExpandedRole).toBool();
-            p->setPen(QColor(160, 164, 170));
-            QFont fxFont = option.font; fxFont.setPixelSize(10); p->setFont(fxFont);
+            p->setPen(rc.secondary);
+            QFont fxFont = option.font; fxFont.setPointSizeF(scaledPoints(option.font, .83)); p->setFont(fxFont);
             p->drawText(QRect(r.right() - 34, r.top() + 18, 30, 20), Qt::AlignCenter,
                         expanded ? QStringLiteral("fx ⌄") : QStringLiteral("fx ›"));
         }
@@ -935,7 +947,7 @@ public:
         layout->addWidget(title);
 
         auto *subtitle = new QLabel(QCoreApplication::translate("MainWindow", "Compositor will convert these Photoshop features. Nothing is applied until you continue."), this);
-        subtitle->setStyleSheet(QStringLiteral("color: #999;"));
+        subtitle->setObjectName(QStringLiteral("dialogSubtitle"));
         subtitle->setWordWrap(true);
         layout->addWidget(subtitle);
 
@@ -991,7 +1003,9 @@ MainWindow::MainWindow(QWidget *parent)
 {
     initCompositorResources();
     setAcceptDrops(true);
-    setMinimumSize(900, 590);
+    // Small enough for a 1366 x 768 laptop at 150% (about 910 x 512 points once the panels are in); the tool rail
+    // scrolls and the panels shrink below that.
+    setMinimumSize(760, 480);
     resize(1440, 860);
     setObjectName(QStringLiteral("editorWindow"));
 
@@ -1033,7 +1047,6 @@ MainWindow::MainWindow(QWidget *parent)
     // When the tabs don't all fit, a pill at the far left says how many are out of view and lists them all (mac 1faf7a0);
     // the selected tab is always scrolled into view. Dragging a tab reorders it (QTabBar is movable).
     tabOverflow_ = new QToolButton(tabBar); tabOverflow_->setObjectName(QStringLiteral("tabOverflow")); tabOverflow_->setPopupMode(QToolButton::InstantPopup);
-    tabOverflow_->setStyleSheet(QStringLiteral("QToolButton{border:1px solid #4a4c50;border-radius:8px;padding:1px 8px;color:#c8cacd;}QToolButton::menu-indicator{image:none;}"));
     tabOverflow_->setMenu(new QMenu(tabOverflow_)); tabOverflow_->hide();
     tabLayout->insertWidget(0, tabOverflow_);
     auto *overflowTimer = new QTimer(this); overflowTimer->setInterval(400);
@@ -1074,6 +1087,14 @@ MainWindow::MainWindow(QWidget *parent)
     });
     auto *cloneAligned = new QCheckBox(tr("Aligned"), transformBar); cloneAligned->setChecked(true); cloneAligned->setVisible(false);
     auto *cloneSample = new SegmentedControl({tr("This Layer"), tr("All Layers")}, transformBar); cloneSample->setVisible(false);
+    // Options-bar stand-ins for the Alt gestures, for desktops that keep Alt-click and Alt-drag for moving windows.
+    auto *cloneSetSource = new QPushButton(tr("Set Source"), transformBar); cloneSetSource->setObjectName(QStringLiteral("cloneSetSource"));
+    cloneSetSource->setCheckable(true); cloneSetSource->setVisible(false);
+    cloneSetSource->setToolTip(tr("The next click sets where Clone Stamp copies from (the same as Alt-click)"));
+    auto *zoomDirection = new SegmentedControl({tr("Zoom In"), tr("Zoom Out")}, transformBar); zoomDirection->setObjectName(QStringLiteral("zoomDirection"));
+    zoomDirection->setVisible(false); zoomDirection->setToolTip(tr("What a click does; Alt does the other"));
+    auto *drawFromCenter = new QCheckBox(tr("From Center"), transformBar); drawFromCenter->setObjectName(QStringLiteral("drawFromCenter"));
+    drawFromCenter->setVisible(false); drawFromCenter->setToolTip(tr("Draw out from the point pressed (the same as holding Alt; Alt does the other)"));
     auto *healingMode = new SegmentedControl({tr("Content-Aware"), tr("Create Texture"), tr("Proximity Match")}, transformBar); healingMode->setVisible(false);
     auto *brushMode = new SegmentedControl({tr("Paint"), tr("Erase")}, transformBar); brushMode->setVisible(false);
     shapeRadiusField_ = numberField(transformBar, QStringLiteral("Radius"), 5000, &shapeRadiusLabel_, 1.0); shapeRadiusField_->setObjectName(QStringLiteral("shapeRadius")); shapeRadiusField_->setRange(0, 5000); shapeRadiusField_->setVisible(false);
@@ -1226,6 +1247,9 @@ MainWindow::MainWindow(QWidget *parent)
                                brushOpacityLabel_, brushOpacityField_, blurRadiusLabel_, blurRadiusField_, brushSmoothingLabel_, brushSmoothingField_});
     transformLayout->addGroup({cloneAligned});
     transformLayout->addGroup({cloneSample});
+    transformLayout->addGroup({cloneSetSource});
+    transformLayout->addGroup({zoomDirection});
+    transformLayout->addGroup({drawFromCenter});
     // On a layer mask the brush paints black (hide) or white (reveal): the foreground swatch's two choices.
     auto *maskPaint = new SegmentedControl({tr("Black · Hide"), tr("White · Reveal")}, transformBar);
     maskPaint->setObjectName(QStringLiteral("maskPaintControl")); maskPaint->setVisible(false);
@@ -1285,12 +1309,19 @@ MainWindow::MainWindow(QWidget *parent)
 
     auto *rail = new QWidget(workspace); rail->setObjectName(QStringLiteral("toolRail")); rail->setFixedWidth(52);
     auto *railLayout = new QVBoxLayout(rail); railLayout->setContentsMargins(0, 10, 0, 9); railLayout->setSpacing(5);
+    // The tools scroll when the window is too short to show them all (a large system font or display scaling on a small
+    // screen); the color swatches stay at the bottom.
+    auto *toolScroll = new QScrollArea(rail); toolScroll->setObjectName(QStringLiteral("toolRailScroll"));
+    toolScroll->setFrameShape(QFrame::NoFrame); toolScroll->setWidgetResizable(true);
+    toolScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); toolScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    auto *toolHost = new QWidget(toolScroll); toolHost->setObjectName(QStringLiteral("toolRailTools"));
+    auto *toolLayout = new QVBoxLayout(toolHost); toolLayout->setContentsMargins(0, 0, 0, 0); toolLayout->setSpacing(5);
     const std::array<const char *, 15> tips = {"Move", "Marquee", "Lasso", "Magic Wand", "Crop", "Brush", "Healing", "Clone Stamp", "Blur", "Gradient", "Shape", "Text", "Eyedropper", "Hand", "Zoom"};
     const std::array<int, 15> iconKinds = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 11, 12, 23};
     QVector<QToolButton *> toolButtons;
     for (int i = 0; i < int(tips.size()); ++i) {
-        if (i == 5 || i == 12) railLayout->addSpacing(4);
-        auto *button = toolButton(rail, iconKinds[size_t(i)], tr(tips[size_t(i)]), i == 0);
+        if (i == 5 || i == 12) toolLayout->addSpacing(4);
+        auto *button = toolButton(toolHost, iconKinds[size_t(i)], tr(tips[size_t(i)]), i == 0);
         toolButtons.push_back(button);
         connect(button, &QToolButton::clicked, this, [this, i] {
             const CanvasWidget::Tool tool = i == 0 ? CanvasWidget::Tool::Move : i == 1 ? CanvasWidget::Tool::Marquee
@@ -1304,12 +1335,27 @@ MainWindow::MainWindow(QWidget *parent)
                 canvas_->setTool(tool);
             }
         });
-        railLayout->addWidget(button, 0, Qt::AlignHCenter);
+        toolLayout->addWidget(button, 0, Qt::AlignHCenter);
     }
-    railLayout->addStretch();
+    toolLayout->addStretch();
+    toolScroll->setWidget(toolHost);
+    railLayout->addWidget(toolScroll, 1);
+    // Each tool's tooltip names its key, as it is set now in Keyboard Shortcuts ("Brush (B)").
+    const auto refreshToolTips = [toolButtons, tips] {
+        static const std::array<const char *, 15> commands = {"Move / Transform tool", "Marquee / cycle shape", "Lasso / cycle mode", "Magic",
+            "Crop tool", "Brush tool", "Spot Healing", "Clone Stamp", "Blur / Smudge / Liquify", "Gradient tool", "Shape tool", "Type tool",
+            "Eyedropper tool", "Hand tool", "Zoom tool"};
+        for (int i = 0; i < int(toolButtons.size()); ++i) {
+            const QKeySequence key = ShortcutManager::instance().shortcut(QStringLiteral("Canvas & Layers:") + QLatin1String(commands[size_t(i)]));
+            const QString name = tr(tips[size_t(i)]);
+            toolButtons[i]->setToolTip(key.isEmpty() ? name : tr("%1 (%2)").arg(name, key.toString(QKeySequence::NativeText)));
+        }
+    };
+    refreshToolTips();
+    connect(&ShortcutManager::instance(), &ShortcutManager::shortcutsChanged, this, refreshToolTips);
     auto *colors = new QWidget(rail); colors->setFixedSize(42, 48);
-    foregroundSwatch_ = new QLabel(colors); foregroundSwatch_->setGeometry(4, 3, 22, 22); foregroundSwatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid white;border-radius:4px;"));
-    backgroundSwatch_ = new QLabel(colors); backgroundSwatch_->setGeometry(16, 17, 22, 22); backgroundSwatch_->setStyleSheet(QStringLiteral("background:#ffffff;border:1px solid white;border-radius:4px;"));
+    foregroundSwatch_ = new QLabel(colors); foregroundSwatch_->setGeometry(4, 3, 22, 22); foregroundSwatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid #8c8c8c;border-radius:4px;"));
+    backgroundSwatch_ = new QLabel(colors); backgroundSwatch_->setGeometry(16, 17, 22, 22); backgroundSwatch_->setStyleSheet(QStringLiteral("background:#ffffff;border:1px solid #8c8c8c;border-radius:4px;"));
     foregroundSwatch_->setObjectName(QStringLiteral("foregroundSwatch"));
     backgroundSwatch_->setObjectName(QStringLiteral("backgroundSwatch"));
     foregroundSwatch_->installEventFilter(this); backgroundSwatch_->installEventFilter(this);
@@ -1366,6 +1412,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(shapeRadius, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeCornerRadius);
     connect(shapeLineWidth, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeLineWidth);
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
+    connect(canvas_, &CanvasWidget::brushTipDragged, this, [this](double diameter, double hardness) {
+        brushSizeField_->setValue(diameter); brushHardnessField_->setValue(hardness * 100.0);
+    });
     connect(brushHardnessField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         brushHardness_ = value / 100.0;
         canvas_->setBrushTip(brushHardness_, brushOpacity_);
@@ -1398,6 +1447,10 @@ MainWindow::MainWindow(QWidget *parent)
         shapeLineWidthLabel_->setVisible(isShape && kind == ShapeKind::Line);
     });
     connect(marqueeKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setMarqueeElliptical(index == 1); });
+    connect(cloneSetSource, &QPushButton::toggled, canvas_, &CanvasWidget::setCloneSourcePickArmed);
+    connect(canvas_, &CanvasWidget::cloneSourcePickChanged, cloneSetSource, [cloneSetSource](bool armed) { const QSignalBlocker blocker(cloneSetSource); cloneSetSource->setChecked(armed); });
+    connect(zoomDirection, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setZoomOutMode(index == 1); });
+    connect(drawFromCenter, &QCheckBox::toggled, canvas_, &CanvasWidget::setDrawFromCenter);
     connect(lassoKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setPolygonalLasso(index == 1); });
     connect(canvas_, &CanvasWidget::marqueeKindChanged, marqueeKind, [marqueeKind](bool elliptical) { marqueeKind->setCurrentIndex(elliptical ? 1 : 0); });
     connect(canvas_, &CanvasWidget::lassoKindChanged, lassoKind, [lassoKind](bool polygonal) { lassoKind->setCurrentIndex(polygonal ? 1 : 0); });
@@ -1474,6 +1527,10 @@ MainWindow::MainWindow(QWidget *parent)
         }
         smearMode->setVisible(tool == CanvasWidget::Tool::Blur);
         cloneAligned->setVisible(tool == CanvasWidget::Tool::Clone); cloneSample->setVisible(tool == CanvasWidget::Tool::Clone);
+        if (auto *control = findChild<QPushButton *>(QStringLiteral("cloneSetSource"))) control->setVisible(tool == CanvasWidget::Tool::Clone);
+        if (auto *control = findChild<SegmentedControl *>(QStringLiteral("zoomDirection"))) control->setVisible(tool == CanvasWidget::Tool::Zoom);
+        if (auto *control = findChild<QCheckBox *>(QStringLiteral("drawFromCenter"))) control->setVisible(tool == CanvasWidget::Tool::Shape || tool == CanvasWidget::Tool::Crop);
+        if (tool != CanvasWidget::Tool::Clone) canvas_->setCloneSourcePickArmed(false);
         healingMode->setVisible(tool == CanvasWidget::Tool::Healing);
         shapeKind->setVisible(tool == CanvasWidget::Tool::Shape);
         const bool shapeRect = (tool == CanvasWidget::Tool::Shape && canvas_->shapeKind() == ShapeKind::Rectangle);
@@ -1598,6 +1655,11 @@ MainWindow::MainWindow(QWidget *parent)
     auto *openStart = new QPushButton(tr("Open project"), startPanel); auto *importStart = new QPushButton(tr("Import image"), startPanel);
     auto *createStart = new QPushButton(tr("Create canvas"), startPanel); createStart->setObjectName(QStringLiteral("createCanvas"));
     startButtons->addWidget(openStart); startButtons->addWidget(importStart); startButtons->addStretch(); startButtons->addWidget(createStart); startLayout->addLayout(startButtons);
+    // The projects opened most recently, one click away (filled in by rebuildOpenRecentMenu; hidden when there are none).
+    auto *startRecent = new QWidget(startPanel); startRecent->setObjectName(QStringLiteral("startRecent"));
+    auto *startRecentLayout = new QVBoxLayout(startRecent); startRecentLayout->setContentsMargins(0, 12, 0, 0); startRecentLayout->setSpacing(2);
+    startLayout->addWidget(startRecent);
+    startRecent->setVisible(false);
     startOuter->addWidget(startPanel, 0, Qt::AlignHCenter); startOuter->addStretch();
     canvasStack_->addWidget(startPage); canvasStack_->addWidget(canvas_); canvasStack_->setCurrentWidget(startPage);
     connect(createStart, &QPushButton::clicked, this, [this] {
@@ -2098,6 +2160,10 @@ MainWindow::MainWindow(QWidget *parent)
         if (transformOriginalDocument_) finishPersistentTransform(true);
         canvas_->resolvePendingGradient(); canvas_->resolvePendingDistortion(); session_.selectLayer(id); syncDocumentViews(false);
     });
+    connect(canvas_, &CanvasWidget::layerSelectionExtendRequested, this, [this](const QUuid &id) {
+        if (transformOriginalDocument_) finishPersistentTransform(true);
+        canvas_->resolvePendingGradient(); canvas_->resolvePendingDistortion(); session_.extendSelection(id); syncDocumentViews(false);
+    });
     connect(canvas_, &CanvasWidget::rectangularSelectionRequested, this, [this](const QRect &rect, int mode) {
         session_.setRectangularSelection(rect, SelectionMode(mode)); syncDocumentViews(false);
     });
@@ -2131,13 +2197,10 @@ MainWindow::MainWindow(QWidget *parent)
         session_.setViewportZoom(z);
     });
     // A stroke the document refuses says why, as Photoshop does, instead of silently doing nothing.
-    const auto explainRefusal = [this] {
-        const QString reason = session_.paintRefusal();
-        if (reason.isEmpty()) return;
-        QToolTip::showText(QCursor::pos(), reason, canvas_, QRect(), 5000);
-    };
+    // True (having said why) when the active layer can't take paint; the stroke then never starts.
+    const auto explainRefusal = [this] { return refusePaint(session_, canvas_); };
     connect(canvas_, &CanvasWidget::brushStrokeStarted, this, [this, explainRefusal](const QPointF &point, bool erasing) {
-        explainRefusal();
+        if (explainRefusal()) return;
         session_.setViewportZoom(canvas_->zoom());
         session_.setBrushSmoothing(brushSmoothing_);
         session_.beginBrushStroke(point, session_.paletteColor(false), brushDiameter_, brushHardness_, brushOpacity_, erasing);
@@ -2156,7 +2219,7 @@ MainWindow::MainWindow(QWidget *parent)
         session_.setCloneSource(point); canvas_->setCloneSource(point);
     });
     connect(canvas_, &CanvasWidget::cloneStrokeStarted, this, [this,cloneAligned,cloneSample,explainRefusal](const QPointF &point) {
-        explainRefusal();
+        if (explainRefusal()) return;
         if (session_.beginCloneStroke(point, brushDiameter_, brushHardness_, brushOpacity_, cloneAligned->isChecked(), cloneSample->currentIndex() == 1)) {
             const auto offset = cloneAligned->isChecked() ? session_.cloneOffset()
                 : std::optional<QPointF>(*session_.cloneSource() - point);
@@ -2169,11 +2232,11 @@ MainWindow::MainWindow(QWidget *parent)
         canvas_->setCloneTracking(session_.cloneSource(), session_.cloneOffset());
     });
     connect(canvas_, &CanvasWidget::healingStrokeStarted, this, [this,healingMode,explainRefusal](const QPointF &point) {
-        explainRefusal();
+        if (explainRefusal()) return;
         session_.beginHealingStroke(point, brushDiameter_, brushHardness_, brushOpacity_, healingMode->currentIndex(), QRandomGenerator::global()->generate()); canvas_->invalidateDocument();
     });
     connect(canvas_, &CanvasWidget::blurStrokeStarted, this, [this, smearMode, explainRefusal](const QPointF &point) {
-        explainRefusal();
+        if (explainRefusal()) return;
         if (smearMode->currentIndex() == 1) session_.beginBlurStroke(point, brushDiameter_, brushHardness_, brushOpacity_, blurRadius_);
         else session_.beginWarpStroke(point, smearMode->currentIndex() == 0 ? 0 : 1, brushDiameter_, brushHardness_, brushOpacity_);
         canvas_->invalidateDocument();
@@ -2184,7 +2247,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::cycleSmearModeRequested, this, &MainWindow::cycleSmearMode);
     connect(canvas_, &CanvasWidget::cycleToolModeRequested, this, &MainWindow::cycleToolMode);
     connect(canvas_, &CanvasWidget::gradientRequested, this, [this,gradientShape,gradientStyle,gradientReverse,explainRefusal](const QPointF &start, const QPointF &end) {
-        explainRefusal();
+        if (explainRefusal()) { canvas_->resolvePendingGradient(false); return; }
         previewGradient(start, end, gradientShape->currentIndex() == 1, gradientStyle->currentIndex() == 0,
                         gradientReverse->isChecked(), gradientOpacityField_->value() / 100.0);
     });
@@ -2598,7 +2661,7 @@ void MainWindow::refreshPaletteSwatches()
     if (!foregroundSwatch_ || !backgroundSwatch_) return;
     const QColor fg = session_.paletteColor(false), bg = session_.paletteColor(true);
     const auto paint = [](QLabel *swatch, const QColor &color) {
-        swatch->setStyleSheet(QStringLiteral("background:%1;border:1px solid white;border-radius:4px;").arg(color.name(QColor::HexRgb)));
+        swatch->setStyleSheet(QStringLiteral("background:%1;border:1px solid #8c8c8c;border-radius:4px;").arg(color.name(QColor::HexRgb)));
     };
     // Only a change of colour redraws a pending gradient: syncing the document views calls this too.
     const bool changed = foregroundSwatch_->property("shownColor").value<QColor>() != fg
@@ -2689,6 +2752,16 @@ void MainWindow::openColorPicker(bool background)
     });
     picker->show();
     if (colorPickerPosition_) picker->move(*colorPickerPosition_);
+}
+
+// When the active layer can't take paint, says why beside the pointer, as Photoshop does, and reports it refused
+// (mac brushError = paintRefusal).
+static bool refusePaint(const EditorSession &session, QWidget *anchor)
+{
+    if (session.canPaint()) return false;
+    const QString reason = session.paintRefusal();
+    if (!reason.isEmpty()) QToolTip::showText(QCursor::pos(), reason, anchor, QRect(), 5000);
+    return true;
 }
 
 void MainWindow::createActions()
@@ -2782,16 +2855,17 @@ void MainWindow::createActions()
     auto *fill = edit->addAction(tr("Fill…")); fill->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F5));
     connect(fill, &QAction::triggered, this, [this] {
         const QColor color = QColorDialog::getColor(QColor(22, 134, 232), this, tr("Fill Color"), QColorDialog::ShowAlphaChannel);
+        if (refusePaint(session_, canvas_)) return;
         if (color.isValid() && session_.fillSelection(color)) syncDocumentViews();
     });
     auto *fillForeground = new QAction(tr("Fill with Foreground Color"), this); fillForeground->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Backspace));
     auto *fillBackground = new QAction(tr("Fill with Background Color"), this); fillBackground->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Backspace));
-    connect(fillForeground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteWordBackward)) return; if (session_.fillSelection(session_.isMaskSelected() ? QColor(Qt::black) : session_.foregroundColor())) syncDocumentViews(); });
-    connect(fillBackground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteToBeginning)) return; if (session_.fillSelection(session_.isMaskSelected() ? QColor(Qt::white) : session_.backgroundColor())) syncDocumentViews(); });
+    connect(fillForeground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteWordBackward)) return; if (refusePaint(session_, canvas_)) return; if (session_.fillSelection(session_.paletteColor(false))) syncDocumentViews(); });
+    connect(fillBackground, &QAction::triggered, this, [this] { if (dispatchTextEditCommand(TextEditCommand::DeleteToBeginning)) return; if (refusePaint(session_, canvas_)) return; if (session_.fillSelection(session_.paletteColor(true))) syncDocumentViews(); });
     edit->addAction(fillForeground);
     edit->addAction(fillBackground);
     auto *clearPixels = edit->addAction(tr("Clear Selection Pixels"));
-    connect(clearPixels, &QAction::triggered, this, [this] { if (session_.clearSelectedPixels()) syncDocumentViews(); });
+    connect(clearPixels, &QAction::triggered, this, [this] { if (refusePaint(session_, canvas_)) return; if (session_.clearSelectedPixels()) syncDocumentViews(); });
     auto *transformSelection = edit->addAction(tr("Free Transform"));
     transformSelection->setObjectName(QStringLiteral("commandTransform"));
     transformSelection->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
@@ -2854,6 +2928,8 @@ void MainWindow::createActions()
     auto *linkMask = maskMenu->addAction(tr("Link/Unlink from Layer"));
     auto *invertMask = maskMenu->addAction(tr("Invert Mask"));
     auto *loadMask = maskMenu->addAction(tr("Load as Selection"));
+    // The mask by itself on the canvas, as Alt-clicking its thumbnail shows it.
+    auto *viewMaskAlone = maskMenu->addAction(tr("View Mask Alone")); viewMaskAlone->setObjectName(QStringLiteral("commandViewMaskAlone"));
     auto *deleteMask = maskMenu->addAction(tr("Delete Mask"));
     connect(revealMask, &QAction::triggered, this, [this] { if (session_.addLayerMask(true, false)) syncDocumentViews(); });
     connect(hideMask, &QAction::triggered, this, [this] { if (session_.addLayerMask(false, false)) syncDocumentViews(); });
@@ -2864,6 +2940,14 @@ void MainWindow::createActions()
     connect(invertMask, &QAction::triggered, this, [this] { if (session_.invertLayerMask()) syncDocumentViews(); });
     connect(loadMask, &QAction::triggered, this, [this] { if (session_.loadMaskAsSelection()) syncDocumentViews(false); });
     connect(deleteMask, &QAction::triggered, this, [this] { if (session_.deleteLayerMask()) syncDocumentViews(); });
+    connect(viewMaskAlone, &QAction::triggered, this, [this] {
+        const Layer *layer = session_.activeLayer();
+        if (!layer || layer->mask.isNull()) return;
+        session_.toggleMaskAlone(layer->id);
+        layerModel_->setMaskAlone(session_.maskAloneLayerId());
+        syncDocumentViews(false);
+        canvas_->invalidateDocument(); canvas_->update();
+    });
     auto *adjustments = new QMenu(tr("New Adjustment Layer"), this);
     adjustments->menuAction()->setObjectName(QStringLiteral("commandNewAdjustment"));
     auto rebuildAdjustmentsMenu = [this, adjustments] {
@@ -3156,6 +3240,21 @@ void MainWindow::createActions()
     });
 
     auto *view = menuBar()->addMenu(tr("&View"));
+    // The editor's dark (default) or light scheme, or the desktop's own, followed as it changes. Remembered.
+    auto *themeMenu = view->addMenu(tr("&Theme"));
+    themeMenu->menuAction()->setObjectName(QStringLiteral("commandTheme"));
+    auto *themeGroup = new QActionGroup(themeMenu);
+    for (const auto &[mode, label, name] : {std::tuple{ThemeMode::Dark, tr("&Dark"), QStringLiteral("themeDark")},
+                                            std::tuple{ThemeMode::Light, tr("&Light"), QStringLiteral("themeLight")},
+                                            std::tuple{ThemeMode::System, tr("Follow &System"), QStringLiteral("themeSystem")}}) {
+        QAction *choice = themeMenu->addAction(label);
+        choice->setObjectName(name);
+        choice->setCheckable(true);
+        choice->setChecked(currentThemeMode() == mode);
+        themeGroup->addAction(choice);
+        connect(choice, &QAction::triggered, this, [this, mode] { setEditorThemeMode(mode); canvas_->update(); });
+    }
+    view->addSeparator();
     auto *showMenuBar = view->addAction(tr("Show Menu Bar"));
     showMenuBar->setObjectName(QStringLiteral("showMenuBar"));
     showMenuBar->setCheckable(true);
@@ -3180,6 +3279,8 @@ void MainWindow::createActions()
     auto *zoomOut = view->addAction(tr("Zoom Out"));
     zoomOut->setShortcut(QKeySequence::ZoomOut);
     connect(zoomOut, &QAction::triggered, canvas_, &CanvasWidget::zoomOut);
+    // Zooming stays available while an adjustment's panel is open, to look closely at what it does.
+    for (QAction *viewing : {fit, actual, zoomIn, zoomOut}) viewing->setProperty("availableWhileEditing", true);
     view->addSeparator();
     auto *pixelGrid = view->addAction(tr("Pixel Grid (800% and above)"));
     pixelGrid->setCheckable(true);
@@ -3329,8 +3430,16 @@ void MainWindow::createActions()
     }
 
     auto *help = menuBar()->addMenu(tr("&Help"));
-    connect(help->addAction(tr("Check for Updates…")), &QAction::triggered, this, &MainWindow::checkForUpdates);
-    connect(help->addAction(tr("About CompositorLX")), &QAction::triggered, this, &MainWindow::showAbout);
+    // The shortcut list (also under Edit), where to report a problem, updates, and who made what.
+    connect(help->addAction(tr("&Keyboard Shortcuts…")), &QAction::triggered, this, &MainWindow::keyboardShortcutsDialog);
+    connect(help->addAction(tr("&Report a Problem…")), &QAction::triggered, this, [] {
+        QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ClaudiuJitea/compositorLX/issues")));
+    });
+    help->addSeparator();
+    connect(help->addAction(tr("Check for &Updates…")), &QAction::triggered, this, &MainWindow::checkForUpdates);
+    help->addSeparator();
+    connect(help->addAction(tr("&About CompositorLX")), &QAction::triggered, this, &MainWindow::showAbout);
+    connect(help->addAction(tr("About &Qt")), &QAction::triggered, qApp, &QApplication::aboutQt);
 
     addAction(newAction); addAction(open); addAction(importAction); addAction(save); addAction(saveAs); addAction(exportAction); addAction(exportJpegAction); addAction(closeProject); addAction(undo); addAction(redo);
     addAction(cut); addAction(copy); addAction(copyMerged); addAction(paste);
@@ -3481,7 +3590,13 @@ void MainWindow::copyPixels(bool merged)
     const auto copied = session_.copiedPixels(merged);
     if (!copied) return;
     clipboardImage_ = copied->first; clipboardOrigin_ = copied->second;
-    QGuiApplication::clipboard()->setImage(clipboardImage_);
+    // The picture for other apps, and where it came from for Paste here: an image another app (or a clipboard manager)
+    // puts on the clipboard carries no origin and is centered (mac PixelClipboard.changeCount).
+    auto *mime = new QMimeData;
+    mime->setImageData(clipboardImage_);
+    mime->setData(QStringLiteral("application/x-compositor-pixel-origin"),
+                  QByteArray::number(clipboardOrigin_.x()) + ',' + QByteArray::number(clipboardOrigin_.y()));
+    QGuiApplication::clipboard()->setMimeData(mime);
     statusHint_->setText(merged ? tr("Copied merged pixels") : tr("Copied pixels"));
 }
 
@@ -3498,11 +3613,14 @@ void MainWindow::pastePixels()
     if (pasteWholeLayers()) return;
     const QImage image = QGuiApplication::clipboard()->image();
     if (image.isNull()) return;
-    const bool ours = !clipboardImage_.isNull() && image == clipboardImage_;
-    QPointF origin;
-    if (ours) origin = clipboardOrigin_;
-    else origin = QPointF(std::floor((document_->canvasSize.width() - image.width()) / 2.0),
-                          std::floor((document_->canvasSize.height() - image.height()) / 2.0));
+    QPointF origin(std::floor((document_->canvasSize.width() - image.width()) / 2.0),
+                   std::floor((document_->canvasSize.height() - image.height()) / 2.0));
+    if (const QMimeData *mime = QGuiApplication::clipboard()->mimeData(); mime && mime->hasFormat(QStringLiteral("application/x-compositor-pixel-origin"))) {
+        const QList<QByteArray> parts = mime->data(QStringLiteral("application/x-compositor-pixel-origin")).split(',');
+        bool okX = false, okY = false;
+        const int x = parts.value(0).toInt(&okX), y = parts.value(1).toInt(&okY);
+        if (okX && okY && std::abs(x) <= 1000000 && std::abs(y) <= 1000000) origin = QPointF(x, y);
+    }
     if (session_.insertPixelLayer(image, origin, QString(), QStringLiteral("Paste"))) syncDocumentViews();
 }
 
@@ -3691,7 +3809,7 @@ void MainWindow::colorRangeDialog()
     replaceTool->setChecked(true);
     replaceTool->setObjectName(QStringLiteral("colorRangeSample")); addTool->setObjectName(QStringLiteral("colorRangeAdd")); removeTool->setObjectName(QStringLiteral("colorRangeRemove"));
     tools->addStretch(); layout->addLayout(tools);
-    auto *preview = new QLabel(&dialog); preview->setAlignment(Qt::AlignCenter); preview->setStyleSheet(QStringLiteral("background:black;border:1px solid #444;"));
+    auto *preview = new QLabel(&dialog); preview->setAlignment(Qt::AlignCenter); preview->setObjectName(QStringLiteral("imagePreview"));
     const QSizeF fit = QSizeF(sample.size()).scaled(QSizeF(292, 200), Qt::KeepAspectRatio);
     preview->setFixedSize(fit.toSize().expandedTo(QSize(1, 1)));
     layout->addWidget(preview, 0, Qt::AlignHCenter);
@@ -3714,7 +3832,7 @@ void MainWindow::colorRangeDialog()
         for (int y = 0; y < mask.height() && !any; ++y) { const uchar *row = mask.constScanLine(y); for (int x = 0; x < mask.width(); ++x) if (row[x]) { any = true; break; } }
         session_.previewSelection(any ? std::optional<QImage>(mask) : std::nullopt);
         preview->setPixmap(QPixmap::fromImage(mask.scaled(preview->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation)));
-        hint->setText(tr("Shift-click adds a color, Option/Alt-click takes one away."));
+        hint->setText(tr("Shift-click adds a color, Alt-click takes one away."));
         canvas_->update();
     };
     connect(fuzz, &QSlider::valueChanged, &dialog, [&](int value) { const QSignalBlocker b(fuzzValue); fuzzValue->setValue(value); refresh(); });
@@ -4993,7 +5111,11 @@ void MainWindow::removeBackgroundDialog()
     description->setWordWrap(true); layout->addWidget(description);
     auto *form = new QFormLayout; auto *quality = new QComboBox(&dialog); quality->addItems({tr("Basic"), tr("Advanced")});
     auto field = [&dialog](double low, double high, double value, const QString &suffix) { auto *box = new QDoubleSpinBox(&dialog); box->setRange(low, high); box->setValue(value); box->setDecimals(0); box->setSuffix(suffix); return box; };
-    auto *refine = field(0, 40, 0, tr(" px")); auto *contrast = field(0, 100, 0, tr(" %")); auto *shift = field(-10, 10, 0, tr(" px"));
+    // macOS FilterSettings: Refine 12 and Contrast 25 to start, then whatever the panel last committed in this document.
+    auto *refine = field(0, 40, 12, tr(" px")); auto *contrast = field(0, 100, 25, tr(" %")); auto *shift = field(-10, 10, 0, tr(" px"));
+    rememberFilter(session_, dialog, false, QStringLiteral("removeBackground"), {{QStringLiteral("refine"), refine}, {QStringLiteral("contrast"), contrast}, {QStringLiteral("shift"), shift}});
+    quality->setCurrentIndex(session_.filterMemory.value(QStringLiteral("removeBackground.quality"), 0).toInt() == 1 ? 1 : 0);
+    connect(&dialog, &QDialog::accepted, &dialog, [this, quality] { session_.filterMemory.insert(QStringLiteral("removeBackground.quality"), quality->currentIndex()); });
     form->addRow(tr("Quality"), quality); form->addRow(tr("Refine"), refine); form->addRow(tr("Contrast"), contrast); form->addRow(tr("Shift Edge"), shift); layout->addLayout(form);
     auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog); previewEnabled->setChecked(true); layout->addWidget(previewEnabled);
     const auto settings = [=] { return SubjectRemovalSettings{quality->currentIndex() == 1, refine->value(), contrast->value(), shift->value()}; };
@@ -5013,7 +5135,7 @@ void MainWindow::removeBackgroundDialog()
     connect(contrast, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
     connect(shift, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
     connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
-    qualityChanged(0);
+    qualityChanged(quality->currentIndex());
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
     if (runFloatingDialog(dialog) == QDialog::Accepted) { restore(); session_.removeBackground(settings(), detected.first); }
@@ -5510,19 +5632,34 @@ void MainWindow::clearRecentProjects()
 
 void MainWindow::rebuildOpenRecentMenu()
 {
-    if (!openRecentMenu_) return;
-    openRecentMenu_->clear();
     const QStringList paths = existingRecentProjects();
-    for (const QString &path : paths) {
-        QAction *item = openRecentMenu_->addAction(QFileInfo(path).completeBaseName());
-        item->setToolTip(path);
-        connect(item, &QAction::triggered, this, [this, path] { openProject(path); });
+    if (openRecentMenu_) {
+        openRecentMenu_->clear();
+        for (const QString &path : paths) {
+            QAction *item = openRecentMenu_->addAction(QFileInfo(path).completeBaseName());
+            item->setToolTip(path);
+            connect(item, &QAction::triggered, this, [this, path] { openProject(path); });
+        }
+        openRecentMenu_->addSeparator();
+        QAction *clear = openRecentMenu_->addAction(tr("Clear Menu"));
+        clear->setObjectName(QStringLiteral("commandClearRecent"));
+        clear->setEnabled(!paths.isEmpty());
+        connect(clear, &QAction::triggered, this, &MainWindow::clearRecentProjects);
     }
-    openRecentMenu_->addSeparator();
-    QAction *clear = openRecentMenu_->addAction(tr("Clear Menu"));
-    clear->setObjectName(QStringLiteral("commandClearRecent"));
-    clear->setEnabled(!paths.isEmpty());
-    connect(clear, &QAction::triggered, this, &MainWindow::clearRecentProjects);
+    if (auto *area = findChild<QWidget *>(QStringLiteral("startRecent"))) {
+        auto *layout = static_cast<QVBoxLayout *>(area->layout());
+        while (QLayoutItem *item = layout->takeAt(0)) { delete item->widget(); delete item; }
+        auto *heading = new QLabel(tr("Recent projects"), area); heading->setObjectName(QStringLiteral("emptyStateHint"));
+        layout->addWidget(heading);
+        for (const QString &path : paths.mid(0, 6)) {
+            auto *entry = new QPushButton(QFileInfo(path).completeBaseName(), area);
+            entry->setObjectName(QStringLiteral("recentProjectEntry")); entry->setFlat(true); entry->setToolTip(path);
+            entry->setAccessibleDescription(path);
+            connect(entry, &QPushButton::clicked, this, [this, path] { openProject(path); });
+            layout->addWidget(entry);
+        }
+        area->setVisible(!paths.isEmpty());
+    }
 }
 
 QStringList MainWindow::recentProjects() const
@@ -6279,7 +6416,9 @@ void MainWindow::offerRecovery()
 
 void MainWindow::chooseProject()
 {
-    const QString path = QFileDialog::getExistingDirectory(this, tr("Open Compositor Project"), {},
+    // A project is a folder ending in .comp: the dialog picks that folder (or, navigated into it, the folder itself).
+    const QString path = QFileDialog::getExistingDirectory(this, tr("Open Project — Choose a .comp Folder"),
+                                                            existingRecentProjects().isEmpty() ? QString() : QFileInfo(existingRecentProjects().constFirst()).absolutePath(),
                                                             QFileDialog::ShowDirsOnly);
     if (!path.isEmpty()) openProject(path);
 }
@@ -6311,7 +6450,7 @@ void MainWindow::exportPng(bool jpegDefault)
         zoomRow->addWidget(zoomTitle); zoomRow->addStretch(); zoomRow->addWidget(fitButton); zoomRow->addWidget(zoomInButton); zoomRow->addWidget(zoomOutButton);
         layout->addLayout(zoomRow);
         auto *preview = new QScrollArea(&dialog); preview->setObjectName(QStringLiteral("jpegPreview")); preview->setFixedSize(560, 330);
-        preview->setAlignment(Qt::AlignCenter); preview->setStyleSheet(QStringLiteral("background:#1e2024;")); layout->addWidget(preview);
+        preview->setAlignment(Qt::AlignCenter);  layout->addWidget(preview);
         auto *picture = new QLabel; picture->setScaledContents(true); picture->setStyleSheet(QStringLiteral("background:transparent;")); preview->setWidget(picture);
         std::optional<double> zoom;   // nullopt fits the whole image
         QImage previewImage; QPoint dragFrom; bool dragging = false;
@@ -6403,8 +6542,12 @@ void MainWindow::exportPng(bool jpegDefault)
     statusBar()->showMessage(tr("Exported %1").arg(QFileInfo(path).fileName()), 6000);
 }
 
-bool MainWindow::openProject(const QString &path)
+bool MainWindow::openProject(const QString &requestedPath)
 {
+    // A project's manifest.json (from a file manager's Open With, a drop or the command line) opens its project: a .comp
+    // is a folder, which file managers browse into rather than open.
+    const QString path = QFileInfo(requestedPath).fileName() == QLatin1String("manifest.json") && QFileInfo(requestedPath).isFile()
+        ? QFileInfo(requestedPath).absolutePath() : requestedPath;
     cancelActiveSelectionTask();
     // A recent project deleted since: name the project, not the manifest inside it that the load would miss (mac
     // ProjectController.open).
@@ -6651,10 +6794,10 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
     for (Layer &layer : copied) {
         if (!layer.maskSourceId || included.contains(*layer.maskSourceId)) continue;
         if (layer.image.isNull() || !layer.adjustment.isEmpty()) { layer.maskSourceId.reset(); continue; }
-        layer.image = LayerRenderer::bakeLiveMask(sourceSnapshot, layer);
-        layer.transform.origin = {}; layer.transform.size = sourceSnapshot.canvasSize; layer.transform.rotation = 0;
-        layer.transform.flipX = layer.transform.flipY = false;
-        layer.mask = {}; layer.maskPlacement.reset(); layer.maskSourceId.reset();
+        // Baked in the layer's own grid: its transform, raster mask and effects come along unchanged.
+        const QImage baked = LayerRenderer::bakeLiveMask(sourceSnapshot, layer);
+        if (!baked.isNull()) { layer.image = baked; layer.text.reset(); layer.shape = {}; layer.shapeStyle.reset(); }
+        layer.maskSourceId.reset();
     }
 
     if (newTab) {
@@ -7062,9 +7205,18 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
 
 void MainWindow::showAbout()
 {
-    showMessage(this, tr("About CompositorLX"),
-                tr("CompositorLX %1").arg(QCoreApplication::applicationVersion()),
-                tr("Linux port of Compositor · Qt 6 Widgets + C++20"));
+    // Version, license, and the work it builds on, with links (the parts that ship under licenses of their own).
+    QMessageBox::about(this, tr("About CompositorLX"), tr(
+        "<h3>CompositorLX %1</h3>"
+        "<p>A layer-based image editor for Linux: the Qt port of "
+        "<a href=\"https://github.com/robbietilton/Compositor\">Compositor</a> by Robbie Tilton.</p>"
+        "<p>Released under the MIT License. "
+        "<a href=\"https://github.com/ClaudiuJitea/compositorLX\">Source code and releases</a></p>"
+        "<p><b>Built with</b><br>"
+        "Qt %2 (LGPL-3.0)<br>"
+        "ONNX Runtime (MIT) and the U²-Net model (Apache-2.0) for Remove Background and Select Subject<br>"
+        "LibRaw (LGPL-2.1 / CDDL-1.0) for camera RAW files</p>")
+        .arg(QCoreApplication::applicationVersion(), QString::fromLatin1(qVersion())));
 }
 
 void MainWindow::checkForUpdates()
@@ -7142,12 +7294,13 @@ bool MainWindow::receiveFiles(const QStringList &paths, const std::optional<QPoi
             showMessage(this, tr("Could Not Open File"), tr("“%1” could not be found.").arg(QFileInfo(path).fileName()));
             continue;
         }
-        if (path.endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive) || (QFileInfo(path).isDir() && QFileInfo(path).fileName().endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive))) projects << path;
+        if (QFileInfo(path).fileName() == QLatin1String("manifest.json") && QFileInfo(path).absolutePath().endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive)) projects << QFileInfo(path).absolutePath();
+        else if (path.endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive) || (QFileInfo(path).isDir() && QFileInfo(path).fileName().endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive))) projects << path;
         else if (QFileInfo(path).isFile()) others << path;
         else if (QFileInfo(path).isDir()) projects << path;
     }
     if (projects.size() > 1) {
-        showMessage(this, tr("Open one project at a time"), tr("This is not a valid Compositor project, or its metadata is damaged."));
+        showMessage(this, tr("Open one project at a time"), tr("Several projects were given. Open them one after another; each opens in its own tab."));
         return false;
     }
     bool handled = false;
@@ -7157,6 +7310,16 @@ bool MainWindow::receiveFiles(const QStringList &paths, const std::optional<QPoi
     }
     if (!others.isEmpty()) handled = importImageFiles(others, projects.isEmpty() ? point : std::nullopt) || handled;
     return handled;
+}
+
+void MainWindow::restoreWindowState()
+{
+    if (ToolDefaults::enabled() && restoreGeometry(QSettings().value(QStringLiteral("ui/windowGeometry")).toByteArray())) return;
+    if (const QScreen *screen = this->screen()) {
+        const QRect available = screen->availableGeometry();
+        resize(QSize(1440, 860).boundedTo(available.size() * 0.9).expandedTo(minimumSize()));
+        move(available.center() - rect().center());
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -7182,6 +7345,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         const QString root = QDir(recoveryDirectory()).absolutePath() + QLatin1Char('/');
         if (QFileInfo(path).isDir() && QFileInfo(path).absoluteFilePath().startsWith(root)) QDir(path).removeRecursively();
     }
+    if (ToolDefaults::enabled()) QSettings().setValue(QStringLiteral("ui/windowGeometry"), saveGeometry());
     event->accept();
 }
 

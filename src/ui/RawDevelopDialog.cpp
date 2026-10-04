@@ -2,6 +2,7 @@
 #include "ui/NumericScrub.h"
 #include "io/RawImporter.h"
 
+#include <QDialogButtonBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
@@ -45,7 +46,7 @@ RawDevelopDialog::RawDevelopDialog(QWidget *parent, const QString &filePath)
     previewLabel_ = new QLabel(this);
     previewLabel_->setMinimumSize(560, 320);
     previewLabel_->setAlignment(Qt::AlignCenter);
-    previewLabel_->setStyleSheet(QStringLiteral("background-color: #222222; border-radius: 6px;"));
+    previewLabel_->setObjectName(QStringLiteral("imagePreview"));   // its well comes from the theme
     mainLayout->addWidget(previewLabel_, 1);
 
     auto *formLayout = new QFormLayout();
@@ -104,24 +105,17 @@ RawDevelopDialog::RawDevelopDialog(QWidget *parent, const QString &filePath)
 
     mainLayout->addLayout(formLayout);
 
-    auto *buttonLayout = new QHBoxLayout();
-    resetButton_ = new QPushButton(tr("Reset"), this);
+    // The desktop's button order: Reset at the side, Import as the dialog's default.
+    auto *buttons = new QDialogButtonBox(this);
+    resetButton_ = buttons->addButton(QDialogButtonBox::Reset);
     resetButton_->setEnabled(!settings_.isAsShot());
     connect(resetButton_, &QPushButton::clicked, this, &RawDevelopDialog::onResetClicked);
-    buttonLayout->addWidget(resetButton_);
-
-    buttonLayout->addStretch();
-
-    cancelButton_ = new QPushButton(tr("Cancel"), this);
+    cancelButton_ = buttons->addButton(QDialogButtonBox::Cancel);
     connect(cancelButton_, &QPushButton::clicked, this, &QDialog::reject);
-    buttonLayout->addWidget(cancelButton_);
-
-    importButton_ = new QPushButton(tr("Import"), this);
+    importButton_ = buttons->addButton(tr("Import"), QDialogButtonBox::AcceptRole);
     importButton_->setDefault(true);
     connect(importButton_, &QPushButton::clicked, this, &RawDevelopDialog::onImportClicked);
-    buttonLayout->addWidget(importButton_);
-
-    mainLayout->addLayout(buttonLayout);
+    mainLayout->addWidget(buttons);
 
     startNextPreviewJob();
 }

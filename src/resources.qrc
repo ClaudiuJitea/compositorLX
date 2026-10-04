@@ -3,6 +3,9 @@
     <file alias="chevron-up.svg">icons/chevron-up.svg</file>
     <file alias="chevron-down.svg">icons/chevron-down.svg</file>
     <file alias="check.svg">icons/check.svg</file>
+    <file alias="chevron-up-dark.svg">icons/chevron-up-dark.svg</file>
+    <file alias="chevron-down-dark.svg">icons/chevron-down-dark.svg</file>
     <file alias="compositor-lx.png">../packaging/icons/compositor-lx-256.png</file>
+    <file alias="compositor-lx.svg">../packaging/icons/compositor-lx.svg</file>
   </qresource>
 </RCC>

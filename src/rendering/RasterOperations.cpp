@@ -691,26 +691,76 @@ QImage RasterOperations::featherMask(const QImage &image, double amount)
     return result;
 }
 
+namespace {
+QImage transposed(const QImage &image)
+{
+    QImage result(image.height(), image.width(), image.format());
+    for (int y = 0; y < image.height(); ++y) {
+        const quint32 *row = reinterpret_cast<const quint32 *>(image.constScanLine(y));
+        for (int x = 0; x < image.width(); ++x) reinterpret_cast<quint32 *>(result.scanLine(x))[y] = row[x];
+    }
+    return result;
+}
+
+// An even streak `reach` pixels either side along a line of `slope` rows per column (|slope| <= 1): every pixel takes
+// the average of the 2 * reach + 1 pixels on that line around it, those past the image counting as transparent. The
+// image is sheared so each line runs along one row, then averaged with running sums: constant work per pixel however
+// long the streak.
+QImage horizontalStreak(const QImage &source, double slope, int reach)
+{
+    const int width = source.width(), height = source.height();
+    QImage result(source.size(), source.format());
+    result.fill(Qt::transparent);
+    if (width < 1 || height < 1) return result;
+    std::vector<int> shift(static_cast<size_t>(width));
+    int lowest = 0, highest = 0;
+    for (int u = 0; u < width; ++u) {
+        shift[size_t(u)] = int(std::lround(slope * u));
+        lowest = std::min(lowest, shift[size_t(u)]); highest = std::max(highest, shift[size_t(u)]);
+    }
+    const double divisor = 2.0 * reach + 1;
+    std::vector<qint64> prefix(size_t(width + 1) * 4);
+    // Sheared row r holds the pixels (u, r + shift(u)); every output pixel lies on exactly one of them.
+    for (int r = -highest; r < height - lowest; ++r) {
+        bool any = false;
+        for (int u = 0; u < width; ++u) {
+            const int v = r + shift[size_t(u)];
+            qint64 *next = prefix.data() + size_t(u + 1) * 4;
+            const qint64 *previous = next - 4;
+            if (v < 0 || v >= height) { for (int c = 0; c < 4; ++c) next[c] = previous[c]; continue; }
+            const uchar *pixel = source.constScanLine(v) + u * 4;
+            for (int c = 0; c < 4; ++c) next[c] = previous[c] + pixel[c];
+            any = true;
+        }
+        if (!any) continue;
+        for (int u = 0; u < width; ++u) {
+            const int v = r + shift[size_t(u)];
+            if (v < 0 || v >= height) continue;
+            const qint64 *high = prefix.data() + size_t(std::min(width, u + reach + 1)) * 4;
+            const qint64 *low = prefix.data() + size_t(std::max(0, u - reach)) * 4;
+            uchar *out = result.scanLine(v) + u * 4;
+            for (int c = 0; c < 4; ++c) out[c] = uchar(std::clamp(int(std::lround(double(high[c] - low[c]) / divisor)), 0, 255));
+        }
+    }
+    return result;
+}
+} // namespace
+
 QImage RasterOperations::motionBlur(const QImage &image, double angleDegrees, double distance)
 {
     const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (!std::isfinite(angleDegrees) || !std::isfinite(distance) || distance <= 0) return source;
     angleDegrees = std::clamp(angleDegrees, -90.0, 90.0); distance = std::clamp(distance, 1.0, 2000.0);
-    QImage result(source.size(), source.format()); result.fill(Qt::transparent);
+    // Photoshop smears evenly along the whole distance, counterclockwise from horizontal (y runs down here).
     const double radians = angleDegrees * 3.14159265358979323846 / 180.0;
     const double dx = std::cos(radians), dy = -std::sin(radians);
-    const int samples = std::max(2, int(std::ceil(distance)) + 1);
-    for (int y = 0; y < source.height(); ++y) for (int x = 0; x < source.width(); ++x) {
-        double channels[4]{};
-        for (int sample = 0; sample < samples; ++sample) {
-            const double offset = (double(sample) / (samples - 1) - .5) * distance;
-            const int sx = qRound(x + dx * offset), sy = qRound(y + dy * offset);
-            if (sx < 0 || sx >= source.width() || sy < 0 || sy >= source.height()) continue;
-            const uchar *pixel = source.constScanLine(sy) + sx * 4; for (int c = 0; c < 4; ++c) channels[c] += pixel[c];
-        }
-        uchar *out = result.scanLine(y) + x * 4; for (int c = 0; c < 4; ++c) out[c] = uchar(std::clamp(qRound(channels[c] / samples), 0, 255));
-    }
-    return result;
+    // Walked along whichever axis the streak leans to, one pixel per step on that axis.
+    const bool horizontal = std::abs(dx) >= std::abs(dy);
+    const double major = horizontal ? dx : dy, minor = horizontal ? dy : dx;
+    const int reach = std::max(0, int(std::lround(distance * std::abs(major) / 2)));
+    const double slope = major == 0 ? 0 : minor / major;
+    if (horizontal) return horizontalStreak(source, slope, reach);
+    return transposed(horizontalStreak(transposed(source), slope, reach));
 }
 
 std::optional<QImage> RasterOperations::contentAwareFill(const QImage &image, const QImage &coverage)

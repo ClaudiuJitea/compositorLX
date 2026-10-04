@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "ui/CanvasRulerWidget.h"
 #include "ui/CanvasWidget.h"
 
@@ -78,7 +79,8 @@ void CanvasRulerWidget::paintEvent(QPaintEvent *event)
     if (minor <= 0.0) return;
 
     QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    font.setPixelSize(8);
+    // Small but legible, following the system font's size (and its scaling).
+    font.setPointSizeF(std::max(7.0, (font.pointSizeF() > 0 ? font.pointSizeF() : 10.0) * .72));
     painter.setFont(font);
 
     const QColor tickColor(158, 158, 158);

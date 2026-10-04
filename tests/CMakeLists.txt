@@ -139,3 +139,9 @@ add_test(NAME io_audit_tests COMMAND io_audit_tests -platform offscreen)
 add_executable(ui_snapshot ../tools/UiSnapshot.cpp)
 target_include_directories(ui_snapshot PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(ui_snapshot PRIVATE compositor_ui Qt6::Test)
+add_executable(ui_polish_tests
+    TestUiPolish.cpp
+)
+target_include_directories(ui_polish_tests PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(ui_polish_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME ui_polish_tests COMMAND ui_polish_tests -platform offscreen)

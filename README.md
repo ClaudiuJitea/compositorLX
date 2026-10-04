@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.4.0-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.4.5-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -22,6 +22,35 @@
 </p>
 
 CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v11), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
+
+## What's new in version 0.4.5
+
+A behaviour audit against the macOS app, followed by a pass to make CompositorLX feel native on Linux desktops.
+
+**Feels at home on Linux**
+- **Light, Dark or Follow System**: View › Theme. Dark is still the default; Follow System tracks the desktop's light/dark setting live (Qt 6.8+) and uses the system accent colour.
+- **System fonts**: the interface uses your desktop font and size instead of a fixed typeface, and scales with it.
+- **Native dialogs**: standard message boxes with the platform's button order ("Don't Save" / Cancel / Save) and dialog button rows that follow KDE and GNOME conventions.
+- **Wayland friendly**: floating panels are placed by the compositor; the main window remembers its size (and position on X11).
+- **HiDPI**: the canvas picks its resolution and smoothing from the real device scale, so it stays sharp at 150% and 200%; the pixel grid stays one device pixel wide; the tool rail scrolls on short screens and the minimum window size is now 760×480.
+- **Desktop integration**: theme icon support, `StartupWMClass` for correct taskbar grouping, RAW and compressed-SVG file associations, richer AppStream metadata.
+
+**Alternatives to Alt gestures** (many desktops keep Alt-drag for moving windows)
+- **Hold a tool key** to use that tool for a moment; let go to return to the previous one. A quick tap still switches.
+- Clone Stamp **Set Source** button, Zoom tool **Zoom In / Zoom Out** toggle, and a **From Center** checkbox for shapes and crop. Alt still works and inverts each one.
+- Layer › Layer Mask › **View Mask Alone**.
+
+**Workflow**
+- **Recent projects** on the start page; opening or dropping a project's `manifest.json` opens the whole project.
+- **Help menu**: Keyboard Shortcuts, Report a Problem, Check for Updates, About CompositorLX and About Qt.
+- **Shortcut editor**: tooltips show each tool's key; the editor refuses keys the desktop reserves (Super combos, Ctrl+Alt+T/L/Del, Ctrl+Alt+F-keys) and keeps Ctrl+Q for Quit and Ctrl+, for Preferences.
+
+**Behaviour fixes from the macOS audit**
+- Painting refuses hidden or locked targets with a clear reason; brushes, erase, heal, blur and warp grow the layer instead of clipping at its edge.
+- Live masks bake correctly on moved and scaled layers; motion blur matches the macOS result at any angle.
+- Right-drag sets the brush size and hardness, Shift locks moves to an axis, the canvas auto-scrolls while dragging past its edge, Alt-drag duplicates folders, Ctrl+Shift-click adds a layer's pixels to the selection.
+- Merge, flip and copy keep masks, clipping and effects in place; clipping releases correctly over sibling layers.
+- Large audit-driven parity work: layer, selection, paint, text, filter, Camera Raw, PSD and IO behaviour ported from the macOS test suites (17 automated test suites).
 
 ## What's new in version 0.4.0
 
@@ -86,8 +115,9 @@ Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Spa
 - **Image Trim**: trim transparent borders or sample edge colors
 - Multiple projects in tabs, with cross-tab layer copy and recovery
 - Crop with snapping and Alt symmetry, plus Canvas Size and Image Size
-- **Expanded format support**: native `.comp` (v1–v9 compatibility), Adobe Photoshop `.psd`, vector `.svg` / `.svgz`, Camera RAW, PNG, JPEG, TIFF, and HEIC/HEIF
-- **Customizable keyboard shortcuts** dialog with searchable actions
+- **Expanded format support**: native `.comp` (v1–v11 compatibility), Adobe Photoshop `.psd`, vector `.svg` / `.svgz`, Camera RAW, PNG, JPEG, TIFF, and HEIC/HEIF
+- **Customizable keyboard shortcuts** dialog with searchable actions and desktop-conflict checks
+- Light, dark and follow-system themes using the system font and accent colour
 - External file change detection, conflict warning, and atomic crash-resilient saving
 
 ## Install
@@ -95,14 +125,14 @@ Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Spa
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.4.0-x86_64.AppImage
-./CompositorLX-0.4.0-x86_64.AppImage
+chmod +x CompositorLX-0.4.5-x86_64.AppImage
+./CompositorLX-0.4.5-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.4.0_amd64.deb
+sudo apt install ./compositorlx_0.4.5_amd64.deb
 compositor-lx
 ```
 
@@ -143,10 +173,10 @@ cmake --install build --prefix "$HOME/.local"
 | Path | What it is |
 | --- | --- |
 | `src/core` | Document, history, camera RAW, image trim, and editor commands |
-| `src/io` | `.comp` v1–v9 reader/writer, PSD, SVG, and RAW importers, export |
+| `src/io` | `.comp` v1–v11 reader/writer, PSD, SVG, and RAW importers, export |
 | `src/rendering` | Compositing, layer effects, caches, filters, local subject removal |
 | `src/ui` | Qt Widgets editor, canvas, rulers, layer effects, shortcuts, tools |
-| `tests/` | Automated test suite for project format, camera raw, and vector import |
+| `tests/` | Automated test suites: project format, camera raw, SVG/PSD import, layers, selections, paint, filters, text, IO and UI |
 | `packaging/` | Desktop entry, AppStream metadata, icons, package script |
 | `vendor/compositor-rendering/` | Shared pixel kernels from the macOS editor |
 | `vendor/libraw/` | LibRaw headers for RAW digital camera photo import |
@@ -155,6 +185,7 @@ The original macOS app remains the behavior and file-format reference. Linux-spe
 
 ## Version history
 
+- **v0.4.5**: Native Linux polish (light/dark/system themes, system fonts, native dialogs, Wayland and HiDPI fixes, Alt-gesture alternatives, recent projects, Help menu) and macOS behaviour-parity fixes with broad test coverage.
 - **v0.4.0**: Sync with macOS Compositor 1.4.5 (format v10/v11, per-letter text, Color Range, Dither, Grid Settings, painting tool fixes, Photoshop-accurate curves and saturation).
 - **v0.3.1**: Fix autosave conflict dialog and recovery path handling for untitled projects.
 - **v0.3.0**: Camera RAW development pipeline via LibRaw, layer effects & styles, vector shapes, PSD/SVG import, canvas rulers & guides, inline WYSIWYG text, project format v9, and automated test suite.

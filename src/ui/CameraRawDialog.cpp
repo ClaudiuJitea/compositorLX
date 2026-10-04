@@ -32,7 +32,8 @@ ScopeWidget::ScopeWidget(QWidget *parent)
     : QWidget(parent)
 {
     setFixedHeight(110);
-    setStyleSheet(QStringLiteral("background-color: #1e1e1e; border-radius: 4px;"));
+    setObjectName(QStringLiteral("cameraRawHistogram"));   // its well comes from the theme
+    setAttribute(Qt::WA_StyledBackground, true);
 
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
@@ -41,8 +42,8 @@ ScopeWidget::ScopeWidget(QWidget *parent)
     shadowClipBtn_->setFixedSize(18, 18);
     shadowClipBtn_->setCheckable(true);
     shadowClipBtn_->setToolTip(tr("Show clipped shadows in blue on the preview."));
-    shadowClipBtn_->setStyleSheet(QStringLiteral("QPushButton { color: #888; background: transparent; border: none; font-size: 10px; } "
-                                                 "QPushButton:checked { color: #3388ff; }"));
+    shadowClipBtn_->setObjectName(QStringLiteral("clippingShadows"));
+    shadowClipBtn_->setAccessibleName(tr("Show clipped shadows"));
     connect(shadowClipBtn_, &QPushButton::toggled, this, &ScopeWidget::shadowClippingToggled);
     layout->addWidget(shadowClipBtn_, 0, Qt::AlignTop | Qt::AlignLeft);
 
@@ -52,8 +53,8 @@ ScopeWidget::ScopeWidget(QWidget *parent)
     highlightClipBtn_->setFixedSize(18, 18);
     highlightClipBtn_->setCheckable(true);
     highlightClipBtn_->setToolTip(tr("Show clipped highlights in red on the preview."));
-    highlightClipBtn_->setStyleSheet(QStringLiteral("QPushButton { color: #888; background: transparent; border: none; font-size: 10px; } "
-                                                    "QPushButton:checked { color: #ff3333; }"));
+    highlightClipBtn_->setObjectName(QStringLiteral("clippingHighlights"));
+    highlightClipBtn_->setAccessibleName(tr("Show clipped highlights"));
     connect(highlightClipBtn_, &QPushButton::toggled, this, &ScopeWidget::highlightClippingToggled);
     layout->addWidget(highlightClipBtn_, 0, Qt::AlignTop | Qt::AlignRight);
 }
