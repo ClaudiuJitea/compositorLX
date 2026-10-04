@@ -80,6 +80,7 @@
 #include <QActionGroup>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QWindow>
 #include <QImageWriter>
 #include <QItemSelectionModel>
 #include <QJsonArray>
@@ -347,7 +348,8 @@ static std::function<std::optional<QMessageBox::StandardButton>(const QString &t
 QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, const QString &text,
                                         const QString &detail = QString(),
                                         QMessageBox::StandardButtons buttons = QMessageBox::Ok,
-                                        QMessageBox::StandardButton defaultButton = QMessageBox::NoButton)
+                                        QMessageBox::StandardButton defaultButton = QMessageBox::NoButton,
+                                        const QHash<int, QString> &labels = {})
 {
     if (sMessageDialogHook) {
         auto simulated = sMessageDialogHook(title, text);
@@ -356,33 +358,88 @@ QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, c
         }
     }
 
-    // A standard message box: a real window the desktop can move and read out, its icon saying what kind of message it
-    // is, and its buttons in the desktop's order (KDE and GNOME differ).
-    QMessageBox box(parent);
-    box.setObjectName(QStringLiteral("messageDialog"));
-    box.setWindowModality(Qt::WindowModal);
-    box.setWindowTitle(title);
-    box.setText(QStringLiteral("<b>%1</b>").arg(title.toHtmlEscaped()));
-    box.setInformativeText(detail.isEmpty() ? text.toHtmlEscaped() : QStringLiteral("%1<br><br>%2").arg(text.toHtmlEscaped(), detail.toHtmlEscaped()));
-    box.setTextFormat(Qt::RichText);
-    box.setTextInteractionFlags(Qt::TextSelectableByMouse);
-    const bool asks = buttons.testFlag(QMessageBox::Save) || buttons.testFlag(QMessageBox::Discard) || buttons.testFlag(QMessageBox::Yes)
-        || buttons.testFlag(QMessageBox::No) || buttons.testFlag(QMessageBox::Cancel);
-    box.setIcon(buttons.testFlag(QMessageBox::Discard) ? QMessageBox::Warning : asks ? QMessageBox::Question : QMessageBox::Information);
-    box.setStandardButtons(buttons);
-    if (QAbstractButton *discard = box.button(QMessageBox::Discard)) discard->setText(QObject::tr("Don't Save"));
+    // A rounded panel in the editor's own look (light or dark from the palette tokens), with the buttons in the
+    // desktop's order (QDialogButtonBox follows KDE or GNOME), Escape for Cancel, and a drag anywhere on the panel to
+    // move it (startSystemMove also works on Wayland, where a frameless window cannot move itself).
+    class MessagePanel : public QDialog {
+    public:
+        using QDialog::QDialog;
+    protected:
+        void mousePressEvent(QMouseEvent *event) override
+        {
+            if (event->button() == Qt::LeftButton && windowHandle() && windowHandle()->startSystemMove()) { event->accept(); return; }
+            QDialog::mousePressEvent(event);
+        }
+    };
+    MessagePanel dialog(parent);
+    dialog.setObjectName(QStringLiteral("messageDialog"));
+    dialog.setWindowTitle(title);
+    dialog.setAccessibleName(title);
+    dialog.setAccessibleDescription(detail.isEmpty() ? text : text + QLatin1Char('\n') + detail);
+    dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    dialog.setAttribute(Qt::WA_TranslucentBackground);
+    dialog.setModal(true);
+
+    auto *outer = new QVBoxLayout(&dialog);
+    outer->setContentsMargins(10, 10, 10, 10);
+    auto *panel = new QWidget(&dialog);
+    panel->setObjectName(QStringLiteral("messagePanel"));
+    panel->setAttribute(Qt::WA_StyledBackground);
+    panel->setMinimumWidth(440);
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(22, 20, 22, 18);
+    layout->setSpacing(0);
+
+    auto *heading = new QLabel(title, panel);
+    heading->setObjectName(QStringLiteral("messageTitle"));
+    heading->setWordWrap(true);
+    layout->addWidget(heading);
+    layout->addSpacing(12);
+    auto *message = new QLabel(text, panel);
+    message->setObjectName(QStringLiteral("messageText"));
+    message->setWordWrap(true);
+    message->setTextFormat(Qt::PlainText);
+    message->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(message);
+    if (!detail.isEmpty()) {
+        layout->addSpacing(8);
+        auto *supporting = new QLabel(detail, panel);
+        supporting->setObjectName(QStringLiteral("messageDetail"));
+        supporting->setWordWrap(true);
+        supporting->setTextFormat(Qt::PlainText);
+        supporting->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        layout->addWidget(supporting);
+    }
+    layout->addSpacing(20);
+
     if (defaultButton == QMessageBox::NoButton) {
         if (buttons.testFlag(QMessageBox::Save)) defaultButton = QMessageBox::Save;
         else if (buttons.testFlag(QMessageBox::Open)) defaultButton = QMessageBox::Open;
         else if (buttons.testFlag(QMessageBox::Yes)) defaultButton = QMessageBox::Yes;
         else if (buttons.testFlag(QMessageBox::Ok)) defaultButton = QMessageBox::Ok;
     }
-    if (defaultButton != QMessageBox::NoButton) box.setDefaultButton(defaultButton);
-    if (buttons.testFlag(QMessageBox::Cancel)) box.setEscapeButton(QMessageBox::Cancel);
-    const int result = box.exec();
-    QAbstractButton *clicked = box.clickedButton();
-    if (!clicked) return buttons.testFlag(QMessageBox::Cancel) ? QMessageBox::Cancel : QMessageBox::NoButton;
-    return box.standardButton(clicked) == QMessageBox::NoButton ? QMessageBox::StandardButton(result) : box.standardButton(clicked);
+    auto *box = new QDialogButtonBox(QDialogButtonBox::StandardButtons(int(buttons)), panel);
+    box->setObjectName(QStringLiteral("messageButtons"));
+    for (QAbstractButton *button : box->buttons()) {
+        const auto standard = QMessageBox::StandardButton(int(box->standardButton(button)));
+        if (standard == QMessageBox::Discard) { button->setText(QObject::tr("Don't Save")); button->setProperty("dialogRole", QStringLiteral("destructive")); }
+        if (standard == defaultButton) button->setProperty("dialogRole", QStringLiteral("primary"));
+        if (labels.contains(int(standard))) button->setText(labels.value(int(standard)));
+        button->setMinimumWidth(92);
+        if (auto *push = qobject_cast<QPushButton *>(button)) {
+            push->setAutoDefault(false);
+            if (standard == defaultButton) { push->setDefault(true); push->setFocus(); }
+        }
+        button->style()->unpolish(button); button->style()->polish(button);   // the role is set after the box made it
+        QObject::connect(button, &QAbstractButton::clicked, &dialog, [&dialog, standard] { dialog.done(int(standard)); });
+    }
+    layout->addWidget(box);
+    outer->addWidget(panel);
+
+    const int result = dialog.exec();
+    if (result == QDialog::Rejected || result == QMessageBox::NoButton)
+        return buttons.testFlag(QMessageBox::Cancel) ? QMessageBox::Cancel : QMessageBox::NoButton;
+    return QMessageBox::StandardButton(result);
 }
 
 // A named colored track (property "sliderTrack" on the field, e.g. "cyanRed", "spectrum:120") and the double-click reset
@@ -7256,11 +7313,11 @@ void MainWindow::deleteLayersWithMaskChoice()
         session_.deleteLayerMask(); syncDocumentViews(); return;
     }
     if (session_.selectedDeletionLiveMaskDependents().isEmpty()) { session_.deleteSelectedLayers(); syncDocumentViews(); return; }
-    QMessageBox box(QMessageBox::Question, tr("This layer supplies a live mask"),
-                    tr("Bake keeps the current masked appearance. Remove Links reveals the dependent layers' pixels."),
-                    QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, this);
-    box.button(QMessageBox::Yes)->setText(tr("Bake and Delete")); box.button(QMessageBox::No)->setText(tr("Remove Links and Delete"));
-    const int choice = box.exec(); if (choice == QMessageBox::Cancel) return;
+    const QMessageBox::StandardButton choice = showMessage(this, tr("This layer supplies a live mask"),
+        tr("Bake keeps the current masked appearance. Remove Links reveals the dependent layers' pixels."), QString(),
+        QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::Yes,
+        {{QMessageBox::Yes, tr("Bake and Delete")}, {QMessageBox::No, tr("Remove Links and Delete")}});
+    if (choice != QMessageBox::Yes && choice != QMessageBox::No) return;
     session_.deleteSelectedLayers(choice == QMessageBox::Yes); syncDocumentViews();
 }
 

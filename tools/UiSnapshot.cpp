@@ -106,5 +106,14 @@ int main(int argc, char **argv)
         action->trigger();
         QApplication::processEvents();
     }
+    // The unsaved-changes prompt: closing the window with an edited document asks; grab it, then cancel.
+    QTimer::singleShot(800, [&] {
+        for (QWidget *top : QApplication::topLevelWidgets())
+            if (top->isVisible() && top->objectName() == QLatin1String("messageDialog")) {
+                top->grab().save(QDir(out).filePath(QStringLiteral("dialog-unsavedChanges.png")));
+                if (auto *dialog = qobject_cast<QDialog *>(top)) dialog->reject();
+            }
+    });
+    window.close();
     return 0;
 }

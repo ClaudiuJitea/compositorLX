@@ -351,6 +351,17 @@ inline QString editorStyleTemplate()
             color: @textDisabled@;
         }
         QPushButton[primary="true"]:enabled { background: @accent@; border-color: @accentHover@; color: @onAccent@; }
+        QDialog#messageDialog { background: transparent; }
+        QWidget#messagePanel { background: @panel@; border: 1px solid @border@; border-radius: 12px; }
+        QLabel#messageTitle { color: @textStrong@; font-size: 14px; font-weight: 600; background: transparent; }
+        QLabel#messageText { color: @text@; font-size: 13px; background: transparent; }
+        QLabel#messageDetail { color: @textMuted@; font-size: 12px; background: transparent; }
+        QWidget#messagePanel QPushButton { min-height: 30px; border-radius: 7px; padding: 0 16px; }
+        QWidget#messagePanel QPushButton[dialogRole="primary"] { background: @accent@; border-color: @accentHover@; color: @onAccent@; font-weight: 600; }
+        QWidget#messagePanel QPushButton[dialogRole="primary"]:hover { background: @accentHover@; }
+        QWidget#messagePanel QPushButton[dialogRole="primary"]:focus { border-color: @focus@; }
+        QWidget#messagePanel QPushButton[dialogRole="destructive"] { color: @danger@; border-color: @dangerBorder@; }
+        QWidget#messagePanel QPushButton[dialogRole="destructive"]:hover { background: @dangerSoft@; }
         QWidget#transformBar QCheckBox { spacing: 5px; color: @text@; }
         QWidget#transformBar QCheckBox::indicator { width: 14px; height: 14px; }
         QToolButton#transformRatioLock { padding: 0; border-radius: 6px; }
