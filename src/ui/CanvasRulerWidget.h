@@ -16,6 +16,7 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void changeEvent(QEvent *event) override;
 };
 
 class CanvasRulerWidget final : public QWidget {
@@ -36,8 +37,10 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private:
+    void applyThickness();
     CanvasGuide::Axis axis_;
     EditorSession &session_;
     CanvasWidget *canvas_ = nullptr;

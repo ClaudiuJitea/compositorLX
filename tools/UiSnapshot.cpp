@@ -49,6 +49,7 @@ int main(int argc, char **argv)
     s.addGroup();
     s.addBlankLayer();
     window.syncDocumentViews();
+    if (auto *rulers = window.findChild<QAction *>(QStringLiteral("commandShowRulers")); rulers && rulers->isCheckable() && !rulers->isChecked()) rulers->trigger();
     QApplication::processEvents();
 
     const auto grab = [&](const QString &name) {

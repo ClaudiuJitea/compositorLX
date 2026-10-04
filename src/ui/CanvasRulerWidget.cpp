@@ -4,17 +4,38 @@
 
 #include <QPainter>
 #include <QMouseEvent>
+#include <QApplication>
 #include <QFontDatabase>
 #include <cmath>
 
 namespace compositor {
 
-static constexpr int kRulerThickness = 18;
+// Small but legible numbers that follow the system font's size (and its scaling).
+static QFont rulerFont()
+{
+    QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    font.setPointSizeF(std::max(7.0, (QApplication::font().pointSizeF() > 0 ? QApplication::font().pointSizeF() : 10.0) * .72));
+    return font;
+}
+
+// The ruler is as thick as its numbers need: a pixel above them, their full height, and room for the short ticks below,
+// so a larger desktop font never cuts the numbers off. Never thinner than the original 18 px.
+static int rulerThickness()
+{
+    const QFontMetrics metrics(rulerFont());
+    return std::max(18, 1 + metrics.ascent() + metrics.descent() + 4);
+}
 
 CanvasRulerCornerWidget::CanvasRulerCornerWidget(QWidget *parent)
     : QWidget(parent)
 {
-    setFixedSize(kRulerThickness, kRulerThickness);
+    setFixedSize(rulerThickness(), rulerThickness());
+}
+
+void CanvasRulerCornerWidget::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::ApplicationFontChange) setFixedSize(rulerThickness(), rulerThickness());
+    QWidget::changeEvent(event);
 }
 
 void CanvasRulerCornerWidget::paintEvent(QPaintEvent *event)
@@ -23,7 +44,7 @@ void CanvasRulerCornerWidget::paintEvent(QPaintEvent *event)
     QPainter painter(this);
     painter.fillRect(rect(), QColor(51, 51, 51));
     painter.setPen(QPen(QColor(255, 255, 255, 71), 1));
-    painter.drawLine(5, kRulerThickness - 4, kRulerThickness - 4, 5);
+    painter.drawLine(5, height() - 4, width() - 4, 5);
 }
 
 CanvasRulerWidget::CanvasRulerWidget(CanvasGuide::Axis axis, EditorSession &session, CanvasWidget *canvas, QWidget *parent)
@@ -33,14 +54,25 @@ CanvasRulerWidget::CanvasRulerWidget(CanvasGuide::Axis axis, EditorSession &sess
     , canvas_(canvas)
 {
     if (axis_ == CanvasGuide::Axis::Horizontal) {
-        setFixedHeight(kRulerThickness);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         setCursor(Qt::SplitVCursor);
     } else {
-        setFixedWidth(kRulerThickness);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
         setCursor(Qt::SplitHCursor);
     }
+    applyThickness();
+}
+
+void CanvasRulerWidget::applyThickness()
+{
+    if (axis_ == CanvasGuide::Axis::Horizontal) setFixedHeight(rulerThickness());
+    else setFixedWidth(rulerThickness());
+}
+
+void CanvasRulerWidget::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::ApplicationFontChange) applyThickness();
+    QWidget::changeEvent(event);
 }
 
 double CanvasRulerWidget::majorStep(double pointsPerPixel)
@@ -78,10 +110,8 @@ void CanvasRulerWidget::paintEvent(QPaintEvent *event)
     const double minor = step / 10.0;
     if (minor <= 0.0) return;
 
-    QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    // Small but legible, following the system font's size (and its scaling).
-    font.setPointSizeF(std::max(7.0, (font.pointSizeF() > 0 ? font.pointSizeF() : 10.0) * .72));
-    painter.setFont(font);
+    painter.setFont(rulerFont());
+    const double baseline = 1.0 + painter.fontMetrics().ascent();   // the numbers' tops sit one pixel inside the ruler
 
     const QColor tickColor(158, 158, 158);
     const QColor labelColor(199, 199, 199);
@@ -114,7 +144,7 @@ void CanvasRulerWidget::paintEvent(QPaintEvent *event)
             painter.drawLine(QPointF(view, height() - length), QPointF(view, height()));
             if (isMajor) {
                 painter.setPen(labelColor);
-                painter.drawText(QPointF(view + 2.0, 7.0), label(value));
+                painter.drawText(QPointF(view + 2.0, baseline), label(value));
             }
         } else {
             painter.setPen(tickColor);
@@ -124,9 +154,9 @@ void CanvasRulerWidget::paintEvent(QPaintEvent *event)
                 const QString text = label(value);
                 const int textWidth = painter.fontMetrics().horizontalAdvance(text);
                 painter.save();
-                painter.translate(1.0, view + 2.0);
+                painter.translate(0.0, view + 2.0);
                 painter.rotate(-90.0);
-                painter.drawText(QPointF(-textWidth, 7.0), text);
+                painter.drawText(QPointF(-textWidth, baseline), text);
                 painter.restore();
             }
         }
