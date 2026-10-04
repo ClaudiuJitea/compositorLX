@@ -106,6 +106,23 @@ int main(int argc, char **argv)
         action->trigger();
         QApplication::processEvents();
     }
+    // Panels opened from the menus: the About windows and a number prompt (Feather needs a selection).
+    s.selectAll(); window.syncDocumentViews();
+    const std::pair<const char *, const char *> panels[] = {{"&About CompositorLX", "about"}, {"About &Qt", "aboutQt"}, {"Feather…", "feather"}};
+    for (const auto &[text, name] : panels) {
+        QAction *action = nullptr;
+        for (QAction *candidate : window.findChildren<QAction *>()) if (candidate->text() == QString::fromUtf8(text)) { action = candidate; break; }
+        if (!action) { qWarning() << "no action" << text; continue; }
+        QTimer::singleShot(800, [&, name] {
+            for (QWidget *top : QApplication::topLevelWidgets())
+                if (top->isVisible() && top->objectName() == QLatin1String("messageDialog")) {
+                    top->grab().save(QDir(out).filePath(QStringLiteral("panel-") + QLatin1String(name) + QStringLiteral(".png")));
+                    if (auto *dialog = qobject_cast<QDialog *>(top)) dialog->reject();
+                }
+        });
+        action->trigger();
+        QApplication::processEvents();
+    }
     // The unsaved-changes prompt: closing the window with an edited document asks; grab it, then cancel.
     QTimer::singleShot(800, [&] {
         for (QWidget *top : QApplication::topLevelWidgets())

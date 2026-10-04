@@ -226,6 +226,7 @@ private:
     bool pasteWholeLayers();
     void deleteLayersWithMaskChoice();
     void showAbout();
+    void showAboutQt();
     void checkForUpdates();
     void refreshTitle();
     void updateInspector();

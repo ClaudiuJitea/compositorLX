@@ -65,7 +65,6 @@
 #include <QListWidget>
 #include <QFontComboBox>
 #include <QImageReader>
-#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
@@ -87,7 +86,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
-#include <QProgressDialog>
+#include <QProgressBar>
 #include <QPlainTextEdit>
 #include <QRandomGenerator>
 #include <QSaveFile>
@@ -343,6 +342,165 @@ int runFloatingDialog(QDialog &dialog)
     return dialog.result();
 }
 
+// The editor's own dialog window for messages, questions and short prompts: a rounded panel in the theme's colours (light
+// or dark from the palette tokens), its buttons in the desktop's order (QDialogButtonBox follows KDE or GNOME), Escape
+// for Cancel, and a drag anywhere on the panel to move it (startSystemMove also works on Wayland, where a frameless
+// window cannot move itself).
+class PanelDialog : public QDialog {
+public:
+    PanelDialog(QWidget *parent, const QString &title) : QDialog(parent)
+    {
+        setObjectName(QStringLiteral("messageDialog"));
+        setWindowTitle(title);
+        setAccessibleName(title);
+        setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setModal(true);
+        auto *outer = new QVBoxLayout(this);
+        outer->setContentsMargins(10, 10, 10, 10);
+        panel_ = new QWidget(this);
+        panel_->setObjectName(QStringLiteral("messagePanel"));
+        panel_->setAttribute(Qt::WA_StyledBackground);
+        panel_->setMinimumWidth(440);
+        content_ = new QVBoxLayout(panel_);
+        content_->setContentsMargins(22, 20, 22, 18);
+        content_->setSpacing(0);
+        outer->addWidget(panel_);
+    }
+    [[nodiscard]] QWidget *panel() const { return panel_; }
+    [[nodiscard]] QVBoxLayout *content() const { return content_; }
+    static QLabel *makeLabel(QWidget *parent, const QString &text, const QString &name, Qt::TextFormat format = Qt::PlainText)
+    {
+        auto *label = new QLabel(text, parent);
+        label->setObjectName(name);
+        label->setWordWrap(true);
+        label->setTextFormat(format);
+        if (format == Qt::RichText) {
+            label->setOpenExternalLinks(true);
+            label->setTextInteractionFlags(Qt::TextBrowserInteraction);
+        } else label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        return label;
+    }
+    QLabel *addLabel(const QString &text, const QString &name, int spacingBefore, Qt::TextFormat format = Qt::PlainText)
+    {
+        if (spacingBefore > 0) content_->addSpacing(spacingBefore);
+        QLabel *label = makeLabel(panel_, text, name, format);
+        content_->addWidget(label);
+        return label;
+    }
+    // Buttons that end the dialog with their standard button as the result; the primary one is the accent default.
+    QDialogButtonBox *addButtons(QDialogButtonBox::StandardButtons buttons, QDialogButtonBox::StandardButton primary,
+                                 const QHash<int, QString> &labels = {})
+    {
+        content_->addSpacing(20);
+        auto *box = new QDialogButtonBox(buttons, panel_);
+        box->setObjectName(QStringLiteral("messageButtons"));
+        for (QAbstractButton *button : box->buttons()) {
+            const QDialogButtonBox::StandardButton standard = box->standardButton(button);
+            if (standard == QDialogButtonBox::Discard) { button->setText(QObject::tr("Don't Save")); button->setProperty("dialogRole", QStringLiteral("destructive")); }
+            if (standard == primary) button->setProperty("dialogRole", QStringLiteral("primary"));
+            if (labels.contains(int(standard))) button->setText(labels.value(int(standard)));
+            button->setMinimumWidth(92);
+            if (auto *push = qobject_cast<QPushButton *>(button)) {
+                push->setAutoDefault(false);
+                if (standard == primary) { push->setDefault(true); push->setFocus(); }
+            }
+            button->style()->unpolish(button); button->style()->polish(button);   // the role is set after the box made it
+            QObject::connect(button, &QAbstractButton::clicked, this, [this, standard] { done(int(standard)); });
+        }
+        content_->addWidget(box);
+        return box;
+    }
+protected:
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton && windowHandle() && windowHandle()->startSystemMove()) { event->accept(); return; }
+        QDialog::mousePressEvent(event);
+    }
+private:
+    QWidget *panel_ = nullptr;
+    QVBoxLayout *content_ = nullptr;
+};
+
+// "Working…" while a background job runs: the panel with an indeterminate bar, and Cancel (or Escape) when it can stop.
+class BusyPanel : public PanelDialog {
+public:
+    BusyPanel(QWidget *parent, const QString &title, const QString &text, std::function<void()> cancel = {})
+        : PanelDialog(parent, title), cancel_(std::move(cancel))
+    {
+        panel()->setMinimumWidth(380);
+        addLabel(title, QStringLiteral("messageTitle"), 0);
+        addLabel(text, QStringLiteral("messageText"), 12);
+        content()->addSpacing(14);
+        auto *bar = new QProgressBar(panel());
+        bar->setRange(0, 0); bar->setTextVisible(false); bar->setAccessibleName(text);
+        content()->addWidget(bar);
+        if (cancel_) addButtons(QDialogButtonBox::Cancel, QDialogButtonBox::Cancel);
+    }
+    void reject() override
+    {
+        if (!cancel_ || done_) return;   // nothing to stop: Escape does nothing
+        done_ = true; cancel_(); QDialog::reject();
+    }
+    void done(int result) override
+    {
+        if (result == int(QDialogButtonBox::Cancel)) { reject(); return; }
+        QDialog::done(result);
+    }
+private:
+    std::function<void()> cancel_;
+    bool done_ = false;
+};
+
+// A whole number asked for in the panel (Expand, Contract, Feather); nothing when cancelled.
+std::optional<int> askInteger(QWidget *parent, const QString &title, const QString &label, int value, int minimum, int maximum)
+{
+    PanelDialog dialog(parent, title);
+    dialog.panel()->setMinimumWidth(360);
+    dialog.addLabel(title, QStringLiteral("messageTitle"), 0);
+    dialog.content()->addSpacing(14);
+    auto *row = new QHBoxLayout;
+    row->setSpacing(10);
+    QLabel *caption = PanelDialog::makeLabel(dialog.panel(), label, QStringLiteral("messageText"));
+    caption->setWordWrap(false);
+    auto *field = new QSpinBox(dialog.panel());
+    field->setRange(minimum, maximum); field->setValue(value); field->setMinimumWidth(110);
+    field->setAccessibleName(label);
+    caption->setBuddy(field);
+    row->addWidget(caption); row->addStretch(); row->addWidget(field);
+    dialog.content()->addLayout(row);
+    dialog.addButtons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, QDialogButtonBox::Ok);
+    field->setFocus(); field->selectAll();
+    if (dialog.exec() != int(QDialogButtonBox::Ok)) return std::nullopt;
+    field->interpretText();
+    return field->value();
+}
+
+// An About window in the panel: the icon beside a heading and a few paragraphs with links, and Close.
+void showAboutPanel(QWidget *parent, const QString &title, const QIcon &icon, const QString &heading, const QString &html)
+{
+    PanelDialog dialog(parent, title);
+    dialog.panel()->setFixedWidth(540);   // a set width lets the wrapped paragraphs work out their height
+    auto *row = new QHBoxLayout;
+    row->setSpacing(18);
+    if (!icon.isNull()) {
+        auto *image = new QLabel(dialog.panel());
+        image->setPixmap(icon.pixmap(64, 64));
+        image->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+        image->setFixedWidth(68);
+        row->addWidget(image, 0, Qt::AlignTop);
+    }
+    auto *column = new QVBoxLayout;
+    column->setSpacing(10);
+    column->addWidget(PanelDialog::makeLabel(dialog.panel(), heading, QStringLiteral("messageTitle")));
+    column->addWidget(PanelDialog::makeLabel(dialog.panel(), html, QStringLiteral("messageText"), Qt::RichText));
+    row->addLayout(column, 1);
+    dialog.content()->addLayout(row);
+    dialog.addButtons(QDialogButtonBox::Close, QDialogButtonBox::Close);
+    dialog.layout()->setSizeConstraint(QLayout::SetFixedSize);
+    dialog.exec();
+}
+
 static std::function<std::optional<QMessageBox::StandardButton>(const QString &title, const QString &text)> sMessageDialogHook = nullptr;
 
 QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, const QString &text,
@@ -358,84 +516,18 @@ QMessageBox::StandardButton showMessage(QWidget *parent, const QString &title, c
         }
     }
 
-    // A rounded panel in the editor's own look (light or dark from the palette tokens), with the buttons in the
-    // desktop's order (QDialogButtonBox follows KDE or GNOME), Escape for Cancel, and a drag anywhere on the panel to
-    // move it (startSystemMove also works on Wayland, where a frameless window cannot move itself).
-    class MessagePanel : public QDialog {
-    public:
-        using QDialog::QDialog;
-    protected:
-        void mousePressEvent(QMouseEvent *event) override
-        {
-            if (event->button() == Qt::LeftButton && windowHandle() && windowHandle()->startSystemMove()) { event->accept(); return; }
-            QDialog::mousePressEvent(event);
-        }
-    };
-    MessagePanel dialog(parent);
-    dialog.setObjectName(QStringLiteral("messageDialog"));
-    dialog.setWindowTitle(title);
-    dialog.setAccessibleName(title);
+    PanelDialog dialog(parent, title);
     dialog.setAccessibleDescription(detail.isEmpty() ? text : text + QLatin1Char('\n') + detail);
-    dialog.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    dialog.setAttribute(Qt::WA_TranslucentBackground);
-    dialog.setModal(true);
-
-    auto *outer = new QVBoxLayout(&dialog);
-    outer->setContentsMargins(10, 10, 10, 10);
-    auto *panel = new QWidget(&dialog);
-    panel->setObjectName(QStringLiteral("messagePanel"));
-    panel->setAttribute(Qt::WA_StyledBackground);
-    panel->setMinimumWidth(440);
-    auto *layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(22, 20, 22, 18);
-    layout->setSpacing(0);
-
-    auto *heading = new QLabel(title, panel);
-    heading->setObjectName(QStringLiteral("messageTitle"));
-    heading->setWordWrap(true);
-    layout->addWidget(heading);
-    layout->addSpacing(12);
-    auto *message = new QLabel(text, panel);
-    message->setObjectName(QStringLiteral("messageText"));
-    message->setWordWrap(true);
-    message->setTextFormat(Qt::PlainText);
-    message->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout->addWidget(message);
-    if (!detail.isEmpty()) {
-        layout->addSpacing(8);
-        auto *supporting = new QLabel(detail, panel);
-        supporting->setObjectName(QStringLiteral("messageDetail"));
-        supporting->setWordWrap(true);
-        supporting->setTextFormat(Qt::PlainText);
-        supporting->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        layout->addWidget(supporting);
-    }
-    layout->addSpacing(20);
-
+    dialog.addLabel(title, QStringLiteral("messageTitle"), 0);
+    dialog.addLabel(text, QStringLiteral("messageText"), 12);
+    if (!detail.isEmpty()) dialog.addLabel(detail, QStringLiteral("messageDetail"), 8);
     if (defaultButton == QMessageBox::NoButton) {
         if (buttons.testFlag(QMessageBox::Save)) defaultButton = QMessageBox::Save;
         else if (buttons.testFlag(QMessageBox::Open)) defaultButton = QMessageBox::Open;
         else if (buttons.testFlag(QMessageBox::Yes)) defaultButton = QMessageBox::Yes;
         else if (buttons.testFlag(QMessageBox::Ok)) defaultButton = QMessageBox::Ok;
     }
-    auto *box = new QDialogButtonBox(QDialogButtonBox::StandardButtons(int(buttons)), panel);
-    box->setObjectName(QStringLiteral("messageButtons"));
-    for (QAbstractButton *button : box->buttons()) {
-        const auto standard = QMessageBox::StandardButton(int(box->standardButton(button)));
-        if (standard == QMessageBox::Discard) { button->setText(QObject::tr("Don't Save")); button->setProperty("dialogRole", QStringLiteral("destructive")); }
-        if (standard == defaultButton) button->setProperty("dialogRole", QStringLiteral("primary"));
-        if (labels.contains(int(standard))) button->setText(labels.value(int(standard)));
-        button->setMinimumWidth(92);
-        if (auto *push = qobject_cast<QPushButton *>(button)) {
-            push->setAutoDefault(false);
-            if (standard == defaultButton) { push->setDefault(true); push->setFocus(); }
-        }
-        button->style()->unpolish(button); button->style()->polish(button);   // the role is set after the box made it
-        QObject::connect(button, &QAbstractButton::clicked, &dialog, [&dialog, standard] { dialog.done(int(standard)); });
-    }
-    layout->addWidget(box);
-    outer->addWidget(panel);
-
+    dialog.addButtons(QDialogButtonBox::StandardButtons(int(buttons)), QDialogButtonBox::StandardButton(int(defaultButton)), labels);
     const int result = dialog.exec();
     if (result == QDialog::Rejected || result == QMessageBox::NoButton)
         return buttons.testFlag(QMessageBox::Cancel) ? QMessageBox::Cancel : QMessageBox::NoButton;
@@ -3097,18 +3189,17 @@ void MainWindow::createActions()
     auto *feather = select->addAction(tr("Feather…")); feather->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F6));
     feather->setObjectName(QStringLiteral("commandFeatherSelection"));
     connect(expand, &QAction::triggered, this, [this] {
-        bool ok = false; const int amount = QInputDialog::getInt(this, tr("Expand Selection"), tr("Pixels"), 1, 1, 500, 1, &ok);
-        if (ok && session_.expandSelection(amount)) syncDocumentViews(false);
+        const std::optional<int> amount = askInteger(this, tr("Expand Selection"), tr("Expand by (pixels):"), 1, 1, 500);
+        if (amount && session_.expandSelection(*amount)) syncDocumentViews(false);
     });
     connect(contract, &QAction::triggered, this, [this] {
-        bool ok = false; const int amount = QInputDialog::getInt(this, tr("Contract Selection"), tr("Pixels"), 1, 1, 500, 1, &ok);
-        if (ok && session_.contractSelection(amount)) syncDocumentViews(false);
+        const std::optional<int> amount = askInteger(this, tr("Contract Selection"), tr("Contract by (pixels):"), 1, 1, 500);
+        if (amount && session_.contractSelection(*amount)) syncDocumentViews(false);
     });
     connect(feather, &QAction::triggered, this, [this] {
-        bool ok = false;
-        const int amount = QInputDialog::getInt(this, tr("Feather Selection"), tr("Feather Radius (pixels):"), session_.selectionFeatherAmount(), 1, 250, 1, &ok);
-        if (ok && session_.featherSelection(amount)) {
-            session_.setSelectionFeatherAmount(amount);
+        const std::optional<int> amount = askInteger(this, tr("Feather Selection"), tr("Feather Radius (pixels):"), session_.selectionFeatherAmount(), 1, 250);
+        if (amount && session_.featherSelection(*amount)) {
+            session_.setSelectionFeatherAmount(*amount);
             syncDocumentViews(false);
         }
     });
@@ -3496,7 +3587,7 @@ void MainWindow::createActions()
     connect(help->addAction(tr("Check for &Updates…")), &QAction::triggered, this, &MainWindow::checkForUpdates);
     help->addSeparator();
     connect(help->addAction(tr("&About CompositorLX")), &QAction::triggered, this, &MainWindow::showAbout);
-    connect(help->addAction(tr("About &Qt")), &QAction::triggered, qApp, &QApplication::aboutQt);
+    connect(help->addAction(tr("About &Qt")), &QAction::triggered, this, &MainWindow::showAboutQt);
 
     addAction(newAction); addAction(open); addAction(importAction); addAction(save); addAction(saveAs); addAction(exportAction); addAction(exportJpegAction); addAction(closeProject); addAction(undo); addAction(redo);
     addAction(cut); addAction(copy); addAction(copyMerged); addAction(paste);
@@ -5149,8 +5240,7 @@ void MainWindow::removeBackgroundDialog()
 
     QFutureWatcher<QPair<QImage, QString>> watcher;
     QEventLoop wait;
-    QProgressDialog progress(tr("Detecting foreground subjects…"), QString(), 0, 0, this);
-    progress.setWindowTitle(tr("Remove Background")); progress.setCancelButton(nullptr); progress.setWindowModality(Qt::WindowModal);
+    BusyPanel progress(this, tr("Remove Background"), tr("Detecting foreground subjects…"));
     connect(&watcher, &QFutureWatcher<QPair<QImage, QString>>::finished, &wait, &QEventLoop::quit);
     watcher.setFuture(QtConcurrent::run([image = original.image] {
         QString error; QImage mask = SubjectRemoval::rawMask(image, &error); return qMakePair(mask, error);
@@ -5226,17 +5316,12 @@ void MainWindow::selectSubjectAction()
     auto cancelToken = std::make_shared<std::atomic<bool>>(false);
     currentSelectionCancelToken_ = cancelToken;
 
-    QProgressDialog progress(tr("Selecting subject…"), tr("Cancel"), 0, 0, this);
-    progress.setWindowTitle(tr("Select Subject"));
-    progress.setWindowModality(Qt::WindowModal);
+    BusyPanel progress(this, tr("Select Subject"), tr("Selecting subject…"), [cancelToken] { cancelToken->store(true); });
     progress.show();
 
     QFutureWatcher<EditorSession::SelectionComputationResult> watcher;
     QEventLoop loop;
     connect(&watcher, &QFutureWatcher<EditorSession::SelectionComputationResult>::finished, &loop, &QEventLoop::quit);
-    connect(&progress, &QProgressDialog::canceled, this, [cancelToken] {
-        cancelToken->store(true);
-    });
 
     watcher.setFuture(QtConcurrent::run([snapshot, requestId, cancelToken]() {
         return EditorSession::computeSubjectSelection(snapshot, requestId, cancelToken.get());
@@ -5279,17 +5364,12 @@ void MainWindow::selectObjectRequested(const QPoint &point, int mode, int edgeOf
     auto cancelToken = std::make_shared<std::atomic<bool>>(false);
     currentSelectionCancelToken_ = cancelToken;
 
-    QProgressDialog progress(tr("Selecting object…"), tr("Cancel"), 0, 0, this);
-    progress.setWindowTitle(tr("Object Selection"));
-    progress.setWindowModality(Qt::WindowModal);
+    BusyPanel progress(this, tr("Object Selection"), tr("Selecting object…"), [cancelToken] { cancelToken->store(true); });
     progress.show();
 
     QFutureWatcher<EditorSession::SelectionComputationResult> watcher;
     QEventLoop loop;
     connect(&watcher, &QFutureWatcher<EditorSession::SelectionComputationResult>::finished, &loop, &QEventLoop::quit);
-    connect(&progress, &QProgressDialog::canceled, this, [cancelToken] {
-        cancelToken->store(true);
-    });
 
     watcher.setFuture(QtConcurrent::run([snapshot, point, edgeOffset, smoothEdges, requestId, cancelToken]() {
         return EditorSession::computeObjectSelection(snapshot, point, edgeOffset, smoothEdges, requestId, cancelToken.get());
@@ -7263,17 +7343,29 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
 void MainWindow::showAbout()
 {
     // Version, license, and the work it builds on, with links (the parts that ship under licenses of their own).
-    QMessageBox::about(this, tr("About CompositorLX"), tr(
-        "<h3>CompositorLX %1</h3>"
+    showAboutPanel(this, tr("About CompositorLX"), QApplication::windowIcon().isNull() ? QIcon(QStringLiteral(":/icons/compositor-lx.svg")) : QApplication::windowIcon(), tr("CompositorLX %1").arg(QCoreApplication::applicationVersion()), tr(
         "<p>A layer-based image editor for Linux: the Qt port of "
         "<a href=\"https://github.com/robbietilton/Compositor\">Compositor</a> by Robbie Tilton.</p>"
         "<p>Released under the MIT License. "
         "<a href=\"https://github.com/ClaudiuJitea/compositorLX\">Source code and releases</a></p>"
         "<p><b>Built with</b><br>"
-        "Qt %2 (LGPL-3.0)<br>"
+        "Qt %1 (LGPL-3.0)<br>"
         "ONNX Runtime (MIT) and the U²-Net model (Apache-2.0) for Remove Background and Select Subject<br>"
-        "LibRaw (LGPL-2.1 / CDDL-1.0) for camera RAW files</p>")
-        .arg(QCoreApplication::applicationVersion(), QString::fromLatin1(qVersion())));
+        "LibRaw (LGPL-2.1 / CDDL-1.0) for camera RAW files</p>").arg(QString::fromLatin1(qVersion())));
+}
+
+void MainWindow::showAboutQt()
+{
+    // Qt's own About text (QMessageBox::aboutQt) in the editor's panel.
+    QIcon logo(QStringLiteral(":/qt-project.org/qmessagebox/images/qtlogo-64.png"));
+    showAboutPanel(this, tr("About Qt"), logo, tr("Qt %1").arg(QString::fromLatin1(qVersion())), tr(
+        "<p>This program uses Qt version %1, under the GNU Lesser General Public License version 3.</p>"
+        "<p>Qt is a C++ toolkit for cross-platform application development. It provides single-source portability across "
+        "all major desktop operating systems, as well as embedded and mobile platforms.</p>"
+        "<p>Qt is a product of The Qt Company, developed as an open source project. "
+        "See <a href=\"https://www.qt.io/\">qt.io</a> and "
+        "<a href=\"https://www.qt.io/licensing/\">qt.io/licensing</a> for more information.</p>"
+        "<p>Copyright © The Qt Company Ltd and other contributors.</p>").arg(QString::fromLatin1(qVersion())));
 }
 
 void MainWindow::checkForUpdates()

@@ -6,6 +6,9 @@
 #include "ui/EditorStyle.h"
 #include "ui/MainWindow.h"
 #include <QAction>
+#include <QDialogButtonBox>
+#include <QPushButton>
+#include <QSpinBox>
 #include <QKeyEvent>
 #include <QRegularExpression>
 #include <QTemporaryDir>
@@ -74,6 +77,31 @@ private slots:
         QCOMPARE(canvas->zoom(), 0.5);
         QTest::mouseClick(canvas, Qt::LeftButton, Qt::AltModifier, canvas->canvasRect().center().toPoint());   // Alt still inverts
         QCOMPARE(canvas->zoom(), 1.0);
+    }
+
+    void numberPromptsUseThePanel()
+    {
+        MainWindow window; window.resize(1000, 700); window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.session().createDocument(200, 200); window.session().addBlankLayer();
+        window.session().setPolygonSelection(QPolygonF(QRectF(60, 60, 80, 80)), SelectionMode::Replace, false); window.syncDocumentViews();
+        QAction *feather = window.findChild<QAction *>(QStringLiteral("commandFeatherSelection"));
+        QVERIFY(feather); QVERIFY(feather->isEnabled());
+        const auto answer = [](int value, QDialogButtonBox::StandardButton button) {
+            QTimer::singleShot(200, [value, button] {
+                for (QWidget *top : QApplication::topLevelWidgets())
+                    if (top->isVisible() && top->objectName() == QLatin1String("messageDialog")) {
+                        top->findChild<QSpinBox *>()->setValue(value);
+                        top->findChild<QDialogButtonBox *>()->button(button)->click();
+                    }
+            });
+        };
+        answer(7, QDialogButtonBox::Ok);
+        feather->trigger();
+        QCOMPARE(window.session().selectionFeatherAmount(), 7);
+        answer(19, QDialogButtonBox::Cancel);
+        feather->trigger();
+        QCOMPARE(window.session().selectionFeatherAmount(), 7);   // cancelled: unchanged
     }
 
     void manifestOpensItsProject()
