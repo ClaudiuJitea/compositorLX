@@ -2,12 +2,15 @@
 #include "core/ToolDefaults.h"
 #include "core/SelectionOps.h"
 #include "io/ImageExporter.h"
+#include "io/CMYK.h"
+#include "core/CanvasUnits.h"
 
 #include "io/ProjectReader.h"
 #include "io/ProjectWriter.h"
 #include "io/ImageImporter.h"
 #include "io/PSDReader.h"
 #include "rendering/LayerRenderer.h"
+#include "rendering/DeepImage.h"
 #include "rendering/TextLayout.h"
 #include "rendering/RasterOperations.h"
 #include "rendering/Dither.h"
@@ -37,7 +40,6 @@
 #include <QAbstractButton>
 #include <QAbstractItemDelegate>
 #include <QCheckBox>
-#include <QColorDialog>
 #include "ui/ColorPickerDialog.h"
 #include <QColorSpace>
 #include <QClipboard>
@@ -331,10 +333,12 @@ int runFloatingDialog(QDialog &dialog)
             dialog.move(position);
         }
     }
+    dialog.setProperty("compositorFloatingEditor",true);
     dialog.show();
     QEventLoop loop;
     QObject::connect(&dialog, &QDialog::finished, &loop, &QEventLoop::quit);
     loop.exec();
+    dialog.setProperty("compositorFloatingEditor",false);
     if (window) rememberedPositions.insert(positionKey, dialog.pos());
     for (const auto &[widget, enabled] : widgetStates) widget->setEnabled(enabled);
     for (const auto &[action, enabled] : actionStates) action->setEnabled(enabled);
@@ -565,6 +569,12 @@ void rememberFilter(EditorSession &session, QDialog &dialog, bool live, const QS
     QObject::connect(&dialog, &QDialog::accepted, &dialog, [&session, values, prefix] {
         for (const RememberedValue &value : values) session.filterMemory.insert(prefix + QLatin1Char('.') + value.key, value.spin->value());
     });
+}
+
+void rememberToggle(EditorSession &session, QDialog &dialog, bool live, const QString &key, QCheckBox *box)
+{
+    if (!live && session.filterMemory.contains(key)) box->setChecked(session.filterMemory.value(key).toBool());
+    QObject::connect(&dialog, &QDialog::accepted, &dialog, [&session, key, box] { session.filterMemory.insert(key, box->isChecked()); });
 }
 
 QWidget *sliderField(QDoubleSpinBox *field, bool logarithmic = false)
@@ -984,6 +994,16 @@ public:
             p->drawText(badge, Qt::AlignCenter, QStringLiteral("T"));
         }
 
+        const int shape = index.data(Qt::UserRole + 21).toInt();
+        if (shape) {
+            const QRectF badge(thumb.right()-12, thumb.bottom()-12, 12, 12);
+            p->fillRect(badge, rc.badge); p->setPen(QPen(rc.text, 1)); p->setBrush(Qt::NoBrush);
+            const QRectF icon = badge.adjusted(2,2,-2,-2);
+            if (shape == int(ShapeKind::Ellipse)+1) p->drawEllipse(icon);
+            else if (shape == int(ShapeKind::Line)+1) p->drawLine(icon.bottomLeft(), icon.topRight());
+            else p->drawRect(icon);
+        }
+
         const QImage mask = index.data(Qt::UserRole + 3).value<QImage>();
         int textStart = thumb.right() + 10;
         if (!mask.isNull()) {
@@ -1147,6 +1167,8 @@ void MainWindow::setMessageDialogHook(std::function<std::optional<QMessageBox::S
 }
 
 
+int MainWindow::runPortDialog(QDialog &dialog) { return runFloatingDialog(dialog); }
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -1249,6 +1271,13 @@ MainWindow::MainWindow(QWidget *parent)
     shapeRadiusField_ = numberField(transformBar, QStringLiteral("Radius"), 5000, &shapeRadiusLabel_, 1.0); shapeRadiusField_->setObjectName(QStringLiteral("shapeRadius")); shapeRadiusField_->setRange(0, 5000); shapeRadiusField_->setVisible(false);
     shapeRadiusLabel_->setObjectName(QStringLiteral("shapeRadiusLabel")); shapeRadiusLabel_->setVisible(false); shapeRadiusLabel_->setToolTip(tr("Corner Radius"));
     auto *shapeRadius = shapeRadiusField_;
+    auto *smoothCorners = new QCheckBox(tr("Smooth"), transformBar);
+    smoothCorners->setObjectName(QStringLiteral("shapeSmoothing"));
+    smoothCorners->setToolTip(tr("Use 60% smoothing for rectangle corners."));
+    smoothCorners->setEnabled(false);
+    smoothCorners->hide();
+    connect(shapeRadiusField_, qOverload<double>(&QDoubleSpinBox::valueChanged), smoothCorners, [smoothCorners](double r) { smoothCorners->setEnabled(r > 0); });
+
     shapeLineWidthField_ = numberField(transformBar, QStringLiteral("Width"), 5000, &shapeLineWidthLabel_, 1.0); shapeLineWidthField_->setObjectName(QStringLiteral("shapeLineWidth")); shapeLineWidthField_->setRange(1, 5000); shapeLineWidthField_->setValue(2); shapeLineWidthField_->setVisible(false);
     shapeLineWidthLabel_->setObjectName(QStringLiteral("shapeLineWidthLabel")); shapeLineWidthLabel_->setVisible(false); shapeLineWidthLabel_->setToolTip(tr("Stroke Width"));
     auto *shapeLineWidth = shapeLineWidthField_;
@@ -1391,7 +1420,7 @@ MainWindow::MainWindow(QWidget *parent)
     transformLayout->addGroup({sampling_});
     transformLayout->addGroup({brushMode, smearMode, healingMode, cropRatio});
     transformLayout->addGroup({shapeKind});
-    transformLayout->addGroup({shapeRadiusLabel_, shapeRadiusField_, shapeLineWidthLabel_, shapeLineWidthField_});
+    transformLayout->addGroup({shapeRadiusLabel_, shapeRadiusField_, smoothCorners, shapeLineWidthLabel_, shapeLineWidthField_});
     transformLayout->addGroup({brushSizeLabel_, brushSizeField_, brushHardnessLabel_, brushHardnessField_,
                                brushOpacityLabel_, brushOpacityField_, blurRadiusLabel_, blurRadiusField_, brushSmoothingLabel_, brushSmoothingField_});
     transformLayout->addGroup({cloneAligned});
@@ -1559,6 +1588,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::transformCancelRequested, this, [this] { finishPersistentTransform(false); });
     connect(canvas_, &CanvasWidget::transformApplyRequested, this, [this] { finishPersistentTransform(true); });
     connect(shapeRadius, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeCornerRadius);
+    connect(smoothCorners, &QCheckBox::toggled, canvas_, &CanvasWidget::setShapeSmoothing);
     connect(shapeLineWidth, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeLineWidth);
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
     connect(canvas_, &CanvasWidget::brushTipDragged, this, [this](double diameter, double hardness) {
@@ -1584,6 +1614,7 @@ MainWindow::MainWindow(QWidget *parent)
         const bool isShape = canvas_->tool() == CanvasWidget::Tool::Shape;
         shapeRadius->setVisible(isShape && kind == ShapeKind::Rectangle);
         shapeRadiusLabel_->setVisible(isShape && kind == ShapeKind::Rectangle);
+        findChild<QCheckBox *>(QStringLiteral("shapeSmoothing"))->setVisible(isShape && kind == ShapeKind::Rectangle);
         shapeLineWidth->setVisible(isShape && kind == ShapeKind::Line);
         shapeLineWidthLabel_->setVisible(isShape && kind == ShapeKind::Line);
     });
@@ -1592,6 +1623,7 @@ MainWindow::MainWindow(QWidget *parent)
         const bool isShape = canvas_->tool() == CanvasWidget::Tool::Shape;
         shapeRadius->setVisible(isShape && kind == ShapeKind::Rectangle);
         shapeRadiusLabel_->setVisible(isShape && kind == ShapeKind::Rectangle);
+        findChild<QCheckBox *>(QStringLiteral("shapeSmoothing"))->setVisible(isShape && kind == ShapeKind::Rectangle);
         shapeLineWidth->setVisible(isShape && kind == ShapeKind::Line);
         shapeLineWidthLabel_->setVisible(isShape && kind == ShapeKind::Line);
     });
@@ -1647,7 +1679,7 @@ MainWindow::MainWindow(QWidget *parent)
             selectionMode, selectionAntialias, wandModeControl, wandTolerance, wandSampleSize, wandSample, wandContiguous, objectEdgeOffset, objectSmoothEdges, selectionModifyGroup,
             selectionAmount, moveControls, toolButtons](CanvasWidget::Tool tool) {
         if (tool != CanvasWidget::Tool::Text)
-            if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(true);
+            if (auto *editor = inlineTextEditor()) editor->finish(true);
         if (tool != CanvasWidget::Tool::Move && transformOriginalDocument_) finishPersistentTransform(true);
         const bool brush = tool == CanvasWidget::Tool::Brush || tool == CanvasWidget::Tool::Eraser || tool == CanvasWidget::Tool::Healing
             || tool == CanvasWidget::Tool::Clone || tool == CanvasWidget::Tool::Blur;
@@ -1686,6 +1718,7 @@ MainWindow::MainWindow(QWidget *parent)
         const bool shapeLine = (tool == CanvasWidget::Tool::Shape && canvas_->shapeKind() == ShapeKind::Line);
         shapeRadius->setVisible(shapeRect);
         shapeRadiusLabel_->setVisible(shapeRect);
+        findChild<QCheckBox *>(QStringLiteral("shapeSmoothing"))->setVisible(shapeRect);
         shapeLineWidth->setVisible(shapeLine);
         shapeLineWidthLabel_->setVisible(shapeLine);
         const bool text = tool == CanvasWidget::Tool::Text;
@@ -1772,8 +1805,18 @@ MainWindow::MainWindow(QWidget *parent)
     startLayout->addLayout(startHeader); startLayout->addWidget(startSubtitle);
     auto *startForm = new QFormLayout;
     startForm->setContentsMargins(0, 10, 0, 0); startForm->setHorizontalSpacing(18); startForm->setVerticalSpacing(12); startForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-    newCanvasWidth_ = new QSpinBox(startPanel); newCanvasWidth_->setObjectName(QStringLiteral("newCanvasWidth")); newCanvasWidth_->setRange(1, 30000); newCanvasWidth_->setValue(1920); newCanvasWidth_->setSuffix(tr(" px"));
-    newCanvasHeight_ = new QSpinBox(startPanel); newCanvasHeight_->setObjectName(QStringLiteral("newCanvasHeight")); newCanvasHeight_->setRange(1, 30000); newCanvasHeight_->setValue(1080); newCanvasHeight_->setSuffix(tr(" px"));
+    newCanvasWidth_ = new QDoubleSpinBox(startPanel); newCanvasWidth_->setObjectName(QStringLiteral("newCanvasWidth")); newCanvasWidth_->setRange(1, 30000); newCanvasWidth_->setValue(1920); newCanvasWidth_->setSuffix(tr(" px"));
+    newCanvasHeight_ = new QDoubleSpinBox(startPanel); newCanvasHeight_->setObjectName(QStringLiteral("newCanvasHeight")); newCanvasHeight_->setRange(1, 30000); newCanvasHeight_->setValue(1080); newCanvasHeight_->setSuffix(tr(" px"));
+    auto *canvasUnit=new QComboBox(startPanel);canvasUnit->setObjectName(QStringLiteral("newCanvasUnit"));canvasUnit->addItems({tr("Pixels"),tr("Inches"),tr("Centimeters"),tr("Millimeters")});
+    auto *canvasDpi=new QComboBox(startPanel);canvasDpi->setObjectName(QStringLiteral("newCanvasDpi"));canvasDpi->addItems({QStringLiteral("72 DPI"),QStringLiteral("300 DPI")});
+    auto *canvasBackground=new QComboBox(startPanel);canvasBackground->setObjectName(QStringLiteral("newCanvasBackground"));canvasBackground->addItems({tr("Transparent"),tr("White"),tr("Black")});
+    newCanvasWidth_->setDecimals(0);newCanvasHeight_->setDecimals(0);
+    startForm->addRow(tr("Units"),canvasUnit);startForm->addRow(tr("Resolution"),canvasDpi);startForm->addRow(tr("Background"),canvasBackground);
+    connect(canvasUnit,&QComboBox::currentIndexChanged,this,[this,canvasUnit,canvasDpi](int index){
+        const int old=canvasUnit->property("previousUnit").toInt();const double dpi=canvasDpi->currentIndex()==0?72:300;
+        const double scale=pixelsPerUnit(CanvasUnit(old),dpi)/pixelsPerUnit(CanvasUnit(index),dpi);canvasUnit->setProperty("previousUnit",index);
+        for(auto *field:{newCanvasWidth_,newCanvasHeight_}){const double value=field->value()*scale;field->setDecimals(index==0?0:3);field->setRange(index==0?1:.001,30000/pixelsPerUnit(CanvasUnit(index),dpi));field->setSuffix(index==0?tr(" px"):QString());field->setValue(value);}
+    });
     startForm->addRow(tr("Width"), newCanvasWidth_); startForm->addRow(tr("Height"), newCanvasHeight_); startLayout->addLayout(startForm);
     {
         struct Preset { const char *title; int width, height; };
@@ -1792,13 +1835,13 @@ MainWindow::MainWindow(QWidget *parent)
                     auto *action = presetMenu->addAction(QString::fromUtf8(preset.title)); action->setCheckable(true);
                     const bool current = newCanvasWidth_->value() == preset.width && newCanvasHeight_->value() == preset.height;
                     action->setChecked(current); matched = matched || current;
-                    connect(action, &QAction::triggered, this, [this, preset] { newCanvasWidth_->setValue(preset.width); newCanvasHeight_->setValue(preset.height); });
+                    connect(action, &QAction::triggered, this, [this, preset] { findChild<QComboBox *>(QStringLiteral("newCanvasUnit"))->setCurrentIndex(0); newCanvasWidth_->setValue(preset.width); newCanvasHeight_->setValue(preset.height); });
                 }
             }
             custom->setChecked(!matched);
         });
     }
-    auto *startHint = new QLabel(tr("Transparent background  ·  sRGB color space"), startPanel); startHint->setObjectName(QStringLiteral("emptyStateHint")); startLayout->addWidget(startHint);
+    auto *startHint = new QLabel(tr("sRGB color space"), startPanel); startHint->setObjectName(QStringLiteral("emptyStateHint")); startLayout->addWidget(startHint);
     auto *startButtons = new QHBoxLayout;
     startButtons->setContentsMargins(0, 8, 0, 0); startButtons->setSpacing(10);
     auto *openStart = new QPushButton(tr("Open project"), startPanel); auto *importStart = new QPushButton(tr("Import image"), startPanel);
@@ -1811,11 +1854,14 @@ MainWindow::MainWindow(QWidget *parent)
     startRecent->setVisible(false);
     startOuter->addWidget(startPanel, 0, Qt::AlignHCenter); startOuter->addStretch();
     canvasStack_->addWidget(startPage); canvasStack_->addWidget(canvas_); canvasStack_->setCurrentWidget(startPage);
-    connect(createStart, &QPushButton::clicked, this, [this] {
-        if (qint64(newCanvasWidth_->value()) * newCanvasHeight_->value() > DocumentLimits::maxSurfacePixels) {
+    connect(createStart, &QPushButton::clicked, this, [this,canvasUnit,canvasDpi,canvasBackground] {
+        const double dpi=canvasDpi->currentIndex()==0?72:300;
+        const int width=canvasPixels(newCanvasWidth_->value(),CanvasUnit(canvasUnit->currentIndex()),dpi),height=canvasPixels(newCanvasHeight_->value(),CanvasUnit(canvasUnit->currentIndex()),dpi);
+        if (width<1||height<1||qint64(width)*height > DocumentLimits::maxSurfacePixels) {
             showMessage(this, tr("Canvas Too Large"), tr("A canvas may contain at most %1 megapixels.").arg(DocumentLimits::maxSurfaceMegapixels())); return;
         }
-        session_.createDocument(newCanvasWidth_->value(), newCanvasHeight_->value(), true); syncDocumentViews();
+        session_.createDocument(width,height,true,dpi,canvasBackground->currentIndex()==0?std::optional<QColor>{}:std::optional<QColor>(canvasBackground->currentIndex()==1?Qt::white:Qt::black));
+        syncDocumentViews();
     });
     connect(openStart, &QPushButton::clicked, this, &MainWindow::chooseProject);
     connect(importStart, &QPushButton::clicked, this, &MainWindow::importImages);
@@ -1907,7 +1953,11 @@ MainWindow::MainWindow(QWidget *parent)
     auto *addGroup = layerButton(18, QStringLiteral("addGroupButton"), tr("New folder"));
     auto *duplicate = layerButton(19, QStringLiteral("duplicateLayerButton"), tr("Duplicate layer"));
     auto *addMask = layerButton(20, QStringLiteral("addMaskButton"), tr("Add layer mask"));
-    auto *addEffect = layerButton(30, QStringLiteral("addEffectButton"), tr("Layer effects"));
+    // Adjustment layers before layer effects, as on macOS; its menu is filled with the Layer menu's below.
+    layerMenuButton_ = layerButton(31, QStringLiteral("addAdjustmentButton"), tr("New adjustment layer"));
+    layerMenuButton_->setPopupMode(QToolButton::InstantPopup);
+    auto *addEffect = layerButton(30, QStringLiteral("addEffectButton"), tr("Add layer effect"));
+    addEffect->setAccessibleName(tr("Layer effects"));
     addEffect->setPopupMode(QToolButton::InstantPopup);
     auto *effectsMenu = new QMenu(addEffect);
     for (LayerEffectKind kind : {LayerEffectKind::Stroke, LayerEffectKind::DropShadow, LayerEffectKind::ColorOverlay,
@@ -1921,8 +1971,6 @@ MainWindow::MainWindow(QWidget *parent)
         });
     }
     addEffect->setMenu(effectsMenu);
-    layerMenuButton_ = layerButton(21, QStringLiteral("layerActionsButton"), tr("More layer actions"));
-    layerMenuButton_->setPopupMode(QToolButton::InstantPopup);
     footerLayout->addStretch();
     auto *trash = layerButton(22, QStringLiteral("deleteLayerButton"), tr("Delete selected layers"));
     inspectorLayout->addWidget(layerFooter);
@@ -1957,6 +2005,17 @@ MainWindow::MainWindow(QWidget *parent)
         if (!document_ || dragged.isEmpty()) return;
         const std::optional<QUuid> parent = parentId.isNull() ? std::nullopt : std::optional<QUuid>(parentId);
         const std::optional<QUuid> above = aboveId.isNull() ? std::nullopt : std::optional<QUuid>(aboveId);
+        const bool foreign = std::none_of(document_->layers.cbegin(),document_->layers.cend(),[&](const Layer &layer) { return dragged.contains(layer.id); });
+        if (foreign) {
+            session_.beginEdit(tr("Copy Layers from Project"));
+            if (copyLayersToTab(dragged,currentTab_,false)) {
+                const auto copied = session_.copiedLayerIds();
+                const auto primary = document_->activeLayerId;
+                for (const QUuid &id : copied) session_.placeLayer(id,parent,above,atBottom);
+                session_.selectLayers(QSet<QUuid>(copied.cbegin(),copied.cend()),primary);
+            }
+            session_.endEdit(); syncDocumentViews(); return;
+        }
         QVector<QUuid> ids = dragged;
         if (parent && !above) std::reverse(ids.begin(), ids.end());
         session_.beginEdit(copy ? (ids.size() > 1 ? tr("Duplicate Layers") : tr("Duplicate Layer"))
@@ -2268,6 +2327,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(tabs_, &QTabBar::tabCloseRequested, this, &MainWindow::closeTab);
     connect(tabs_, &QTabBar::tabMoved, this, [this](int from, int to) {
         if (from < 0 || to < 0 || from >= workspaceTabs_.size() || to >= workspaceTabs_.size()) return;
+        if((from==0||to==0)&&!workspaceTabs_.isEmpty()&&!workspaceTabs_.first().document()){const QSignalBlocker blocker(tabs_);tabs_->moveTab(to,from);return;}
         stashCurrentTab();
         workspaceTabs_.move(from, to);
         tabRecoveryPaths_.move(from, to);
@@ -2407,10 +2467,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(gradientReverse, &QCheckBox::toggled, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(gradientOpacityField_, &QDoubleSpinBox::valueChanged, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(canvas_, &CanvasWidget::shapeCreated, this, [this](ShapeKind kind, const QRectF &rect, double strokeWidth, double cornerRadius, const std::optional<QPointF> &start, const std::optional<QPointF> &end) {
-        if (session_.addShape(kind, rect, session_.foregroundColor(), session_.foregroundColor(), strokeWidth, cornerRadius, start, end)) syncDocumentViews();
+        if (session_.addShape(kind, rect, session_.foregroundColor(), session_.foregroundColor(), strokeWidth, cornerRadius, start, end, canvas_->shapeSmoothing())) syncDocumentViews();
     });
     const auto applyInlineTextFormat = [this, textFont, textSize, textTracking, textLeading, textAlignment] {
-        auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly));
+        auto *editor = inlineTextEditor();
         if (!editor) return;
         editor->tracking = textTracking->value();
         editor->leading = textLeading->value();
@@ -2457,8 +2517,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(textAlignment, &SegmentedControl::currentIndexChanged, this, [applyInlineTextFormat](int) { applyInlineTextFormat(); });
     const auto beginInlineText = [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textAlignment, textDone, textCancel, applyInlineTextFormat]
         (const QRectF &box, const TextStyle &style, bool areaText, const std::optional<QUuid> &layerId) {
-        if (auto *existing = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) existing->finish(true);
+        if (auto *existing = inlineTextEditor()) existing->finish(true);
         auto *editor = new InlineTextEditor(canvas_);
+        inlineTextEditor_ = editor;
         editor->canvasBox = box; editor->areaText = areaText;
         editor->tracking = style.tracking;
         editor->leading = style.leading;
@@ -2478,6 +2539,9 @@ MainWindow::MainWindow(QWidget *parent)
         };
         editor->syncCanvasGeometry();
         editor->loadStyle(style);
+        if (layerId && document_) for (const Layer &layer : document_->layers) if (layer.id == *layerId) {
+            editor->setLayerPlacement(layer.transform, layer.image.size()); break;
+        }
         editor->setLineWrapMode(areaText ? QTextEdit::FixedPixelWidth : QTextEdit::NoWrap);
         textDone->setEnabled(true); textCancel->setEnabled(true);
         editor->finished = [this, editor, textFont, textSize, textAlignment, textDone, textCancel, box, areaText, layerId, style](bool commit) {
@@ -2558,7 +2622,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(canvas_, &CanvasWidget::textLayerEditRequested, this, [this, textFont, textSize, textTracking, textLeading, textBold, textItalic, textAlignment, beginInlineText](const QUuid &id) {
         // Commit using the previous layer's controls before loading the next layer's style.
-        if (auto *existing = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) existing->finish(true);
+        if (auto *existing = inlineTextEditor()) existing->finish(true);
         if (!document_) return;
         auto it = std::find_if(document_->layers.begin(), document_->layers.end(), [&id](const Layer &layer) { return layer.id == id; });
         if (it == document_->layers.end()) return;
@@ -2588,8 +2652,8 @@ MainWindow::MainWindow(QWidget *parent)
         session_.selectLayer(id); canvas_->setTextEditingLayer(id);
         beginInlineText(box, style, areaText, id);
     });
-    connect(textDone, &QPushButton::clicked, this, [this] { if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(true); });
-    connect(textCancel, &QPushButton::clicked, this, [this] { if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(false); });
+    connect(textDone, &QPushButton::clicked, this, [this] { if (auto *editor = inlineTextEditor()) editor->finish(true); });
+    connect(textCancel, &QPushButton::clicked, this, [this] { if (auto *editor = inlineTextEditor()) editor->finish(false); });
     connect(canvas_, &CanvasWidget::colorSampleRequested, this, [this](const QPoint &point) {
         if (colorSampleOverride_) { colorSampleOverride_(point); return; }
         if (!document_ || !QRect(QPoint(), document_->canvasSize).contains(point)) return;
@@ -2613,6 +2677,7 @@ MainWindow::MainWindow(QWidget *parent)
     quickExportMenu->setObjectName(QStringLiteral("quickExportMenu"));
     if (QAction *png = findChild<QAction *>(QStringLiteral("commandExportPng"))) quickExportMenu->addAction(png);
     if (QAction *jpeg = findChild<QAction *>(QStringLiteral("commandExportJpeg"))) quickExportMenu->addAction(jpeg);
+    if (QAction *as = findChild<QAction *>(QStringLiteral("commandExportAs"))) quickExportMenu->addAction(as);
     quickFileMenu_->addSeparator();
     // Reuse the same menus and actions so shortcuts, enabled states, and dynamic
     // command labels remain identical with the menu bar shown or hidden.
@@ -2931,6 +2996,8 @@ void MainWindow::createActions()
     rebuildOpenRecentMenu();
     auto *importAction = file->addAction(tr("&Import Images…"));
     connect(importAction, &QAction::triggered, this, &MainWindow::importImages);
+    auto *importFolder=file->addAction(tr("Import Folder as Layers…"));importFolder->setObjectName(QStringLiteral("cmdImportFolder"));
+    connect(importFolder,&QAction::triggered,this,[this]{const QString folder=QFileDialog::getExistingDirectory(this,tr("Import Folder as Layers"));if(!folder.isEmpty())importImageFiles({folder});});
     auto *save = file->addAction(tr("&Save"));
     save->setObjectName(QStringLiteral("commandSave"));
     save->setShortcut(QKeySequence::Save);
@@ -2939,14 +3006,20 @@ void MainWindow::createActions()
     saveAs->setObjectName(QStringLiteral("commandSaveAs"));
     saveAs->setShortcut(QKeySequence::SaveAs);
     connect(saveAs, &QAction::triggered, this, [this]() { saveProjectAs(false); });
+    // As on macOS: Export JPEG… opens Export As on JPEG, Export PNG… goes straight to a file, Export As… (Ctrl+Alt+Shift+W,
+    // as Photoshop's) sizes and previews any format.
+    auto *exportJpegAction = file->addAction(tr("Export &JPEG…"));
+    exportJpegAction->setObjectName(QStringLiteral("commandExportJpeg"));
+    exportJpegAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_S));
+    connect(exportJpegAction, &QAction::triggered, this, [this] { exportAsDialog(true); });
     auto *exportAction = file->addAction(tr("Export &PNG…"));
     exportAction->setObjectName(QStringLiteral("commandExportPng"));
     exportAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     connect(exportAction, &QAction::triggered, this, [this] { exportPng(false); });
-    auto *exportJpegAction = file->addAction(tr("Export &JPEG…"));
-    exportJpegAction->setObjectName(QStringLiteral("commandExportJpeg"));
-    exportJpegAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_S));
-    connect(exportJpegAction, &QAction::triggered, this, [this] { exportPng(true); });
+    auto *exportAsAction = file->addAction(tr("Export &As…"));
+    exportAsAction->setObjectName(QStringLiteral("commandExportAs"));
+    exportAsAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_W));
+    connect(exportAsAction, &QAction::triggered, this, [this] { exportAsDialog(false); });
     file->addSeparator();
     auto *closeProject = file->addAction(tr("&Close Project"));
     closeProject->setShortcut(QKeySequence::Close);
@@ -3003,7 +3076,7 @@ void MainWindow::createActions()
     });
     auto *fill = edit->addAction(tr("Fill…")); fill->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F5));
     connect(fill, &QAction::triggered, this, [this] {
-        const QColor color = QColorDialog::getColor(QColor(22, 134, 232), this, tr("Fill Color"), QColorDialog::ShowAlphaChannel);
+        const QColor color = ColorPickerDialog::getColor(session_.foregroundColor(), this, tr("Color Picker (Fill)"));
         if (refusePaint(session_, canvas_)) return;
         if (color.isValid() && session_.fillSelection(color)) syncDocumentViews();
     });
@@ -3101,11 +3174,12 @@ void MainWindow::createActions()
     adjustments->menuAction()->setObjectName(QStringLiteral("commandNewAdjustment"));
     auto rebuildAdjustmentsMenu = [this, adjustments] {
         adjustments->clear();
+        // AdjustmentKind.allCases order on macOS.
         static const QStringList allKinds{
             QStringLiteral("Hue/Saturation"), QStringLiteral("Levels"), QStringLiteral("Curves"),
             QStringLiteral("Exposure"), QStringLiteral("Gradient Map"), QStringLiteral("Grain"),
-            QStringLiteral("Invert"), QStringLiteral("Black & White"), QStringLiteral("Color Balance"),
-            QStringLiteral("Gaussian Blur"), QStringLiteral("Motion Blur"), QStringLiteral("Add Noise")
+            QStringLiteral("Add Noise"), QStringLiteral("Gaussian Blur"), QStringLiteral("Motion Blur"),
+            QStringLiteral("Invert"), QStringLiteral("Black & White"), QStringLiteral("Color Balance")
         };
         for (const QString &kind : allKinds) {
             if (!session_.canSaveAdjustment(kind)) continue;
@@ -3231,6 +3305,11 @@ void MainWindow::createActions()
     connect(cropAction, &QAction::triggered, this, &MainWindow::cropDialog);
     connect(trimAction, &QAction::triggered, this, &MainWindow::trimDialog);
     image->addSeparator();
+    for (bool clockwise : {true,false}) {
+        auto *rotate = image->addAction(clockwise ? tr("Rotate Canvas 90° Clockwise") : tr("Rotate Canvas 90° Counterclockwise"));
+        rotate->setObjectName(clockwise ? QStringLiteral("cmdRotateClockwise") : QStringLiteral("cmdRotateCounterclockwise"));
+        connect(rotate,&QAction::triggered,this,[this,clockwise] { finishPendingCanvasEdits(); if (session_.rotateCanvas(clockwise)) { syncDocumentViews(); canvas_->fitCanvas(); } });
+    }
     auto *flipCanvasH = image->addAction(tr("Flip Canvas Horizontal"));
     auto *flipCanvasV = image->addAction(tr("Flip Canvas Vertical"));
     connect(flipCanvasH, &QAction::triggered, this, [this] { finishPendingCanvasEdits(); if (session_.flipCanvas(true)) syncDocumentViews(); });
@@ -3263,6 +3342,15 @@ void MainWindow::createActions()
     auto *cameraRaw = filterMenu->addAction(tr("Camera Raw Filter…"));
     cameraRaw->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
     connect(cameraRaw, &QAction::triggered, this, &MainWindow::cameraRawDialog);
+    auto *lastFilter=filterMenu->addAction(tr("Last Filter"));lastFilter->setObjectName(QStringLiteral("cmdLastFilter"));
+    lastFilter->setShortcut(QKeySequence(Qt::CTRL|Qt::ALT|Qt::Key_F));addAction(lastFilter);
+    connect(lastFilter,&QAction::triggered,this,[this]{if(session_.applyLastFilter())syncDocumentViews();});
+    connect(filterMenu,&QMenu::aboutToShow,this,[this]{updateCommandStates();});
+    filterMenu->addSeparator();
+    auto *scanlines=filterMenu->addAction(tr("Scanlines…"));scanlines->setObjectName(QStringLiteral("cmdScanlines"));scanlines->setProperty("needsPixelLayer",true);
+    connect(scanlines,&QAction::triggered,this,&MainWindow::scanlinesDialog);
+    auto *progressive=filterMenu->addAction(tr("Progressive Blur…"));progressive->setObjectName(QStringLiteral("cmdProgressiveBlur"));progressive->setProperty("needsPixelLayer",true);
+    connect(progressive,&QAction::triggered,this,&MainWindow::progressiveBlurDialog);
     auto *gaussianBlur = filterMenu->addAction(tr("Gaussian Blur…"));
     auto *motionBlur = filterMenu->addAction(tr("Motion Blur…"));
     auto *vignetteAction = filterMenu->addAction(tr("Vignette…"));
@@ -3488,6 +3576,7 @@ void MainWindow::createActions()
     actionSnap_->setChecked(session_.snapEnabled());
     connect(actionSnap_, &QAction::toggled, this, [this](bool enabled) {
         session_.setSnapEnabled(enabled);
+        if(enabled){session_.setSnapToGuides(true);session_.setSnapToGrid(true);session_.setSnapToLayers(true);session_.setSnapToDocumentBounds(true);}
     });
 
     auto *snapToSubMenu = view->addMenu(tr("Snap To"));
@@ -3577,6 +3666,21 @@ void MainWindow::createActions()
         for (const auto &entry : names) if (entry.first && entry.first->objectName().isEmpty()) entry.first->setObjectName(QLatin1String(entry.second));
     }
 
+    setupCMYK(view);
+    // Off until turned on, and remembered (mac AppStorage "navigator.visible").
+    auto *navigator=view->addAction(tr("Navigator (300% and above)"));navigator->setObjectName(QStringLiteral("cmdNavigator"));navigator->setCheckable(true);
+    navigator->setChecked(ToolDefaults::boolean(QStringLiteral("navigator.visible"), false));canvas_->setNavigatorVisible(navigator->isChecked());
+    connect(navigator,&QAction::toggled,this,[this](bool on){canvas_->setNavigatorVisible(on);ToolDefaults::set(QStringLiteral("navigator.visible"),on);});
+    auto *search=view->addAction(tr("Search Commands…"));search->setObjectName(QStringLiteral("cmdSearchCommands"));search->setShortcut(QKeySequence(Qt::CTRL|Qt::Key_F));addAction(search);
+    connect(search,&QAction::triggered,this,&MainWindow::searchCommands);
+    auto *fullscreen=view->addAction(tr("Toggle Fullscreen"));fullscreen->setObjectName(QStringLiteral("cmdFullscreen"));fullscreen->setShortcut(QKeySequence(Qt::Key_F));addAction(fullscreen);
+    fullscreen->setCheckable(true); actionFullscreen_ = fullscreen;
+    connect(fullscreen,&QAction::triggered,this,&MainWindow::toggleCanvasOnly);
+    auto *depth=image->addMenu(tr("Layer Bit Depth"));
+    for(bool sixteen:{false,true}) {
+        auto *action=depth->addAction(sixteen?tr("16-Bit"):tr("8-Bit"));action->setObjectName(sixteen?QStringLiteral("cmdDepth16"):QStringLiteral("cmdDepth8"));
+        connect(action,&QAction::triggered,this,[this,sixteen]{finishPendingCanvasEdits();if(session_.convertDepth(sixteen))syncDocumentViews();});
+    }
     auto *help = menuBar()->addMenu(tr("&Help"));
     // The shortcut list (also under Edit), where to report a problem, updates, and who made what.
     connect(help->addAction(tr("&Keyboard Shortcuts…")), &QAction::triggered, this, &MainWindow::keyboardShortcutsDialog);
@@ -3638,6 +3742,7 @@ void MainWindow::createActions()
     sm.registerAction(QStringLiteral("Menus:Save As"), saveAs);
     sm.registerAction(QStringLiteral("Menus:Export PNG"), exportAction);
     sm.registerAction(QStringLiteral("Menus:Export JPEG"), exportJpegAction);
+    sm.registerAction(QStringLiteral("Menus:Export As"), exportAsAction);
     sm.registerAction(QStringLiteral("Menus:Close Project"), closeProject);
     sm.registerAction(QStringLiteral("Menus:Undo"), undo);
     sm.registerAction(QStringLiteral("Menus:Redo"), redo);
@@ -3673,6 +3778,9 @@ void MainWindow::createActions()
     sm.registerAction(QStringLiteral("Menus:Canvas Size"), canvasSize);
     sm.registerAction(QStringLiteral("Menus:Invert Pixels / Mask"), invert);
     sm.registerAction(QStringLiteral("Menus:Camera Raw Filter"), cameraRaw);
+    sm.registerAction(QStringLiteral("Menus:Search Commands"),search);
+    sm.registerAction(QStringLiteral("Menus:Toggle Fullscreen"),fullscreen);
+    sm.registerAction(QStringLiteral("Menus:Last Filter"),lastFilter);
 
     sm.registerAction(QStringLiteral("Menus:Show Menu Bar"), showMenuBar);
     sm.registerAction(QStringLiteral("Menus:Fit Canvas"), fit);
@@ -3757,7 +3865,7 @@ void MainWindow::cutPixels()
 
 void MainWindow::pastePixels()
 {
-    if (!document_) return;
+    if (!document_) {const QImage image=QGuiApplication::clipboard()->image();if(!image.isNull()&&session_.insertImage(image,tr("Pasted Image")))syncDocumentViews();return;}
     if (pasteWholeLayers()) return;
     const QImage image = QGuiApplication::clipboard()->image();
     if (image.isNull()) return;
@@ -3863,6 +3971,7 @@ void MainWindow::exposureDialog()
     QDialog dialog(this); dialog.setWindowTitle(tr("Exposure")); auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
     auto make = [&dialog](double minimum, double maximum, double value) { auto *field = new QDoubleSpinBox(&dialog); field->setRange(minimum, maximum); field->setValue(value); field->setDecimals(2); field->setSingleStep(.1); return field; };
     auto *stops = make(-20, 20, 0); auto *offset = make(-.5, .5, 0); auto *gamma = make(.01, 9.99, 1);
+    rememberFilter(session_, dialog, live, QStringLiteral("exposure"), {{QStringLiteral("stops"), stops}, {QStringLiteral("offset"), offset}, {QStringLiteral("gamma"), gamma}});
     stops->setObjectName(QStringLiteral("exposureStops")); offset->setObjectName(QStringLiteral("exposureOffset")); gamma->setObjectName(QStringLiteral("exposureGamma"));
     auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog); previewEnabled->setChecked(true); previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     const QJsonObject originalAdjustment = active->adjustment; const Layer originalLayer = *active;
@@ -3923,7 +4032,7 @@ void MainWindow::gridSettingsDialog()
     for (QComboBox *box : {preset, style}) connect(box, &QComboBox::currentIndexChanged, &dialog, [&](int) { apply(); });
     for (QSpinBox *box : {opacity, spacing, subdivisions}) connect(box, &QSpinBox::valueChanged, &dialog, [&](int) { apply(); });
     connect(color, &QPushButton::clicked, &dialog, [&] {
-        const QColor chosen = QColorDialog::getColor(look.customColor, &dialog, tr("Grid Color"));
+        const QColor chosen = ColorPickerDialog::getColor(look.customColor, &dialog, tr("Color Picker (Grid)"));
         if (!chosen.isValid()) return;
         look.customColor = chosen; color->setStyleSheet(QStringLiteral("background:%1;").arg(chosen.name())); apply();
     });
@@ -4208,6 +4317,10 @@ void MainWindow::gradientMapDialog()
     const QUuid target = active->id;
     QDialog dialog(this); dialog.setWindowTitle(tr("Gradient Map")); auto *layout = new QVBoxLayout(&dialog);
     QColor shadows = Qt::black, highlights = Qt::white;
+    if (!live) {
+        shadows = session_.filterMemory.value(QStringLiteral("gradientMap.shadows"), shadows).value<QColor>();
+        highlights = session_.filterMemory.value(QStringLiteral("gradientMap.highlights"), highlights).value<QColor>();
+    }
     const QJsonObject originalAdjustment = active->adjustment; const Layer originalLayer=*active;
     if (live) { const QJsonObject saved = originalAdjustment.value(QStringLiteral("gradientMapSettings")).toObject(); const auto read = [](const QJsonObject &c, const QColor &fallback) { return c.isEmpty() ? fallback : QColor::fromRgbF(c.value(QStringLiteral("red")).toDouble(), c.value(QStringLiteral("green")).toDouble(), c.value(QStringLiteral("blue")).toDouble()); }; shadows = read(saved.value(QStringLiteral("shadows")).toObject(), Qt::black); highlights = read(saved.value(QStringLiteral("highlights")).toObject(), Qt::white); }
     auto *shadowButton = new QPushButton(tr("Choose shadow color…"), &dialog); auto *highlightButton = new QPushButton(tr("Choose highlight color…"), &dialog);
@@ -4217,6 +4330,11 @@ void MainWindow::gradientMapDialog()
     auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog); previewEnabled->setChecked(true); previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     const auto value = [&] { const auto color = [](const QColor &c) { return QJsonObject{{QStringLiteral("red"), c.redF()}, {QStringLiteral("green"), c.greenF()}, {QStringLiteral("blue"), c.blueF()}}; }; return QJsonObject{{QStringLiteral("kind"), QStringLiteral("Gradient Map")}, {QStringLiteral("gradientMapSettings"), QJsonObject{{QStringLiteral("shadows"), color(shadows)}, {QStringLiteral("highlights"), color(highlights)}, {QStringLiteral("reversed"), reverse->isChecked()}}}}; };
     if (live) reverse->setChecked(originalAdjustment.value(QStringLiteral("gradientMapSettings")).toObject().value(QStringLiteral("reversed")).toBool());
+    rememberToggle(session_, dialog, live, QStringLiteral("gradientMap.reversed"), reverse);
+    connect(&dialog, &QDialog::accepted, &dialog, [&] {
+        session_.filterMemory.insert(QStringLiteral("gradientMap.shadows"), shadows);
+        session_.filterMemory.insert(QStringLiteral("gradientMap.highlights"), highlights);
+    });
     session_.beginEdit(live?QStringLiteral("Edit Gradient Map"):QStringLiteral("Gradient Map"));
     const auto preview = [this, live, target, value, originalLayer, &shadows, &highlights, reverse, previewEnabled] { if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,value());else{restoreLayer(document_.get(), session_, target, originalLayer);session_.applyGradientMap(shadows,highlights,reverse->isChecked());}canvas_->invalidateDocument(); };
     const auto refreshGradient = [&] {
@@ -4247,6 +4365,7 @@ void MainWindow::grainDialog()
     QDialog dialog(this); dialog.setWindowTitle(tr("Grain")); auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
     auto make = [&dialog](double minimum, double maximum, double value, int decimals = 0) { auto *field = new QDoubleSpinBox(&dialog); field->setRange(minimum, maximum); field->setValue(value); field->setDecimals(decimals); return field; };
     auto *amount = make(0, 100, 25, 0); auto *size = make(.5, 20, 1.5, 1); auto *roughness = make(0, 100, 50, 0);
+    rememberFilter(session_, dialog, live, QStringLiteral("grain"), {{QStringLiteral("amount"), amount}, {QStringLiteral("size"), size}, {QStringLiteral("roughness"), roughness}});
     amount->setObjectName(QStringLiteral("grainAmount")); size->setObjectName(QStringLiteral("grainSize")); roughness->setObjectName(QStringLiteral("grainRoughness"));
     auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog); previewEnabled->setChecked(true); previewEnabled->setObjectName(QStringLiteral("filterPreview"));
     const QJsonObject originalAdjustment = active->adjustment; const Layer originalLayer=*active; quint32 seed = QRandomGenerator::global()->generate();
@@ -4310,6 +4429,11 @@ void MainWindow::blackWhiteDialog()
     const QJsonObject originalAdjustment = active->adjustment;
     const Layer originalLayer = *active;
 
+    rememberFilter(session_, dialog, live, QStringLiteral("blackWhite"), {
+        {QStringLiteral("reds"), reds}, {QStringLiteral("yellows"), yellows}, {QStringLiteral("greens"), greens},
+        {QStringLiteral("cyans"), cyans}, {QStringLiteral("blues"), blues}, {QStringLiteral("magentas"), magentas},
+        {QStringLiteral("tintHue"), tintHue}, {QStringLiteral("tintSaturation"), tintSaturation}});
+    rememberToggle(session_, dialog, live, QStringLiteral("blackWhite.tint"), tint);
     if (live) {
         const QJsonObject saved = originalAdjustment.value(QStringLiteral("blackWhiteSettings")).toObject();
         reds->setValue(saved.value(QStringLiteral("reds")).toDouble(40));
@@ -4447,6 +4571,11 @@ void MainWindow::colorBalanceDialog()
     const QJsonObject originalAdjustment = active->adjustment;
     const Layer originalLayer = *active;
 
+    rememberFilter(session_, dialog, live, QStringLiteral("colorBalance"), {
+        {QStringLiteral("shadowCR"), sCR}, {QStringLiteral("shadowMG"), sMG}, {QStringLiteral("shadowYB"), sYB},
+        {QStringLiteral("midCR"), mCR}, {QStringLiteral("midMG"), mMG}, {QStringLiteral("midYB"), mYB},
+        {QStringLiteral("highCR"), hCR}, {QStringLiteral("highMG"), hMG}, {QStringLiteral("highYB"), hYB}});
+    rememberToggle(session_, dialog, live, QStringLiteral("colorBalance.preserve"), preserveLuminosity);
     if (live) {
         const QJsonObject saved = originalAdjustment.value(QStringLiteral("colorBalanceSettings")).toObject();
         sCR->setValue(saved.value(QStringLiteral("shadowCyanRed")).toDouble(0));
@@ -4594,10 +4723,11 @@ void MainWindow::gaussianBlurDialog()
     radius->setObjectName(QStringLiteral("gaussianBlurRadius"));
     radius->setDecimals(1);
     radius->setRange(.1, 250);
-    radius->setValue(live ? originalAdjustment.value(QStringLiteral("blurRadius")).toDouble(10.0) : 1.0);   // mac FilterSettings.radius
+    radius->setValue(live ? originalAdjustment.value(QStringLiteral("blurRadius")).toDouble(5.0) : 5.0);   // mac FilterSettings.radius
     radius->setSuffix(tr(" px"));
     addScrubRow(form, tr("Radius"), radius, true);
     layout->addLayout(form);
+    auto *preserve=new QCheckBox(tr("Preserve Transparency"),&dialog);preserve->setObjectName(QStringLiteral("gaussianPreserveTransparency"));preserve->setVisible(!live);layout->addWidget(preserve);
     auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
     previewEnabled->setChecked(true);
     previewEnabled->setObjectName(QStringLiteral("filterPreview"));
@@ -4611,7 +4741,7 @@ void MainWindow::gaussianBlurDialog()
             {QStringLiteral("blurRadius"), radius->value()}
         };
     };
-    const auto preview = [this, live, target, original, value, radius, previewEnabled] {
+    const auto preview = [this, live, target, original, value, radius, preserve, previewEnabled] {
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, original.adjustment);
             else restoreLayer(document_.get(), session_, target, original);
@@ -4619,12 +4749,13 @@ void MainWindow::gaussianBlurDialog()
             session_.previewAdjustment(target, value());
         } else {
             restoreLayer(document_.get(), session_, target, original);
-            session_.applyGaussianBlur(radius->value());
+            session_.applyGaussianBlur(radius->value(),preserve->isChecked());
         }
         canvas_->invalidateDocument();
     };
     connect(radius, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
     connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
+    connect(preserve,&QCheckBox::toggled,&dialog,preview);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
@@ -4977,7 +5108,7 @@ void MainWindow::ditherDialog()
     dialog.setWindowTitle(tr("Dither"));
     auto *layout = new QVBoxLayout(&dialog);
     auto *form = new QFormLayout;
-    auto settings = std::make_shared<DitherSettings>();
+    auto settings = std::make_shared<DitherSettings>(session_.lastDither.normalized());
     std::vector<std::pair<int, std::function<bool()>>> rows;  // form row, visibility rule
     const auto track = [&](std::function<bool()> visible) { rows.emplace_back(form->rowCount() - 1, std::move(visible)); };
 
@@ -4988,6 +5119,7 @@ void MainWindow::ditherDialog()
         if (group) style->insertSeparator(style->count());
         for (DitherStyle value : groups[group]) style->addItem(DitherInfo::styleName(value), int(value));
     }
+    style->setCurrentIndex(std::max(0, style->findData(int(settings->style))));
     form->addRow(tr("Style"), style);
 
     const auto spin = [&](const QString &name, const QString &label, double min, double max, double value,
@@ -5005,7 +5137,7 @@ void MainWindow::ditherDialog()
     };
     const auto style_ = [style] { return DitherStyle(style->currentData().toInt()); };
     const auto always = [] { return true; };
-    const DitherSettings d;
+    const DitherSettings d = *settings;
     spin(QStringLiteral("ditherPixelSize"), tr("Pixel Size"), DitherSettings::pixelSizeMin, DitherSettings::pixelSizeMax, d.pixelSize, tr(" px"),
          &DitherSettings::pixelSize, [style_] { return DitherInfo::usesPixelSize(style_()); });
     spin(QStringLiteral("ditherTextSize"), tr("Text Size"), DitherSettings::textSizeMin, DitherSettings::textSizeMax, d.textSize, tr(" px"),
@@ -5046,6 +5178,7 @@ void MainWindow::ditherDialog()
     auto *colors = new QComboBox(&dialog);
     colors->setObjectName(QStringLiteral("ditherColors"));
     colors->addItems({tr("Black & White"), tr("Two Colors"), tr("Original")});
+    colors->setCurrentIndex(int(d.colors));
     form->addRow(tr("Colors"), colors);
 
     const auto toColor = [](const DitherColor &c) { return QColor::fromRgbF(c.red, c.green, c.blue); };
@@ -5070,6 +5203,7 @@ void MainWindow::ditherDialog()
     auto *shape = new QComboBox(&dialog);
     shape->setObjectName(QStringLiteral("ditherPixelShape"));
     shape->addItems({tr("Square"), tr("Dot")});
+    shape->setCurrentIndex(d.pixelShape == DitherPixelShape::Dot ? 1 : 0);
     form->addRow(tr("Pixel Shape"), shape);
     track([settings, style_] { return settings->pixelSize > 1 && DitherInfo::usesPixelSize(style_()); });
     layout->addLayout(form);
@@ -5128,6 +5262,7 @@ void MainWindow::ditherDialog()
     preview();
 
     if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        session_.lastDither = settings->normalized();
         previewEnabled->setChecked(true);
         preview();
     } else {
@@ -5514,7 +5649,7 @@ void MainWindow::resizeCanvasDialog()
     };
     paintSwatch();
     connect(color, &QPushButton::clicked, &dialog, [&dialog, &extension, paintSwatch, this] {
-        const QColor chosen = QColorDialog::getColor(extension, &dialog, tr("Extension Color"));
+        const QColor chosen = ColorPickerDialog::getColor(extension, &dialog, tr("Color Picker (Extension Color)"));
         if (chosen.isValid()) { extension = chosen; paintSwatch(); }
     });
     auto *widthLabel = new ScrubLabel(tr("Width"), width, 1.0, std::nullopt, &dialog); widthLabel->setObjectName(QStringLiteral("canvasSizeWidthLabel"));
@@ -5629,22 +5764,32 @@ void MainWindow::keyboardShortcutsDialog()
     dialog.exec();
 }
 
+QString MainWindow::nextUntitledTitle() const
+{
+    int number=1;while(true){const QString title=tr("Untitled %1").arg(number);bool used=false;for(int i=0;i<tabs_->count();++i)if((tabs_->tabText(i)==title||tabs_->tabText(i)==title+QStringLiteral(" •")))used=true;if(!used)return title;++number;}
+}
 void MainWindow::newProject()
 {
+    if(auto *unit=findChild<QComboBox *>(QStringLiteral("newCanvasUnit")))unit->setCurrentIndex(0);
+    if(auto *dpi=findChild<QComboBox *>(QStringLiteral("newCanvasDpi")))dpi->setCurrentIndex(0);
+    if(auto *background=findChild<QComboBox *>(QStringLiteral("newCanvasBackground")))background->setCurrentIndex(0);
     cancelActiveSelectionTask();
     suggestClipboardOnEmpty_ = true;
-    installInNewTab(EditorSession(), tr("Untitled %1").arg(workspaceTabs_.size() + 1));
+    installInNewTab(EditorSession(), nextUntitledTitle());
 }
 
 void MainWindow::importImages()
 {
     const QStringList paths = QFileDialog::getOpenFileNames(this, tr("Import Images"), {},
-        tr("Images, SVG, Photoshop and Camera RAW Files (*.png *.jpg *.jpeg *.heic *.heif *.tif *.tiff *.svg *.svgz *.psd *.psb *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;Vector Graphics (*.svg *.svgz);;Photoshop Files (*.psd *.psb);;Camera RAW Files (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;All Files (*)"));
+        tr("Images, SVG, Photoshop and Camera RAW Files (*.png *.jpg *.jpeg *.webp *.exr *.hdr *.hif *.heic *.heif *.tif *.tiff *.svg *.svgz *.psd *.psb *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;Vector Graphics (*.svg *.svgz);;Photoshop Files (*.psd *.psb);;Camera RAW Files (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;All Files (*)"));
     importImageFiles(paths);
 }
 
 bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<QPointF> &requestedCenter)
 {
+    QStringList expanded;
+    for(const QString &path:paths){if(QFileInfo(path).isDir()){const QDir dir(path);for(const auto &file:dir.entryList(QDir::Files,QDir::Name|QDir::IgnoreCase)){const QString suffix=QFileInfo(file).suffix().toLower();if(QStringList{QStringLiteral("png"),QStringLiteral("jpg"),QStringLiteral("jpeg"),QStringLiteral("webp"),QStringLiteral("tif"),QStringLiteral("tiff"),QStringLiteral("exr"),QStringLiteral("hdr"),QStringLiteral("heic"),QStringLiteral("heif"),QStringLiteral("hif"),QStringLiteral("svg"),QStringLiteral("svgz"),QStringLiteral("psd")}.contains(suffix)||RawImporter::matches(dir.filePath(file)))expanded<<dir.filePath(file);}}else expanded<<path;}
+
     bool imported = false;
     QStringList failures;
     // No document yet: the first successful image decides the canvas, wherever it was dropped (mac drainImports).
@@ -5652,7 +5797,7 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
     // A batch is one undo step, however many files come in; failures add nothing (mac drainImports beginEdit).
     const bool photoshopOnly = !paths.isEmpty() && std::all_of(paths.cbegin(), paths.cend(), [](const QString &path) { return PSDReader::matches(path); });
     session_.beginEdit(photoshopOnly ? QStringLiteral("Import Photoshop File") : QStringLiteral("Import Images"));
-    for (const QString &path : paths) {
+    for (const QString &path : expanded) {
         if (RawImporter::matches(path)) {
             // The size is checked against what the document already holds before any develop work (mac drainImports).
             int rawWidth = 0, rawHeight = 0;
@@ -5675,6 +5820,7 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
                     continue;
                 }
                 imported = true;
+                if(dialog.property("openCameraRaw").toBool()){syncDocumentViews();cameraRawDialog();}
             }
             continue;
         }
@@ -5705,6 +5851,7 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
                 }
                 if (!confirmed) continue;
             }
+            if(const auto profile=CMYKProfile::fromData(result.cmykProfile))CMYK::choose(*profile);
             if (!session_.insertPhotoshop(result, QFileInfo(path).completeBaseName(), center, &psdError)) {
                 failures << tr("%1: %2").arg(QFileInfo(path).fileName(), psdError);
                 continue;
@@ -5738,7 +5885,7 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
 
 void MainWindow::finishInlineText()
 {
-    if (auto *editor = dynamic_cast<InlineTextEditor *>(canvas_->findChild<QTextEdit *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly))) editor->finish(true);
+    if (auto *editor = inlineTextEditor()) editor->finish(true);
 }
 
 void MainWindow::noteRecentProject(const QString &path)
@@ -6671,7 +6818,8 @@ void MainWindow::exportPng(bool jpegDefault)
     if (path.isEmpty()) return;
     QString exportError;
     if (!jpegDefault) {
-        const auto png = ImageExporter::png(image, document_->resolution, &exportError);
+        // At 8 bits, dithered from a 16-bit or HDR canvas, as macOS's Export PNG; Export As offers 16 bits.
+        const auto png = ImageExporter::png(DeepImage::isDeep(image) ? DeepImage::dithered(image) : image, document_->resolution, &exportError);
         if (!png) { showMessage(this, tr("Export Failed"), exportError); return; }
         jpegData = *png;
     }
@@ -6938,13 +7086,19 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
     }
 
     if (newTab) {
-        installInNewTab(EditorSession(), tr("Untitled %1").arg(workspaceTabs_.size() + 1));
+        installInNewTab(EditorSession(), nextUntitledTitle());
         targetIndex = currentTab_;
     } else {
         if (targetIndex < 0 || targetIndex >= workspaceTabs_.size()) return false;
         activateTab(targetIndex);
     }
-    if (!session_.document()) session_.createDocument(sourceSnapshot.canvasSize.width(), sourceSnapshot.canvasSize.height());
+    std::optional<QRectF> fitted;
+    if(!session_.document()) {
+        QRectF bounds;for(const Layer &layer:copied)if(!layer.group&&layer.adjustment.isEmpty()&&!layer.image.isNull())bounds|=layer.transform.unitToDocument().mapRect(QRectF(0,0,1,1));
+        if(!bounds.isEmpty())fitted=bounds.toAlignedRect();
+        const QSize size=fitted?QSize(std::min(DocumentLimits::maxSide,int(fitted->width())),std::min(DocumentLimits::maxSide,int(fitted->height()))):sourceSnapshot.canvasSize;
+        session_.createDocument(size.width(),size.height());
+    }
     if (!session_.document()) return false;
     qint64 usedPixels = 0;
     for (const Layer &layer : session_.document()->layers) {
@@ -6965,7 +7119,8 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
         if (ids.size() == 1 && root != copied.cend()) anchor = root->transform.center();
         else if (!united.isNull()) anchor = united.center();
     }
-    const QPointF destination = point.value_or(QPointF(session_.document()->canvasSize.width() / 2.0, session_.document()->canvasSize.height() / 2.0));
+    if(fitted)anchor=fitted->center();
+    const QPointF destination = !fitted&&point?*point:QPointF(session_.document()->canvasSize.width()/2.0,session_.document()->canvasSize.height()/2.0);
     const QPointF offset = destination - anchor;
     QHash<QUuid, QUuid> mapping;
     for (const Layer &layer : copied) mapping.insert(layer.id, QUuid::createUuid());
@@ -6982,7 +7137,9 @@ bool MainWindow::copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, boo
     if (session_.document()->formatVersion != 0)   // 0 means "work it out from the content"
         session_.document()->formatVersion = std::max(session_.document()->formatVersion, ProjectWriter::minimumRequiredVersion(*session_.document()));
     const QUuid primary = mapping.value(ids.constFirst(), copied.constLast().id);
-    session_.selectLayer(primary);
+    QSet<QUuid> selection;
+    for (const QUuid &id : ids) if (mapping.contains(id)) selection.insert(mapping.value(id));
+    session_.selectLayers(selection,primary);
     session_.endEdit();
     syncDocumentViews();
     return true;
@@ -7120,7 +7277,8 @@ void MainWindow::updateCommandStates()
         for (QAction *item : menu->actions()) if (item->property("needsCommittedText").toBool()) item->setEnabled(!editingText);
     // (Which filters and adjustments are enabled is decided once, in the named block below.)
     if (QAction *item = action("cmdInvert")) item->setText(session_.isMaskSelected() ? tr("Invert Mask") : tr("&Invert"));   // enabled state below
-    enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument);
+    if (QAction *last = action("cmdLastFilter")) last->setText(session_.hasLastFilter() ? tr("Last Filter: %1").arg(session_.lastFilterName()) : tr("Last Filter"));
+    enabled("commandSave", hasDocument); enabled("commandSaveAs", hasDocument); enabled("commandExportPng", hasDocument); enabled("commandExportJpeg", hasDocument); enabled("commandExportAs", hasDocument);
     enabled("imageTrimAction", hasDocument); enabled("imageCropAction", hasDocument);
     enabled("commandCut", text || (hasSelection && canCopy)); enabled("commandCopy", text || canCopy || (hasActive && !hasSelection && !session_.isMaskSelected())); enabled("commandCopyMerged", hasDocument && hasSelection);
     enabled("commandPaste", text || !clipboardImage_.isNull() || (QGuiApplication::clipboard()->mimeData() && QGuiApplication::clipboard()->mimeData()->hasFormat(QStringLiteral("application/x-compositor-copied-layer"))) || (QGuiApplication::clipboard()->mimeData() && QGuiApplication::clipboard()->mimeData()->hasImage()));
@@ -7168,8 +7326,12 @@ void MainWindow::updateCommandStates()
         for (const char *name : {"cmdExpand", "cmdContract", "commandFeatherSelection"}) enabled(name, hasSelection);
         for (const char *name : {"cmdLevels", "cmdHueSaturation", "cmdCurves"}) enabled(name, adjustableOrLive);
         for (const char *name : {"cmdExposure", "cmdGradientMap", "cmdGrain", "cmdBlackWhite", "cmdColorBalance", "cmdAddNoise", "cmdLens", "cmdCameraRaw",
-                                 "cmdGaussianBlur", "cmdMotionBlur", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdRemoveBackground"}) enabled(name, adjustable);
+                                 "cmdGaussianBlur", "cmdMotionBlur", "cmdProgressiveBlur", "cmdScanlines", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdRemoveBackground"}) enabled(name, adjustable);
         enabled("cmdVignette", vignetteOk);
+        enabled("cmdLastFilter", session_.hasLastFilter() && (adjustable || (vignetteOk && session_.lastFilterName() == QStringLiteral("Vignette"))));
+        const bool depthOk = paintOk && single && !maskTarget && !editingText && active && !active->text;
+        enabled("cmdDepth16", depthOk && (active->image.isNull() || !DeepImage::isDeep(active->image) || DeepImage::isHDR(active->image)));
+        enabled("cmdDepth8", depthOk && !active->image.isNull() && DeepImage::isDeep(active->image));
         enabled("cmdInvert", invertOk);
         enabled("commandContentAwareFill", adjustable && hasSelection);
         for (const char *name : {"cmdImageSize", "cmdCanvasSize", "cmdFlipCanvasH", "cmdFlipCanvasV", "cmdFlatten", "cmdFit", "cmdActual", "cmdZoomIn", "cmdZoomOut", "commandGridSettings"}) enabled(name, hasDocument);
@@ -7198,6 +7360,9 @@ void MainWindow::updateCommandStates()
     if (auto *btn = findChild<QToolButton *>(QStringLiteral("addEffectButton"))) {
         btn->setEnabled(session_.canEditEffects());
     }
+    if (layerMenuButton_) layerMenuButton_->setEnabled(session_.canEditLayers());
+    if (canvasOnly_ && !session_.hasDocument()) toggleCanvasOnly();
+    if (actionFullscreen_) actionFullscreen_->setEnabled(canvasOnly_ || session_.hasDocument());
     if (auto *btn = findChild<QToolButton *>(QStringLiteral("deleteLayerButton"))) {
         btn->setEnabled(hasActive || selectedEffect_.has_value());
         btn->setToolTip(selectedEffect_ ? tr("Delete selected effect")
@@ -7222,9 +7387,31 @@ void MainWindow::updateCommandStates()
     if (actionClearGuides_) actionClearGuides_->setEnabled(session_.canClearGuides());
 }
 
+void MainWindow::toggleCanvasOnly()
+{
+    // Toggle Fullscreen (F): every panel and bar hidden, the canvas alone on black over the whole screen (mac canvasOnly).
+    const bool entering = !canvasOnly_;
+    if (entering && (!session_.hasDocument() || QApplication::activeModalWidget())) {
+        if (actionFullscreen_) { const QSignalBlocker blocker(actionFullscreen_); actionFullscreen_->setChecked(false); }
+        return;
+    }
+    canvasOnly_ = entering;
+    for (const char *name : {"tabBar", "transformBar", "toolRail", "inspector", "bottomStatus"})
+        if (auto *widget = findChild<QWidget *>(QLatin1String(name))) widget->setVisible(!entering);
+    // Collapsed rather than hidden, so the menus' shortcuts keep working.
+    menuBar()->setMaximumHeight(entering ? 0 : QWIDGETSIZE_MAX);
+    canvas_->setCanvasOnly(entering);
+    updateRulerVisibility();
+    if (entering) { stateBeforeCanvasOnly_ = windowState(); showFullScreen(); }
+    else if (stateBeforeCanvasOnly_.testFlag(Qt::WindowFullScreen)) showFullScreen();
+    else if (stateBeforeCanvasOnly_.testFlag(Qt::WindowMaximized)) showMaximized();
+    else showNormal();
+    if (actionFullscreen_) { const QSignalBlocker blocker(actionFullscreen_); actionFullscreen_->setChecked(entering); }
+}
+
 void MainWindow::updateRulerVisibility()
 {
-    const bool show = session_.showsRulers() && session_.hasDocument();
+    const bool show = session_.showsRulers() && session_.hasDocument() && !canvasOnly_;
     if (rulerCorner_) rulerCorner_->setVisible(show);
     if (horizontalRuler_) {
         horizontalRuler_->setVisible(show);
@@ -7238,7 +7425,7 @@ void MainWindow::updateRulerVisibility()
 
 InlineTextEditor *MainWindow::inlineTextEditor() const
 {
-    return canvas_ ? canvas_->findChild<InlineTextEditor *>(QStringLiteral("inlineTextEditor"), Qt::FindDirectChildrenOnly) : nullptr;
+    return inlineTextEditor_ && !inlineTextEditor_->objectName().isEmpty() ? inlineTextEditor_.data() : nullptr;
 }
 
 bool MainWindow::isMenuBarVisible() const
@@ -7329,6 +7516,8 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
             }
         }
         layerView_->selectionModel()->setCurrentIndex(primaryIndex, QItemSelectionModel::NoUpdate);
+        const auto active=document_?document_->activeLayerId:std::optional<QUuid>{};
+        if(active!=revealedLayer_){revealedLayer_=active;if(primaryIndex.isValid())layerView_->scrollTo(primaryIndex,QAbstractItemView::EnsureVisible);}
     }
     layerCount_->setText(document_ ? QString::number(document_->layers.size()) : QStringLiteral("0"));
     if (document_) {
@@ -7415,11 +7604,22 @@ void MainWindow::deleteLayersWithMaskChoice()
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 {
-    if (event->mimeData()->hasUrls() || event->mimeData()->hasImage()) event->acceptProposedAction();
+    if (event->mimeData()->hasUrls() || event->mimeData()->hasImage() || event->mimeData()->hasFormat(QStringLiteral("application/x-compositor-layers"))) event->acceptProposedAction();
 }
 
 void MainWindow::dropEvent(QDropEvent *event)
 {
+    if (event->mimeData()->hasFormat(QStringLiteral("application/x-compositor-layers"))) {
+        QVector<QUuid> ids;
+        for (const auto &part : event->mimeData()->data(QStringLiteral("application/x-compositor-layers")).split('\n')) {
+            const QUuid id(QString::fromUtf8(part)); if (!id.isNull() && !ids.contains(id)) ids.push_back(id);
+        }
+        const QPoint canvasPoint = canvas_->mapFrom(this,event->position().toPoint());
+        if (copyLayersToTab(ids,currentTab_,false,canvas_->documentPointAt(canvasPoint))) {
+            event->setDropAction(Qt::CopyAction); event->accept();
+        }
+        return;
+    }
     if (event->mimeData()->hasImage()) {
         const QImage image = qvariant_cast<QImage>(event->mimeData()->imageData());
         const QPoint canvasPoint = canvas_->mapFrom(this, event->position().toPoint());
@@ -7473,6 +7673,16 @@ void MainWindow::restoreWindowState()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    // Let the panel finish its transaction before asking which document edits to save. Closing
+    // while its nested event loop still owns the edit used to miss the pending filter revision.
+    bool finishingPanel = false;
+    for (QDialog *dialog : findChildren<QDialog *>())
+        if (dialog->isVisible() && dialog->property("compositorFloatingEditor").toBool()) {
+            dialog->accept(); finishingPanel = true;
+        }
+    if (finishingPanel) {
+        event->ignore(); QTimer::singleShot(0,this,[this] { close(); }); return;
+    }
     cancelActiveSelectionTask();
     finishInlineText();
     if (transformOriginalDocument_) finishPersistentTransform(true);
@@ -7544,6 +7754,16 @@ void MainWindow::syncHeldModifiers()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // Escape leaves fullscreen once there's nothing in progress for it to cancel first, and isn't meant for a text field.
+    if (event->type() == QEvent::KeyPress && canvasOnly_ && !QApplication::activeModalWidget() && QApplication::activeWindow() == this) {
+        const auto *key = static_cast<QKeyEvent *>(event);
+        QWidget *focus = QApplication::focusWidget();
+        const bool typing = focus && (qobject_cast<QLineEdit *>(focus) || qobject_cast<QAbstractSpinBox *>(focus)
+                                      || qobject_cast<QTextEdit *>(focus) || qobject_cast<QPlainTextEdit *>(focus));
+        if (key->key() == Qt::Key_Escape && key->modifiers() == Qt::NoModifier && !typing && canvas_->escapeHasNothingToCancel()) {
+            toggleCanvasOnly(); return true;
+        }
+    }
     if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease || event->type() == QEvent::ApplicationStateChange
         || event->type() == QEvent::WindowActivate || event->type() == QEvent::MouseButtonPress)
         QTimer::singleShot(0, this, &MainWindow::syncHeldModifiers);
@@ -7559,6 +7779,15 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         }
     }
     if (layerView_ && (watched == layerView_ || watched == layerView_->viewport())) {
+        if(event->type()==QEvent::MouseButtonPress&&static_cast<QMouseEvent *>(event)->button()==Qt::MiddleButton) {
+            layerPanStart_=static_cast<QMouseEvent *>(event)->position().toPoint();layerPanScroll_=layerView_->verticalScrollBar()->value();layerView_->viewport()->setCursor(Qt::ClosedHandCursor);return true;
+        }
+        if(event->type()==QEvent::MouseMove&&layerPanStart_) {
+            const int delta=static_cast<QMouseEvent *>(event)->position().toPoint().y()-layerPanStart_->y();layerView_->verticalScrollBar()->setValue(layerPanScroll_-delta);return true;
+        }
+        if(event->type()==QEvent::MouseButtonRelease&&static_cast<QMouseEvent *>(event)->button()==Qt::MiddleButton&&layerPanStart_) {
+            layerPanStart_.reset();layerView_->viewport()->unsetCursor();return true;
+        }
         // Select > All offers Select All to the focused view first; with the Layers panel just clicked, its list took it
         // and selected every layer. The canvas gets it instead (mac 451281e); a layer's name being edited still gets it first.
         if (event->type() == QEvent::ShortcutOverride && static_cast<QKeyEvent *>(event)->matches(QKeySequence::SelectAll)) {   // a name being edited has the focus itself, not the list
@@ -7698,8 +7927,12 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         const bool fileDrop = drop->mimeData()->hasUrls();
         const bool imageDrop = drop->mimeData()->hasImage();
         if (!layerDrop && !fileDrop && !imageDrop) return false;
+        if (layerDrop && event->type() == QEvent::DragMove && watched == tabs_) {
+            const int hovered = tabs_->tabAt(drop->position().toPoint());
+            if (hovered >= 0 && hovered != currentTab_) tabs_->setCurrentIndex(hovered);
+        }
         if (event->type() == QEvent::Drop) {
-            const bool newTab = watched != tabs_;
+            const bool newTab = watched != tabs_ || tabs_->tabAt(drop->position().toPoint())<0;
             const int target = newTab ? -1 : tabs_->tabAt(drop->position().toPoint());
             if (layerDrop) {
                 QVector<QUuid> ids;
@@ -7710,7 +7943,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             } else if (imageDrop) {
                 const QImage image = qvariant_cast<QImage>(drop->mimeData()->imageData());
                 if (!image.isNull()) {
-                    if (newTab) installInNewTab(EditorSession(), tr("Untitled %1").arg(workspaceTabs_.size() + 1));
+                    if (newTab) installInNewTab(EditorSession(), nextUntitledTitle());
                     else if (target >= 0) activateTab(target);
                     if (session_.insertImage(image, tr("Dropped Image"))) syncDocumentViews();
                 }
@@ -7719,7 +7952,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
                 if (newTab) {
                     for (const QString &path : paths) {
                         if (path.endsWith(QStringLiteral(".comp"), Qt::CaseInsensitive)) { openProject(path); continue; }
-                        if (!(workspaceTabs_.size() == 1 && !document_)) installInNewTab(EditorSession(), tr("Untitled %1").arg(workspaceTabs_.size() + 1));
+                        if (!(workspaceTabs_.size() == 1 && !document_)) installInNewTab(EditorSession(), nextUntitledTitle());
                         importImageFiles({path});
                     }
                 } else if (target >= 0) {

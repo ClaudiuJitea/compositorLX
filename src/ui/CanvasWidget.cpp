@@ -1,4 +1,7 @@
 #include "ui/CanvasWidget.h"
+#include "rendering/ShapePath.h"
+#include "rendering/DeepImage.h"
+#include "rendering/NavigatorGeometry.h"
 #include "ui/EditorStyle.h"
 #include "core/SelectionOps.h"
 
@@ -349,7 +352,7 @@ void CanvasWidget::refreshCursor()
     const bool blocked = editorInteractionBlocked_;
     if (spaceHeld_) setCursor(panning_ ? Qt::ClosedHandCursor : Qt::OpenHandCursor);
     else if (hueTargeting_) setCursor(Qt::SizeHorCursor);
-    else if (tool_ == Tool::Hand) setCursor(Qt::OpenHandCursor);
+    else if (tool_ == Tool::Hand) setCursor(panning_ ? Qt::ClosedHandCursor : Qt::OpenHandCursor); // closed for the whole pan, as on macOS
     else if (tool_ == Tool::Zoom) setCursor(zoomCursor(zoomOutMode_));
     else if (tool_ == Tool::Text) setCursor(Qt::IBeamCursor);
     else if (tool_ == Tool::Eyedropper) setCursor(eyedropperCursor());
@@ -580,7 +583,7 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
     // is judged against the same tones as the rest of the window.
     const QColor window = palette().color(QPalette::Window), text = palette().color(QPalette::WindowText);
     const bool darkScheme = window.lightnessF() < .5;
-    painter.fillRect(rect(), theme::mix(window, darkScheme ? QColor(Qt::black) : text, darkScheme ? .05 : .12));
+    painter.fillRect(rect(), canvasOnly_ ? QColor(Qt::black) : theme::mix(window, darkScheme ? QColor(Qt::black) : text, darkScheme ? .05 : .12));
     if (!document_) {
         painter.setPen(theme::mix(text, window, .3));
         painter.drawText(rect(), Qt::AlignCenter, tr("Open a Compositor .comp project"));
@@ -601,7 +604,9 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
     // Worked out in device pixels, so a scaled display (125%, 150%, 200%) is as sharp as an unscaled one: the reduction
     // matches what the screen shows, and a whole number of device pixels per image pixel is drawn without smoothing.
     const double deviceScale = zoom_ * devicePixelRatioF();
-    const QImage displayImage = DownsampleCache::shared().image(renderedDocument_, deviceScale);
+    QImage displaySource=renderedDocument_;
+    if(proofProfile_){if(proofCache_.isNull()||proofSourceKey_!=renderedDocument_.cacheKey()){proofCache_=CMYK::proof(renderedDocument_,*proofProfile_,gamutWarning_,proofEnabled_);proofSourceKey_=renderedDocument_.cacheKey();}displaySource=proofCache_;}
+    const QImage displayImage = DeepImage::dithered(DownsampleCache::shared().image(displaySource, deviceScale));
     painter.save();
     painter.setClipRect(target);
     painter.translate(target.topLeft());
@@ -912,6 +917,14 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
         painter.drawText(QRectF(badge.right() - 58, badge.top() + 4, 50, badge.height() - 8), Qt::AlignCenter, tr("Back"));
         painter.restore();
     }
+    const QRectF mini=navigatorRect();
+    if(!mini.isEmpty()) {
+        painter.save();painter.setClipRect(mini);drawCheckerboard(painter,mini);painter.drawImage(mini,DeepImage::dithered(renderedDocument_));
+        const QRectF visible((QPointF()-target.topLeft())/zoom_,QSizeF(size())/zoom_);
+        const QRectF viewport=NavigatorGeometry{document_->canvasSize,mini.size()}.thumbnailRect(visible).translated(mini.topLeft());
+        painter.setPen(QPen(Qt::white,2));painter.setBrush(QColor(255,255,255,25));painter.drawRect(viewport);painter.restore();
+        painter.setPen(QPen(QColor(20,20,20),2));painter.setBrush(Qt::NoBrush);painter.drawRect(mini);
+    }
     if (probeOverlay) { painter.save(); probeOverlay(painter, target, zoom_); painter.restore(); }
 }
 
@@ -975,8 +988,30 @@ bool CanvasWidget::event(QEvent *event)
     return QWidget::event(event);
 }
 
+bool CanvasWidget::escapeHasNothingToCancel() const
+{
+    return !guideDragging_ && !brushDrawing_ && !creationDragging_ && !persistentTransform_ && !cropRect_
+        && !pendingDistortion_ && !pendingGradient_ && !floatingTransform_ && lassoPoints_.isEmpty()
+        && !textEditingLayer_ && !movingLayer_ && !panning_;
+}
+
+QRectF CanvasWidget::navigatorRect() const
+{
+    if(!document_||zoom_<3||!navigatorVisible_||canvasOnly_||width()<240||height()<180)return {};
+    const QSizeF size=document_->canvasSize;
+    const double scale=std::min(160.0/size.width(),120.0/size.height());
+    return QRectF(QPointF(width()-size.width()*scale-16,height()-size.height()*scale-16),size*scale);
+}
+void CanvasWidget::centerViewOn(const QPointF &point)
+{
+    if(!document_)return;
+    setPanOffset(QPointF(document_->canvasSize.width()/2.0-point.x(),document_->canvasSize.height()/2.0-point.y())*zoom_);
+}
+
 void CanvasWidget::mousePressEvent(QMouseEvent *event)
 {
+    const QRectF mini=navigatorRect();
+    if(event->button()==Qt::LeftButton&&!mini.isEmpty()&&mini.contains(event->position())){navigatorDragging_=true;centerViewOn(NavigatorGeometry{document_->canvasSize,mini.size()}.documentPoint(event->position()-mini.topLeft()));event->accept();return;}
     // The badge under a mask shown alone has its own button back to the image.
     if (event->button() == Qt::LeftButton && session_ && session_->maskAloneLayerId() && maskAloneBadgeRect().contains(event->position())) {
         emit maskAloneExitRequested(); event->accept(); return;
@@ -984,6 +1019,11 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
     if (event->button() == Qt::RightButton && document_ && isBrushTool() && !brushDrawing_ && !spaceHeld_) {
         brushTipDrag_ = BrushTipDrag{event->position(), (event->position() - canvasRect().topLeft()) / zoom_, brushDiameter_, brushHardness_};
         cursorDocument_ = brushTipDrag_->document; update(); event->accept(); return;
+    }
+    if (event->button() == Qt::MiddleButton && document_ && (event->modifiers() & (Qt::ControlModifier | Qt::MetaModifier))) {
+        middleZoom_ = true; zoomDragging_ = true; zoomDragMoved_ = false;
+        zoomDragStart_ = event->position(); zoomDragPreviousX_ = event->position().x(); zoomDragOrigin_ = zoom_;
+        event->accept(); return;
     }
     if (event->button() == Qt::MiddleButton || event->button() == Qt::RightButton) {
         panning_ = true;
@@ -1000,7 +1040,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
     }
     if (event->button() == Qt::LeftButton && document_ && tool_ == Tool::Zoom) {
         // A click doubles (Alt halves); a drag zooms continuously, doubling for every 100 px dragged to the right.
-        zoomDragging_ = true; zoomDragMoved_ = false; zoomDragStart_ = event->position(); zoomDragOrigin_ = zoom_;
+        zoomDragging_ = true; zoomDragMoved_ = false; zoomDragStart_ = event->position(); zoomDragPreviousX_ = event->position().x(); zoomDragOrigin_ = zoom_;
         event->accept(); return;
     }
     if (event->button() == Qt::LeftButton && document_ && probeMode_) {
@@ -1342,6 +1382,7 @@ QPoint CanvasWidget::snapSelectionMoveEnd(const QPoint &current, Qt::KeyboardMod
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 {
+    if(navigatorDragging_){const QRectF mini=navigatorRect();centerViewOn(NavigatorGeometry{document_->canvasSize,mini.size()}.documentPoint(event->position()-mini.topLeft()));event->accept();return;}
     if (brushTipDrag_) {
         // Left and right resize the tip, its edge following the pointer; with Shift they set its hardness, the full range
         // across 200 px (mac rightMouseDragged).
@@ -1378,7 +1419,12 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
     if (zoomDragging_) {
         const double dx = event->position().x() - zoomDragStart_.x();
         if (std::abs(dx) >= 3) zoomDragMoved_ = true;
-        if (zoomDragMoved_) zoomTo(zoomDragOrigin_ * std::pow(2.0, dx / 100.0), zoomDragStart_);
+        if (zoomDragMoved_) {
+            const double delta = event->position().x() - zoomDragPreviousX_;
+            if (delta != 0) setCursor(zoomCursor(delta < 0));
+            zoomDragPreviousX_ = event->position().x();
+            zoomTo(zoomDragOrigin_ * std::pow(2.0, dx / 100.0), zoomDragStart_);
+        }
         event->accept(); return;
     }
     if (panning_) {
@@ -1692,6 +1738,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
 {
+    if(navigatorDragging_&&event->button()==Qt::LeftButton){navigatorDragging_=false;event->accept();return;}
     if (brushTipDrag_ && event->button() == Qt::RightButton) {
         brushTipDrag_.reset();
         if (document_) cursorDocument_ = (event->position() - canvasRect().topLeft()) / zoom_;
@@ -1717,9 +1764,10 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
         hueTargetDragging_ = false; emit hueTargetFinished();
         setCursor(hueTargeting_ ? Qt::SizeHorCursor : Qt::ArrowCursor); event->accept(); return;
     }
-    if (zoomDragging_ && event->button() == Qt::LeftButton) {
+    if (zoomDragging_ && (event->button() == Qt::LeftButton || (middleZoom_ && event->button() == Qt::MiddleButton))) {
         zoomDragging_ = false;
-        if (!zoomDragMoved_) zoomTo(zoom_ * (event->modifiers().testFlag(Qt::AltModifier) != zoomOutMode_ ? 0.5 : 2.0), zoomDragStart_);
+        const bool wasMiddle = middleZoom_; middleZoom_ = false;
+        if (!zoomDragMoved_ && !wasMiddle) zoomTo(zoom_ * (event->modifiers().testFlag(Qt::AltModifier) != zoomOutMode_ ? 0.5 : 2.0), zoomDragStart_);
         event->accept(); return;
     }
     if (panning_ && (event->button() == Qt::MiddleButton || event->button() == Qt::RightButton

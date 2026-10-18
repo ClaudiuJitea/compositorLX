@@ -1,5 +1,6 @@
 #include "rendering/LayerEffectsRenderer.h"
 #include "rendering/LayerRenderer.h"
+#include "rendering/DeepImage.h"
 
 #include <QColor>
 #include <QMutex>
@@ -278,6 +279,25 @@ std::pair<QImage, double> LayerEffectsRenderer::render(const QImage &image, cons
     if (!mask.isNull()) {
         shown = LayerRenderer::applyMask(image, mask, Sampling::HighQuality);
     }
+    if(DeepImage::isDeep(image)) {
+        QImage outside(canvasSize,QImage::Format_RGBA32FPx4_Premultiplied);outside.fill(Qt::transparent);
+        QImage own(canvasSize,outside.format());own.fill(Qt::transparent);{QPainter p(&own);p.drawImage(placedRect,shown);}
+        const auto shape=coverage(shown,placedRect,canvasSize,0);
+        const auto fill=[&](QImage &target,double red,double green,double blue,double opacity,const std::vector<float> &cov,bool inside){
+            for(int y=0;y<height;++y){auto *row=reinterpret_cast<float *>(target.scanLine(y));for(int x=0;x<width;++x){const int i=y*width+x;if(cov[i]<=0)continue;const double t=std::clamp(opacity*cov[i]/(inside&&shape[i]>0?shape[i]:1),0.0,1.0);float *p=row+x*4;
+                if(inside){p[0]=float(p[0]*(1-t)+red*p[3]*t);p[1]=float(p[1]*(1-t)+green*p[3]*t);p[2]=float(p[2]*(1-t)+blue*p[3]*t);}
+                else{p[0]=float(red*t+p[0]*(1-t));p[1]=float(green*t+p[1]*(1-t));p[2]=float(blue*t+p[2]*(1-t));p[3]=float(t+p[3]*(1-t));}
+            }}
+        };
+        if(visible.shadow){const auto &e=*visible.shadow;fill(outside,e.red,e.green,e.blue,e.opacity,shadowCoverage(shown,placedRect,canvasSize,e),false);}
+        if(visible.outerGlow){const auto &e=*visible.outerGlow;fill(outside,e.red,e.green,e.blue,e.opacity,outerGlowCoverage(shown,placedRect,canvasSize,e),false);}
+        if(visible.stroke&&!visible.stroke->inside){const auto &e=*visible.stroke;fill(outside,e.red,e.green,e.blue,e.opacity,strokeCoverage(shown,placedRect,canvasSize,e),false);}
+        if(visible.colorOverlay){const auto &e=*visible.colorOverlay;fill(own,e.red,e.green,e.blue,e.opacity,shape,true);}
+        if(visible.innerGlow){const auto &e=*visible.innerGlow;fill(own,e.red,e.green,e.blue,e.opacity,innerGlowCoverage(shown,placedRect,canvasSize,e),true);}
+        if(visible.innerShadow){const auto &e=*visible.innerShadow;fill(own,e.red,e.green,e.blue,e.opacity,innerCoverage(shown,placedRect,canvasSize,e),true);}
+        if(visible.stroke&&visible.stroke->inside){const auto &e=*visible.stroke;fill(own,e.red,e.green,e.blue,e.opacity,strokeCoverage(shown,placedRect,canvasSize,e),true);}
+        {QPainter p(&outside);p.drawImage(0,0,own);}return {outside.convertToFormat(DeepImage::canonical(image).format()),inset};
+    }
     shown = shown.convertToFormat(QImage::Format_ARGB32_Premultiplied);
 
     QImage context(canvasSize, QImage::Format_ARGB32_Premultiplied);
@@ -338,32 +358,45 @@ std::pair<QImage, double> LayerEffectsRenderer::render(const QImage &image, cons
         fill(col, visible.stroke->opacity, alpha);
     }
 
-    // 4. Base Layer Pixels (shown) SourceOver
-    {
-        QPainter p(&context);
-        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        p.drawImage(placedRect, shown);
-    }
+    // Recolor on the layer's own alpha, then composite this surface over the outer effects.
+    QImage outside = context;
+    context.fill(Qt::transparent);
+    { QPainter p(&context); p.drawImage(placedRect, shown); }
+    const auto recolor = [&](const QColor &color, double opacity, const std::vector<float> &cov) {
+        const auto shape = coverage(shown, placedRect, canvasSize, 0.0);
+        for (int y=0; y<height; ++y) {
+            auto *row = reinterpret_cast<QRgb *>(context.scanLine(y));
+            for (int x=0; x<width; ++x) {
+                const int i=y*width+x;
+                if (shape[i]<=0) continue;
+                const double a=std::clamp(opacity*cov[i]/shape[i],0.0,1.0);
+                const QRgb src=row[x];
+                row[x]=qRgba(qRound(qRed(src)*(1-a)+color.redF()*qAlpha(src)*a),
+                             qRound(qGreen(src)*(1-a)+color.greenF()*qAlpha(src)*a),
+                             qRound(qBlue(src)*(1-a)+color.blueF()*qAlpha(src)*a),qAlpha(src));
+            }
+        }
+    };
 
     // 5. Color Overlay
     if (visible.colorOverlay && visible.colorOverlay->opacity > 0.0) {
         const auto shape = coverage(shown, placedRect, canvasSize, 0.0);
         const QColor col = QColor::fromRgbF(visible.colorOverlay->red, visible.colorOverlay->green, visible.colorOverlay->blue);
-        fill(col, visible.colorOverlay->opacity, shape);
+        recolor(col, visible.colorOverlay->opacity, shape);
     }
 
     // 6. Inner Glow
     if (visible.innerGlow && visible.innerGlow->opacity > 0.0) {
         const auto insideGlow = innerGlowCoverage(shown, placedRect, canvasSize, *visible.innerGlow);
         const QColor col = QColor::fromRgbF(visible.innerGlow->red, visible.innerGlow->green, visible.innerGlow->blue);
-        fill(col, visible.innerGlow->opacity, insideGlow);
+        recolor(col, visible.innerGlow->opacity, insideGlow);
     }
 
     // 7. Inner Shadow
     if (visible.innerShadow && visible.innerShadow->opacity > 0.0) {
         const auto insideShadow = innerCoverage(shown, placedRect, canvasSize, *visible.innerShadow);
         const QColor col = QColor::fromRgbF(visible.innerShadow->red, visible.innerShadow->green, visible.innerShadow->blue);
-        fill(col, visible.innerShadow->opacity, insideShadow);
+        recolor(col, visible.innerShadow->opacity, insideShadow);
     }
 
     // 8. Inside Stroke
@@ -373,7 +406,8 @@ std::pair<QImage, double> LayerEffectsRenderer::render(const QImage &image, cons
         fill(col, visible.stroke->opacity, alpha);
     }
 
-    return {context, inset};
+    { QPainter p(&outside); p.drawImage(0,0,context); }
+    return {outside, inset};
 }
 
 std::pair<QImage, double> LayerEffectsRenderer::cached(const QImage &image, const QImage &mask, const LayerEffects &effects)

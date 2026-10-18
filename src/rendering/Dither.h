@@ -27,7 +27,7 @@ inline const std::vector<std::vector<DitherStyle>> &groups()
         {DitherStyle::Atkinson, DitherStyle::FloydSteinberg},
         {DitherStyle::Bayer2, DitherStyle::Bayer4, DitherStyle::Bayer8},
         {DitherStyle::Dots, DitherStyle::Lines, DitherStyle::Diamonds},
-        {DitherStyle::Patterns, DitherStyle::Ascii, DitherStyle::Scanlines}};
+        {DitherStyle::Patterns, DitherStyle::Ascii}};
     return value;
 }
 QString styleName(DitherStyle style);

@@ -1441,6 +1441,8 @@ const MacShortcut kMacDefaults[] = {
     {"Menus", "New Blank Layer", 'n', 9}, {"Menus", "Move Layer Up", ']', 1}, {"Menus", "Move Layer Down", '[', 1}, {"Menus", "Merge Layers", 'e', 1},
     {"Menus", "Show Grid", '\'', 1}, {"Menus", "Show Guides", ';', 1}, {"Menus", "Show Rulers", 'r', 1}, {"Menus", "Snap", ';', 9},
     {"Menus", "Lock Guides", ';', 3},
+    // Added in Compositor 1.5.
+    {"Menus", "Export As", 'w', 11}, {"Menus", "Search Commands", 'f', 1}, {"Menus", "Toggle Fullscreen", 'f', 0},
     {"Canvas & Layers", "Select tool", 'a', 0}, {"Canvas & Layers", "Move / Transform tool", 'v', 0}, {"Canvas & Layers", "Hand tool", 'h', 0},
     {"Canvas & Layers", "Zoom tool", 'z', 0}, {"Canvas & Layers", "Brush tool", 'b', 0}, {"Canvas & Layers", "Eraser", 'e', 0},
     {"Canvas & Layers", "Spot Healing", 'j', 0}, {"Canvas & Layers", "Clone Stamp", 's', 0}, {"Canvas & Layers", "Type tool", 't', 0},
@@ -1633,7 +1635,7 @@ void TestIoAudit::menuStructureMatchesMac()
     struct Expect { const char *menu; const char *item; };
     const Expect expected[] = {
         {"File", "New Canvas"}, {"File", "Open Project"}, {"File", "Open Recent"}, {"File", "Import Images"}, {"File", "Save"}, {"File", "Save As"},
-        {"File", "Export PNG"}, {"File", "Export JPEG"}, {"File", "Close Project"}, {"File", "Quit"},
+        {"File", "Export As"}, {"File", "Export JPEG"}, {"File", "Close Project"}, {"File", "Quit"},
         {"Edit", "Undo"}, {"Edit", "Redo"}, {"Edit", "Cut"}, {"Edit", "Copy"}, {"Edit", "Copy Merged"}, {"Edit", "Paste"}, {"Edit", "Keyboard Shortcuts"},
         {"Edit", "Fill with Foreground Color"}, {"Edit", "Fill with Background Color"}, {"Edit", "Clear Selection Pixels"},
         {"Select", "Select All"}, {"Select", "Deselect"}, {"Select", "Inverse"}, {"Select", "Layer's Pixels"}, {"Select", "Select Subject"},
@@ -2085,7 +2087,7 @@ void TestIoAudit::psdBlendConversionReportAndFolderOpacity()
 void TestIoAudit::psdHeadersRejected()
 {
     PSDImportResult result; QString error;
-    QVERIFY(!PSDReader::read(psd::build(8, 8, {}, false, 8, 4), result, &error));       // CMYK
+    QVERIFY(!PSDReader::read(psd::build(8, 8, {}, false, 8, 9), result, &error));       // Lab
     QVERIFY2(error.contains(QStringLiteral("8-bit RGB")), qPrintable(error));
     QVERIFY(!PSDReader::read(psd::build(8, 8, {}, false, 16, 3), result, &error));      // 16-bit
     QVERIFY2(error.contains(QStringLiteral("8-bit RGB")), qPrintable(error));

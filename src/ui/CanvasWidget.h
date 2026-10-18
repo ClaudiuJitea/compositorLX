@@ -1,4 +1,5 @@
 #pragma once
+#include "io/CMYK.h"
 #include <functional>
 
 #include "core/Document.h"
@@ -30,6 +31,16 @@ public:
     [[nodiscard]] EditorSession *editorSession() const { return session_; }
     void setDocument(std::shared_ptr<Document> document, bool invalidate = true);
     void fitCanvas();
+    void setGamutWarning(bool enabled,bool proof) { gamutWarning_=enabled; proofEnabled_=proof; proofCache_={}; update(); }
+    void setProofProfile(const std::optional<CMYKProfile> &profile) { proofProfile_=profile; proofCache_={}; update(); }
+    void setNavigatorVisible(bool value) { navigatorVisible_=value; update(); }
+    // Toggle Fullscreen (F): the canvas alone on black, without the navigator (mac canvasOnly).
+    void setCanvasOnly(bool value) { canvasOnly_ = value; update(); }
+    [[nodiscard]] bool canvasOnly() const { return canvasOnly_; }
+    // Nothing in progress for Escape to cancel, so in fullscreen it leaves fullscreen instead (mac escapeHasNothingToCancel).
+    [[nodiscard]] bool escapeHasNothingToCancel() const;
+    QRectF navigatorRect() const;
+    void centerViewOn(const QPointF &point);
     [[nodiscard]] EditorSession::ViewState viewState() const { return {true, zoom_, panOffset_, fitPending_}; }
     void restoreViewState(const EditorSession::ViewState &state);
     void actualPixels();
@@ -62,6 +73,8 @@ public:
     void setBrushSmoothing(double smoothing) { brushSmoothing_ = smoothing; }
     [[nodiscard]] double brushSmoothing() const { return brushSmoothing_; }
     void setShapeCornerRadius(double radius) { shapeCornerRadius_ = radius; }
+    void setShapeSmoothing(bool value) { shapeSmoothing_ = value; update(); }
+    bool shapeSmoothing() const { return shapeSmoothing_; }
     [[nodiscard]] double shapeCornerRadius() const { return shapeCornerRadius_; }
     void setCropRatio(double ratio);
     void setTransformAutoSelect(bool enabled) { transformAutoSelect_ = enabled; }
@@ -101,6 +114,7 @@ public:
     void setSelectedLayerIds(const QSet<QUuid> &ids) { selectedLayerIds_=ids; update(); }
     void toggleMarqueeKind() { setMarqueeElliptical(!ellipticalMarquee_); }
     void toggleLassoKind() { setPolygonalLasso(!polygonalLasso_); }
+    [[nodiscard]] bool polygonalLasso() const { return polygonalLasso_; }
     void setMarqueeElliptical(bool enabled) { if (ellipticalMarquee_ == enabled) return; ellipticalMarquee_ = enabled; emit marqueeKindChanged(enabled); update(); }
     void setPolygonalLasso(bool enabled) { if (polygonalLasso_ == enabled) return; polygonalLasso_ = enabled; lassoPoints_.clear(); selectionDragging_ = false; emit lassoKindChanged(enabled); update(); }
     [[nodiscard]] bool isPolygonalLasso() const { return polygonalLasso_; }
@@ -280,6 +294,12 @@ private:
     QPointF panOffset_;
     QPoint lastMousePosition_;
     bool panning_ = false;
+    bool navigatorVisible_ = true, navigatorDragging_ = false;
+    bool canvasOnly_ = false;
+    std::optional<CMYKProfile> proofProfile_;
+    QImage proofCache_;
+    bool gamutWarning_=false,proofEnabled_=true;
+    qint64 proofSourceKey_ = 0;
     bool movingLayer_ = false;
     bool duplicateOnMove_ = false;
     bool duplicateIssued_ = false;
@@ -366,6 +386,9 @@ private:
     ShapeKind shapeKind_ = ShapeKind::Rectangle;
     bool ellipticalShape_ = false;
     double shapeCornerRadius_ = 0;
+    bool shapeSmoothing_ = false;
+    bool middleZoom_ = false;
+    double zoomDragPreviousX_ = 0;
     double shapeLineWidth_ = 2.0;
     double brushDiameter_ = 40;
     double brushSmoothing_ = 0.0;

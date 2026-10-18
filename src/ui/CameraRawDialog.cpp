@@ -242,7 +242,12 @@ void CameraRawDialog::setupUi()
         eye->setToolTip(tr("Turn off to leave this group out of the picture and of the result without clearing its sliders."));
         connect(eye, &QCheckBox::toggled, this, [this, i](bool on) { shows_[i] = on; updatePreview(); });
         showBoxes_[i] = eye;
-        pageLayout->addWidget(eye);
+        auto *header=new QHBoxLayout;
+        header->addWidget(eye);header->addStretch();
+        auto *reset=new QPushButton(tr("Reset"),page);reset->setObjectName(QStringLiteral("cameraRawSectionReset%1").arg(i));
+        reset->setToolTip(tr("Reset %1").arg(tr(eyeNames[i])));sectionResetButtons_[i]=reset;header->addWidget(reset);
+        connect(reset,&QPushButton::clicked,this,[this,i]{shows_[i]=true;setSettings(settings_.resetting(int(i)));});
+        pageLayout->addLayout(header);
         pageLayout->addWidget(tabs[i].second, 1);
         tabWidget_->addTab(page, tabs[i].first);
     }
@@ -778,7 +783,11 @@ protected:
         QConicalGradient gradient(disk.center(), 0);
         for (int i = 0; i <= 12; ++i) gradient.setColorAt(i / 12.0, QColor::fromHsvF(std::fmod(i * 30.0, 360.0) / 360.0, 1, 1));
         painter.setOpacity(.85); painter.setBrush(gradient); painter.setPen(Qt::NoPen); painter.drawEllipse(disk);
-        painter.setOpacity(1); painter.setBrush(Qt::NoBrush); painter.setPen(QColor(255, 255, 255, 200)); painter.drawEllipse(disk);
+        painter.setOpacity(1);
+        QRadialGradient neutral(disk.center(), disk.width()/2);
+        neutral.setColorAt(0, QColor(128,128,128,255)); neutral.setColorAt(1, QColor(128,128,128,0));
+        painter.setBrush(neutral); painter.drawEllipse(disk);
+        painter.setBrush(Qt::NoBrush); painter.setPen(QColor(255, 255, 255, 200)); painter.drawEllipse(disk);
         const double radius = disk.width() / 2, angle = hue_->value() * M_PI / 180, distance = saturation_->value() / 100 * radius;
         painter.setBrush(Qt::white); painter.setPen(QColor(30, 30, 30));
         painter.drawEllipse(disk.center() + QPointF(std::cos(angle) * distance, -std::sin(angle) * distance), 5, 5);
@@ -803,47 +812,77 @@ private:
 QWidget *CameraRawDialog::createGradingTab()
 {
     auto *w = new QWidget(this);
-    auto *scroll = new QScrollArea(this);
-    scroll->setWidgetResizable(true);
-    auto *content = new QWidget(scroll);
-    auto *form = new QFormLayout(content);
-    const auto cb = [this] { syncToSettings(); };
-
-    auto addWheel = [&](const QString &label, QDoubleSpinBox *&h, QDoubleSpinBox *&s, QDoubleSpinBox *&l) {
-        auto *row = new QHBoxLayout();
-        row->addWidget(new ScrubLabel(tr("Hue:"), h, 1.0, 1.0, content));
-        row->addLayout(makeSliderRow(this, 0.0, 360.0, 0.0, 0, h, cb));
-        row->addWidget(new ScrubLabel(tr("Sat:"), s, 1.0, 1.0, content));
-        row->addLayout(makeSliderRow(this, 0.0, 100.0, 0.0, 0, s, cb));
-        row->addWidget(new ScrubLabel(tr("Lum:"), l, 1.0, 1.0, content));
-        row->addLayout(makeSliderRow(this, -100.0, 100.0, 0.0, 0, l, cb));
-        form->addRow(label, row);
-    };
-
-    addWheel(tr("Shadows"), gradeShadowHueSpin_, gradeShadowSatSpin_, gradeShadowLumSpin_);
-    addWheel(tr("Midtones"), gradeMidHueSpin_, gradeMidSatSpin_, gradeMidLumSpin_);
-    addWheel(tr("Highlights"), gradeHighHueSpin_, gradeHighSatSpin_, gradeHighLumSpin_);
-    addWheel(tr("Global"), gradeGlobalHueSpin_, gradeGlobalSatSpin_, gradeGlobalLumSpin_);
+    auto *layout = new QVBoxLayout(w);
+    auto *page = new QComboBox(w);
+    page->setObjectName(QStringLiteral("cameraRawGradingPage"));
+    page->addItems({tr("Three-Way"), tr("Shadows"), tr("Midtones"), tr("Highlights"), tr("Global")});
+    page->setToolTip(tr("Three-Way shows shadows, midtones, and highlights. The other choices show one wheel."));
+    layout->addWidget(page, 0, Qt::AlignLeft);
     auto *wheels = new QHBoxLayout;
-    const auto addGrid = [&](const QString &title, QDoubleSpinBox *h, QDoubleSpinBox *sat) {
-        auto *column = new QVBoxLayout;
-        auto *caption = new QLabel(title, content); caption->setAlignment(Qt::AlignCenter);
-        column->addWidget(caption); column->addWidget(new GradeWheelWidget(h, sat, content), 0, Qt::AlignCenter);
-        wheels->addLayout(column);
+    wheels->setSpacing(12);
+    const auto cb = [this] { syncToSettings(); };
+    struct Controls { QWidget *column, *hue, *saturation; };
+    QVector<Controls> controls;
+    const auto addWheel = [&](const QString &label, const QString &name,
+                               QDoubleSpinBox *&h, QDoubleSpinBox *&s, QDoubleSpinBox *&l) {
+        auto *column = new QWidget(w);
+        column->setObjectName(name + QStringLiteral("Column"));
+        auto *stack = new QVBoxLayout(column);
+        stack->setContentsMargins(0, 0, 0, 0);
+        auto *caption = new QLabel(label, column);
+        caption->setAlignment(Qt::AlignCenter);
+        stack->addWidget(caption);
+        const auto spin = [column, cb](double max, double min = 0) {
+            auto *field = new QDoubleSpinBox(column);
+            field->setRange(min, max); field->setDecimals(0); field->setFixedWidth(65);
+            QObject::connect(field, qOverload<double>(&QDoubleSpinBox::valueChanged), column, [cb](double) { cb(); });
+            return field;
+        };
+        h = spin(360); s = spin(100); l = spin(100, -100);
+        h->setObjectName(name + QStringLiteral("Hue")); s->setObjectName(name + QStringLiteral("Saturation"));
+        l->setObjectName(name + QStringLiteral("Luminance"));
+        auto *wheel = new GradeWheelWidget(h, s, column);
+        wheel->setObjectName(name + QStringLiteral("Wheel"));
+        stack->addWidget(wheel, 0, Qt::AlignCenter);
+        auto *readout = new QLabel(column); readout->setAlignment(Qt::AlignCenter);
+        const auto refresh = [readout, h, s] { readout->setText(QStringLiteral("%1°  %2").arg(qRound(h->value())).arg(qRound(s->value()))); };
+        connect(h, qOverload<double>(&QDoubleSpinBox::valueChanged), readout, refresh);
+        connect(s, qOverload<double>(&QDoubleSpinBox::valueChanged), readout, refresh);
+        refresh(); stack->addWidget(readout);
+        const auto fieldRow = [column, stack](const QString &title, QDoubleSpinBox *field) {
+            auto *row = new QWidget(column); auto *line = new QHBoxLayout(row); line->setContentsMargins(0,0,0,0);
+            line->addWidget(new ScrubLabel(title, field, 1, 1, row)); line->addWidget(field);
+            stack->addWidget(row); return row;
+        };
+        QWidget *hue = fieldRow(tr("Hue"), h), *sat = fieldRow(tr("Sat"), s);
+        // The Three-Way columns stay narrow, with luminance directly below each wheel.
+        fieldRow(tr("Lum"), l);
+        auto *slider = new QSlider(Qt::Horizontal, column); slider->setRange(-100,100);
+        slider->setMinimumWidth(86);
+        connect(slider, &QSlider::valueChanged, l, &QDoubleSpinBox::setValue);
+        connect(l, qOverload<double>(&QDoubleSpinBox::valueChanged), slider, [slider](double v) { slider->setValue(qRound(v)); });
+        stack->addWidget(slider); stack->addStretch();
+        wheels->addWidget(column);
+        controls.push_back({column, hue, sat});
     };
-    addGrid(tr("Shadows"), gradeShadowHueSpin_, gradeShadowSatSpin_);
-    addGrid(tr("Midtones"), gradeMidHueSpin_, gradeMidSatSpin_);
-    addGrid(tr("Highlights"), gradeHighHueSpin_, gradeHighSatSpin_);
-    addGrid(tr("Global"), gradeGlobalHueSpin_, gradeGlobalSatSpin_);
-    form->insertRow(0, wheels);
-
-    addScrubRow(form, tr("Blending"), content, 0.0, 100.0, 50.0, 0, gradeBlendingSpin_, cb);
-    addScrubRow(form, tr("Balance"), content, -100.0, 100.0, 0.0, 0, gradeBalanceSpin_, cb);
-
-    scroll->setWidget(content);
-    auto *l = new QVBoxLayout(w);
-    l->setContentsMargins(0, 0, 0, 0);
-    l->addWidget(scroll);
+    addWheel(tr("Shadows"), QStringLiteral("gradeShadows"), gradeShadowHueSpin_, gradeShadowSatSpin_, gradeShadowLumSpin_);
+    addWheel(tr("Midtones"), QStringLiteral("gradeMidtones"), gradeMidHueSpin_, gradeMidSatSpin_, gradeMidLumSpin_);
+    addWheel(tr("Highlights"), QStringLiteral("gradeHighlights"), gradeHighHueSpin_, gradeHighSatSpin_, gradeHighLumSpin_);
+    addWheel(tr("Global"), QStringLiteral("gradeGlobal"), gradeGlobalHueSpin_, gradeGlobalSatSpin_, gradeGlobalLumSpin_);
+    layout->addLayout(wheels);
+    const auto showPage = [page, controls] {
+        const int index = page->currentIndex();
+        for (int i = 0; i < controls.size(); ++i) {
+            controls[i].column->setVisible(index == 0 ? i < 3 : i == index-1);
+            controls[i].hue->setVisible(index != 0); controls[i].saturation->setVisible(index != 0);
+        }
+    };
+    connect(page, &QComboBox::currentIndexChanged, w, showPage);
+    showPage();
+    auto *form = new QFormLayout;
+    addScrubRow(form, tr("Blending"), w, 0, 100, 50, 0, gradeBlendingSpin_, cb);
+    addScrubRow(form, tr("Balance"), w, -100, 100, 0, 0, gradeBalanceSpin_, cb);
+    layout->addLayout(form); layout->addStretch();
     return w;
 }
 
@@ -1151,6 +1190,7 @@ void CameraRawDialog::refreshEyes()
         const QSignalBlocker blocker(showBoxes_[i]);
         showBoxes_[i]->setChecked(shows_[i]);
         showBoxes_[i]->setVisible(adjusts[i] || !shows_[i]);
+        if(sectionResetButtons_[i]) {sectionResetButtons_[i]->setVisible(adjusts[i] || !shows_[i]);sectionResetButtons_[i]->setEnabled(settings_.resetting(int(i))!=settings_);}
     }
 }
 

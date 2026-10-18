@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QCloseEvent>
 #include <QtConcurrent>
+#include <QSignalBlocker>
 
 namespace compositor {
 
@@ -103,6 +104,16 @@ RawDevelopDialog::RawDevelopDialog(QWidget *parent, const QString &filePath)
     addRow(tr("Tint"), -150.0, 150.0, settings_.tint, 0, tintSpin_, tintSlider_, QStringLiteral("rawTint"));
     addRow(tr("Boost"), 0.0, 1.0, settings_.boost, 2, boostSpin_, boostSlider_, QStringLiteral("rawBoost"));
 
+    addRow(tr("Noise Reduction"),0,1,settings_.noiseReduction,2,noiseSpin_,noiseSlider_,QStringLiteral("rawNoiseReduction"));
+    highlightBox_=new QCheckBox(tr("Highlight Recovery"),this);highlightBox_->setObjectName(QStringLiteral("rawHighlightRecovery"));formLayout->addRow(highlightBox_);
+    lensBox_ = new QCheckBox(tr("Lens Correction"), this);
+    lensBox_->setObjectName(QStringLiteral("rawLensCorrection"));
+    const QString profile = RawImporter::lensProfile(filePath);
+    lensBox_->setEnabled(!profile.isEmpty());
+    lensBox_->setToolTip(profile.isEmpty() ? tr("No matching lens correction profile is installed for this camera and lens.") : tr("Lens profile: %1").arg(profile));
+    formLayout->addRow(lensBox_);
+    connect(lensBox_, &QCheckBox::toggled, this, [this](bool on) { settings_.lensCorrection = on; onSliderChanged(); });
+    connect(highlightBox_,&QCheckBox::toggled,this,[this](bool on){settings_.highlightRecovery=on;onSliderChanged();});
     mainLayout->addLayout(formLayout);
 
     // The desktop's button order: Reset at the side, Import as the dialog's default.
@@ -115,6 +126,8 @@ RawDevelopDialog::RawDevelopDialog(QWidget *parent, const QString &filePath)
     importButton_ = buttons->addButton(tr("Import"), QDialogButtonBox::AcceptRole);
     importButton_->setDefault(true);
     connect(importButton_, &QPushButton::clicked, this, &RawDevelopDialog::onImportClicked);
+    auto *cameraRaw=buttons->addButton(tr("Camera Raw…"),QDialogButtonBox::ActionRole);cameraRaw->setObjectName(QStringLiteral("rawCameraRaw"));
+    connect(cameraRaw,&QPushButton::clicked,this,[this]{setProperty("openCameraRaw",true);onImportClicked();});
     mainLayout->addWidget(buttons);
 
     startNextPreviewJob();
@@ -169,6 +182,7 @@ void RawDevelopDialog::onSliderChanged()
     settings_.temperature = static_cast<float>(tempSpin_->value());
     settings_.tint = static_cast<float>(tintSpin_->value());
     settings_.boost = static_cast<float>(boostSpin_->value());
+    if(noiseSpin_)settings_.noiseReduction=float(noiseSpin_->value());
 
     resetButton_->setEnabled(!settings_.isAsShot());
     schedulePreviewUpdate();
@@ -178,6 +192,9 @@ void RawDevelopDialog::onResetClicked()
 {
     settings_.reset();
     updating_ = true;
+    if(noiseSpin_)noiseSpin_->setValue(0);
+    if(highlightBox_){const QSignalBlocker block(highlightBox_);highlightBox_->setChecked(false);}
+    if(lensBox_){const QSignalBlocker block(lensBox_);lensBox_->setChecked(false);}
     exposureSpin_->setValue(settings_.exposure);
     exposureSlider_->setValue(static_cast<int>(settings_.exposure * 100));
     tempSpin_->setValue(settings_.temperature);
@@ -205,6 +222,7 @@ void RawDevelopDialog::onImportClicked()
     }
     previewPending_ = false;
     importButton_->setEnabled(false);
+    importButton_->setText(tr("Importing…"));
     cancelButton_->setEnabled(true);
     previewLabel_->setText(tr("Developing full resolution RAW image…"));
 

@@ -1,4 +1,6 @@
 #include "rendering/Dither.h"
+#include "rendering/Scanlines.h"
+#include "rendering/DeepImage.h"
 
 #include "rendering/RasterOperations.h"
 
@@ -145,8 +147,6 @@ bool runKernel(QImage &image, const DitherSettings &s, const Glyphs &glyphs)
     params.glyphs = glyphs.maps.empty() ? nullptr : glyphs.maps.data();
     params.glyphCoverage = glyphs.coverage.empty() ? nullptr : glyphs.coverage.data();
     params.glyphCount = int(glyphs.coverage.size());
-    params.dots = float(s.dots / 100);
-    params.wobble = float(s.wobble);
     return dither_apply(image.bits(), size_t(image.width()), size_t(image.height()), size_t(image.bytesPerLine()), &params) != 0;
 }
 
@@ -233,8 +233,15 @@ DitherSettings DitherSettings::normalized() const
 
 QImage DitherSettings::apply(const QImage &input) const
 {
+    if(compositor::DeepImage::isDeep(input))return compositor::DeepImage::through(input,[&](const QImage &low){return apply(low);});
     if (input.isNull()) return {};
     const DitherSettings s = normalized();
+    if (s.style == DitherStyle::Scanlines) {
+        ScanlinesSettings lines;
+        lines.lineSpacing=s.lineSpacing; lines.glow=s.glow; lines.dots=s.dots; lines.wobble=s.wobble;
+        lines.density=s.density; lines.contrast=s.contrast; lines.colors=s.colors; lines.dark=s.dark; lines.light=s.light;
+        return lines.apply(input);
+    }
     const QImage image = input.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     // ASCII and Scanlines draw at full resolution.
     const int block = DitherInfo::usesPixelSize(s.style) ? int(s.pixelSize) : 1;

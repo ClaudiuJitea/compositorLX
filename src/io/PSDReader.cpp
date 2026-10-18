@@ -1,4 +1,5 @@
 #include "io/PSDReader.h"
+#include "io/CMYK.h"
 #include "io/PSDText.h"
 #include "io/PSDVector.h"
 #include "rendering/RasterOperations.h"
@@ -915,7 +916,7 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
         return false;
     }
 
-    if (mode != 3) { // 3 = RGB
+    if (mode != 3 && mode != 4) { // RGB or CMYK
         if (error) *error = psdErrorMessage(PSDErrorCode::UnsupportedColorMode);
         return false;
     }
@@ -947,6 +948,7 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
         return false;
     }
 
+    QByteArray iccData;
     double resolution = 72.0;
     while (cursor.offset() + 12 <= resourcesEnd) {
         QString sig;
@@ -969,6 +971,7 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
             if (!std::isfinite(res) || res < 1.0) res = 72.0;
             resolution = std::clamp(res, 1.0, 9600.0);
         }
+        if(id==1039&&lengthInt>0) {cursor.setOffset(dataStart);cursor.readBytes(lengthInt,iccData);}
         int nextResOffset = 0;
         if (!checkedAdd(dataStart, lengthInt, nextResOffset) || nextResOffset > resourcesEnd) break;
         if (!cursor.setOffset(nextResOffset)) break;
@@ -979,6 +982,15 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
         return false;
     }
 
+    std::optional<CMYKProfile> cmykProfile;
+    if(mode==4){cmykProfile=CMYKProfile::fromData(iccData);if(!cmykProfile)cmykProfile=CMYK::chosen();if(!cmykProfile){if(error)*error=QStringLiteral("A CMYK ICC profile is required to open this Photoshop file.");return false;}}
+    result.cmykProfile=cmykProfile?cmykProfile->data:QByteArray();
+    const auto cmykImage=[&](int width,int height,const QVector<quint8> &cyan,const QVector<quint8> &magenta,const QVector<quint8> &yellow,const QVector<quint8> &key,const QVector<quint8> &alpha){
+        const qsizetype total=qsizetype(width)*height;if(cyan.size()<total||magenta.size()<total||yellow.size()<total||key.size()<total||alpha.size()<total)return QImage();
+        QByteArray inks(total*4,Qt::Uninitialized);for(qsizetype i=0;i<total;++i){inks[i*4]=char(255-cyan[i]);inks[i*4+1]=char(255-magenta[i]);inks[i*4+2]=char(255-yellow[i]);inks[i*4+3]=char(255-key[i]);}
+        QImage rgb=CMYK::fromInks(inks,QSize(width,height),*cmykProfile).convertToFormat(QImage::Format_RGBA8888_Premultiplied);if(rgb.isNull())return rgb;
+        for(int y=0;y<height;++y){auto *out=rgb.scanLine(y);for(int x=0;x<width;++x){const int a=alpha[y*width+x];for(int c=0;c<3;++c)out[x*4+c]=uchar(int(out[x*4+c])*a/255);out[x*4+3]=uchar(a);}}return rgb;
+    };
     quint64 layerSectionLenU64 = 0;
     if (isPSB) {
         if (!cursor.readU64(layerSectionLenU64)) {
@@ -1028,8 +1040,8 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
             if (error) *error = psdErrorMessage(PSDErrorCode::UnsupportedCompression);
             return false;
         }
-        const int numChannels = std::clamp(static_cast<int>(headerChannels), 3, 4);
-        QVector<quint8> redPlane, greenPlane, bluePlane, alphaPlane;
+        const int numChannels = std::clamp(static_cast<int>(headerChannels), 3, mode==4?5:4);
+        QVector<quint8> redPlane, greenPlane, bluePlane, alphaPlane, blackPlane;
         bool ok = true;
         if (comp == 0) {
             qint64 planeSize64 = 0;
@@ -1046,11 +1058,18 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
                 decodeRaw(canvasWidth, canvasHeight, redBytes, std::nullopt, redPlane, error);
                 decodeRaw(canvasWidth, canvasHeight, greenBytes, std::nullopt, greenPlane, error);
                 decodeRaw(canvasWidth, canvasHeight, blueBytes, std::nullopt, bluePlane, error);
+                if(mode==4){
+                    QByteArray key;ok=numChannels>=4&&cursor.readBytes(planeSize,key);
+                    if(ok)ok=decodeRaw(canvasWidth,canvasHeight,key,std::nullopt,blackPlane,error);
+                    if(ok&&numChannels>=5){ok=cursor.readBytes(planeSize,alphaBytes);if(ok)ok=decodeRaw(canvasWidth,canvasHeight,alphaBytes,std::nullopt,alphaPlane,error);}
+                    else{alphaPlane.resize(planeSize);alphaPlane.fill(255);}
+                }else{
                 if (numChannels >= 4 && cursor.readBytes(planeSize, alphaBytes)) {
                     decodeRaw(canvasWidth, canvasHeight, alphaBytes, std::nullopt, alphaPlane, error);
                 } else {
                     alphaPlane.resize(planeSize);
                     alphaPlane.fill(255);
+                }
                 }
             }
         } else if (comp == 1) {
@@ -1113,6 +1132,8 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
                 ok = unpackPlane(redPlane, 0) &&
                      unpackPlane(greenPlane, 1) &&
                      unpackPlane(bluePlane, 2);
+                if(mode==4){ok=ok&&numChannels>=4&&unpackPlane(blackPlane,3);if(ok&&numChannels>=5)ok=unpackPlane(alphaPlane,4);else{alphaPlane.resize(canvasWidth*canvasHeight);alphaPlane.fill(255);}}
+                else{
                 if (ok && numChannels >= 4) {
                     ok = unpackPlane(alphaPlane, 3);
                 } else {
@@ -1120,13 +1141,16 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
                     alphaPlane.resize(static_cast<int>(planeSize64));
                     alphaPlane.fill(255);
                 }
+                }
             }
         }
         if (!ok || redPlane.isEmpty()) {
             if (error) *error = psdErrorMessage(PSDErrorCode::Truncated);
             return false;
         }
-        QImage composite = makeRgbaImage(canvasWidth, canvasHeight, redPlane, greenPlane, bluePlane, alphaPlane);
+        QImage composite;
+        if(mode==4)composite=cmykImage(canvasWidth,canvasHeight,redPlane,greenPlane,bluePlane,blackPlane,alphaPlane);
+        else composite=makeRgbaImage(canvasWidth, canvasHeight, redPlane, greenPlane, bluePlane, alphaPlane);
         Layer bg;
         bg.id = QUuid::createUuid();
         bg.name = QStringLiteral("Background");
@@ -1438,7 +1462,7 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
     }
 
     // Channel decoding
-    const QSet<int> unpackedChannelIDs = {-1, 0, 1, 2, -2};
+    const QSet<int> unpackedChannelIDs = mode==4?QSet<int>{-1,0,1,2,3,-2}:QSet<int>{-1,0,1,2,-2};
     qint64 usedPixels = 0;
 
     for (auto &layer : raw) {
@@ -1539,7 +1563,7 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
                 if (error) *error = psdErrorMessage(PSDErrorCode::Truncated);
                 return false;
             }
-            layer.image = makeRgbaImage(width, height, red, green, blue, alpha);
+            layer.image = mode==4?cmykImage(width,height,planes.contains(0)?planes[0]:opaque,planes.contains(1)?planes[1]:opaque,planes.contains(2)?planes[2]:opaque,planes.contains(3)?planes[3]:opaque,alpha):makeRgbaImage(width,height,red,green,blue,alpha);
             usedPixels += total;
         }
     }

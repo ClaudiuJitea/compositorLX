@@ -1,4 +1,5 @@
 #include "io/ImageExporter.h"
+#include "rendering/DeepImage.h"
 
 #include <QBuffer>
 #include <QColorSpace>
@@ -17,7 +18,7 @@ std::optional<QByteArray> ImageExporter::png(const QImage &source, double resolu
         if (error) *error = QStringLiteral("Invalid PNG export options.");
         return std::nullopt;
     }
-    QImage image = source.convertToFormat(QImage::Format_RGBA8888);
+    QImage image = source.convertToFormat(DeepImage::isDeep(source)?QImage::Format_RGBA64:QImage::Format_RGBA8888);
     image.setColorSpace(QColorSpace::SRgb);
     const int dotsPerMeter = qRound(resolution / .0254);
     image.setDotsPerMeterX(dotsPerMeter);

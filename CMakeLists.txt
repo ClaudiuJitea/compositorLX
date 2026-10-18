@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CompositorLX VERSION 0.4.5 LANGUAGES C CXX)
+project(CompositorLX VERSION 0.5.3 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(FetchContent)
@@ -13,6 +13,18 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Network)
 find_package(ZLIB REQUIRED)
+find_library(LCMS2_LIBRARY NAMES lcms2 REQUIRED)
+find_path(JPEG_INCLUDE_DIR jpeglib.h REQUIRED)
+find_path(LENSFUN_INCLUDE_DIR lensfun.h PATH_SUFFIXES lensfun REQUIRED)
+find_library(LENSFUN_LIBRARY NAMES lensfun REQUIRED)
+find_path(LENSFUN_DATA_DIR slr-canon.xml PATHS /usr/share/lensfun/version_1 /usr/local/share/lensfun/version_1)
+find_path(TIFF_INCLUDE_DIR tiffio.h PATH_SUFFIXES x86_64-linux-gnu REQUIRED)
+find_library(JPEG_LIBRARY NAMES jpeg libjpeg.so.8 REQUIRED)
+find_library(TIFF_LIBRARY NAMES tiff libtiff.so.6 REQUIRED)
+find_path(OPENEXR_INCLUDE_DIR OpenEXR/ImfRgbaFile.h REQUIRED)
+find_path(IMATH_INCLUDE_DIR Imath/half.h REQUIRED)
+find_library(OPENEXR_LIBRARY NAMES OpenEXR OpenEXR-3_1 libOpenEXR-3_1.so.30 REQUIRED)
+find_library(IMATH_LIBRARY NAMES Imath Imath-3_1 libImath-3_1.so.29 REQUIRED)
 find_package(PkgConfig QUIET)
 find_package(libheif CONFIG QUIET)
 if(PkgConfig_FOUND)
@@ -20,13 +32,13 @@ if(PkgConfig_FOUND)
 endif()
 if(NOT LIBHEIF_FOUND)
     find_path(LIBHEIF_INCLUDE_DIR libheif/heif.h)
-    find_library(LIBHEIF_LIBRARY heif)
+    find_library(LIBHEIF_LIBRARY NAMES heif libheif.so.1)
 endif()
 if(NOT TARGET heif AND NOT LIBHEIF_FOUND AND NOT (LIBHEIF_INCLUDE_DIR AND LIBHEIF_LIBRARY))
-    message(WARNING "libheif development files were not found; HEIC/HEIF import will rely on an installed Qt image plugin")
+    message(FATAL_ERROR "libheif development files are required for HEIC/HEIF import")
 endif()
 
-find_library(LIBRAW_LIBRARY NAMES raw raw_r libraw.so.23 libraw_r.so.23 PATHS /usr/lib/x86_64-linux-gnu /usr/lib)
+find_library(LIBRAW_LIBRARY NAMES raw raw_r libraw.so.23 libraw_r.so.23 PATHS /usr/lib/x86_64-linux-gnu /usr/lib REQUIRED)
 if(NOT LIBRAW_LIBRARY)
     message(WARNING "libraw was not found; RAW image import will be disabled")
 endif()
@@ -69,6 +81,10 @@ if(NOT EXISTS "${SUBJECT_MODEL_LICENSE}")
 endif()
 
 add_library(compositor_core
+    src/camera_raw.qrc
+    src/core/CameraRawTables.cpp
+    vendor/compositor-rendering/PatchPixels.c
+    vendor/compositor-rendering/DeepPixels.c
     src/core/CameraRaw.cpp
     src/core/CameraRaw.h
     src/core/Document.cpp
@@ -98,6 +114,9 @@ add_library(compositor_core
     src/io/ProjectWatcher.h
     src/io/ImageExporter.cpp
     src/io/ImageExporter.h
+    src/io/PrintExporter.cpp
+    src/io/CMYK.cpp
+    src/io/HdrImage.cpp
     src/io/ImageImporter.cpp
     src/io/ImageImporter.h
     src/io/PSDReader.cpp
@@ -106,6 +125,8 @@ add_library(compositor_core
     src/io/PSDVector.cpp
     src/io/PSDVector.h
     src/io/PSDReader.h
+    src/io/LensCorrection.cpp
+    src/io/LensCorrection.h
     src/io/RawImporter.cpp
     src/io/RawImporter.h
     src/io/SvgImporter.cpp
@@ -114,6 +135,9 @@ add_library(compositor_core
     src/rendering/LayerRenderer.h
     src/rendering/LayerEffectsRenderer.cpp
     src/rendering/LayerEffectsRenderer.h
+    src/rendering/ProgressiveBlur.cpp
+    src/rendering/DeepImage.cpp
+    src/rendering/Scanlines.cpp
     src/rendering/Dither.cpp
     src/rendering/Dither.h
     src/rendering/DownsampleCache.cpp
@@ -134,7 +158,11 @@ add_library(compositor_core
     vendor/compositor-rendering/NoisePixels.c
     vendor/compositor-rendering/WandPixels.c
 )
-target_include_directories(compositor_core PUBLIC src vendor/compositor-rendering)
+target_include_directories(compositor_core PUBLIC src vendor/compositor-rendering PRIVATE ${LENSFUN_INCLUDE_DIR} ${OPENEXR_INCLUDE_DIR} ${IMATH_INCLUDE_DIR} ${IMATH_INCLUDE_DIR}/Imath ${JPEG_INCLUDE_DIR} ${TIFF_INCLUDE_DIR})
+target_link_libraries(compositor_core PRIVATE ${LENSFUN_LIBRARY} ${OPENEXR_LIBRARY} ${IMATH_LIBRARY} ${LCMS2_LIBRARY} ${JPEG_LIBRARY} ${TIFF_LIBRARY})
+if(LENSFUN_DATA_DIR)
+    target_compile_definitions(compositor_core PRIVATE COMPOSITOR_LENSFUN_DATA_DIR="${LENSFUN_DATA_DIR}")
+endif()
 find_package(OpenMP COMPONENTS C)
 if(OpenMP_C_FOUND)
     target_link_libraries(compositor_core PRIVATE OpenMP::OpenMP_C)
@@ -184,6 +212,7 @@ add_library(compositor_ui STATIC
     src/ui/KeyboardShortcutsDialog.h
     src/ui/LayerListModel.cpp
     src/ui/LayerListModel.h
+    src/ui/MainWindowPort.cpp
     src/ui/MainWindow.cpp
     src/ui/MainWindowLayerMenu.cpp
     src/ui/MainWindow.h

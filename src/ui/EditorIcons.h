@@ -177,6 +177,11 @@ public:
         case 29: // Subtract from selection (square with minus badge)
             p.drawRect(QRectF(5.0, 7.5, 9.5, 9.5));
             p.drawLine(QPointF(14.0, 9.0), QPointF(19.0, 9.0)); break;
+        case 31: { // New adjustment layer (a circle, its left half filled)
+            p.drawEllipse(QPointF(12, 12), 7, 7);
+            QPainterPath half; half.moveTo(12, 5); half.arcTo(QRectF(5, 5, 14, 14), 90, 180); half.closeSubpath();
+            p.setBrush(ink); p.drawPath(half); break;
+        }
         case 30: { // Layer effects (fx)
             QFont f = p.font();
             f.setPixelSize(11);

@@ -1,4 +1,5 @@
 #include "core/CameraRaw.h"
+#include "core/CameraRawTables.h"
 
 extern "C" {
 #include "AdjustPixels.h"
@@ -105,7 +106,7 @@ double CameraRawCurveSettings::evaluatePoint(double x, const QVector<CurvePoint>
 std::array<float, 256> CameraRawCurveSettings::toneTable() const {
     std::array<float, 256> table{};
     for (int i = 0; i < 256; ++i) {
-        const double p = parametric(double(i) / 255.0);
+        const double p = hasMeasuredDividers() ? double(i) / 255.0 : parametric(double(i) / 255.0);
         table[size_t(i)] = static_cast<float>(evaluatePoint(p, rgb));
     }
     return table;
@@ -641,23 +642,12 @@ std::tuple<double, double, double> CameraRawSettings::gains() const {
 }
 
 std::optional<std::pair<double, double>> CameraRawSettings::neutralize(double linearRed, double green, double blue) {
-    if (linearRed <= 1e-4 || green <= 1e-4 || blue <= 1e-4) return std::nullopt;
-    const double a1 = 0.35 * linearRed;
-    const double b1 = 0.15 * linearRed + 0.30 * green;
-    const double c1 = green - linearRed;
-    const double a2 = -0.35 * blue;
-    const double b2 = 0.15 * blue + 0.30 * green;
-    const double c2 = green - blue;
-    const double det = a1 * b2 - a2 * b1;
-    if (std::abs(det) <= 1e-8) return std::nullopt;
-    const double warm = (c1 * b2 - c2 * b1) / det;
-    const double magenta = (a1 * c2 - a2 * c1) / det;
-    if (!std::isfinite(warm) || !std::isfinite(magenta)) return std::nullopt;
-    return std::make_pair(warm * 100.0, magenta * 100.0);
+    const auto encode = [](double n) { return n <= .0031308 ? n * 12.92 : 1.055 * std::pow(n, 1/2.4) - .055; };
+    return neutralizeStraight(encode(linearRed), encode(green), encode(blue));
 }
 
 std::optional<std::pair<double, double>> CameraRawSettings::neutralizeStraight(double straightRed, double green, double blue) {
-    return neutralize(srgbDecode(straightRed), srgbDecode(green), srgbDecode(blue));
+    return CameraRawTables::neutralize(straightRed, green, blue);
 }
 
 std::optional<std::pair<double, double>> CameraRawSettings::autoBalance(const QImage &image) {
@@ -693,43 +683,13 @@ std::optional<CameraRawScope> CameraRawScope::make(const QImage &image) {
     CameraRawScope scope;
     const QImage conv = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
 
-    for (int y = 0; y < conv.height(); ++y) {
-        const quint8 *p = conv.constScanLine(y);
-        for (int x = 0; x < conv.width(); ++x, p += 4) {
-            const double alpha = p[3];
-            if (alpha == 0.0) continue;
-            const double r = std::min(1.0, p[0] / alpha);
-            const double g = std::min(1.0, p[1] / alpha);
-            const double b = std::min(1.0, p[2] / alpha);
-
-            const int rBin = std::clamp(int(r * 255.0 + 0.5), 0, binCount - 1);
-            const int gBin = std::clamp(int(g * 255.0 + 0.5), 0, binCount - 1);
-            const int bBin = std::clamp(int(b * 255.0 + 0.5), 0, binCount - 1);
-            scope.red[size_t(rBin)] += 1.0;
-            scope.green[size_t(gBin)] += 1.0;
-            scope.blue[size_t(bBin)] += 1.0;
-
-            const double maxCh = std::max({r, g, b});
-            const double minCh = std::min({r, g, b});
-            const double chroma = maxCh - minCh;
-            if (chroma > 1e-4 && maxCh > 1e-4) {
-                double hue = 0.0;
-                if (maxCh == r) hue = (g - b) / chroma;
-                else if (maxCh == g) hue = 2.0 + (b - r) / chroma;
-                else hue = 4.0 + (r - g) / chroma;
-                hue /= 6.0;
-                if (hue < 0.0) hue += 1.0;
-
-                const double angle = hue * 2.0 * M_PI;
-                const double saturation = chroma / maxCh;
-                const double plotX = 0.5 + std::cos(angle) * saturation * 0.48;
-                const double plotY = 0.5 + std::sin(angle) * saturation * 0.48;
-                const int col = std::clamp(int(plotX * scopeSide), 0, scopeSide - 1);
-                const int row = std::clamp(int(plotY * scopeSide), 0, scopeSide - 1);
-                scope.vectorscope[size_t(row * scopeSide + col)] += alpha / 255.0;
-            }
-        }
-    }
+    std::array<double, 768> bins{};
+    const int step = qint64(conv.width()) * conv.height() <= 4000000 ? 4 : 8;
+    camera_raw_scope(conv.constBits(), conv.width(), conv.height(), conv.bytesPerLine(), step,
+                     bins.data(), scope.vectorscope.data(), scopeSide);
+    std::copy_n(bins.data(), 256, scope.red.data());
+    std::copy_n(bins.data()+256, 256, scope.green.data());
+    std::copy_n(bins.data()+512, 256, scope.blue.data());
     return scope;
 }
 

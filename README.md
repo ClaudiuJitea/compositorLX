@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.4.5-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.5.3-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -21,7 +21,39 @@
   <img src="docs/screenshots/editor.png" alt="CompositorLX editor with layered composition, tools, and layer stack" width="920">
 </p>
 
-CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v11), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
+CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v14), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
+
+## What's new in version 0.5.3
+
+Brings CompositorLX up to date with the macOS app through Compositor 1.5.3, followed by a commit-by-commit parity audit.
+
+**Deep color, HDR and print**
+- **16-bit layers** stay 16-bit through painting, adjustments, filters, copy/paste and saves; Image › Layer Bit Depth converts between 8 and 16 bits.
+- **HDR**: import OpenEXR and Radiance `.hdr` with highlights brighter than white kept through edits; export EXR.
+- **CMYK for print**: View › CMYK proofing and gamut warning with ICC profiles, CMYK JPEG/TIFF/PDF export, and CMYK Photoshop files.
+- **Export As** (Ctrl+Alt+Shift+W): JPEG, PNG, TIFF, PDF and (with an HDR layer) EXR, sized, scaled and previewed, with an opt-in 16-bit PNG. Export PNG and Export JPEG stay one step away.
+
+**Editing**
+- **Filter › Progressive Blur**, **Filter › Scanlines** as its own filter, and **Last Filter** (Ctrl+Alt+F).
+- **Gaussian Blur** with Preserve Transparency and solid canvas edges; the Blur brush previews live.
+- **Image › Rotate Canvas 90°** clockwise and counter-clockwise.
+- **Smooth rectangle corners**; layer effects survive Image Size and scale with it; translucent Color Overlay and inner effects match Photoshop.
+- Adjustments and filters remember their last settings.
+
+**Camera Raw and RAW**
+- Light, Color, Mixer, Calibration and Color Grading re-measured against Photoshop's Camera Raw; adaptive Shadows; reset each section from its header; Three-Way and single-wheel grading pages.
+- RAW develop adds Noise Reduction, Highlight Recovery and Lensfun lens-profile correction, and develops at 16 bits before dithering.
+- HEIF/HEIC from cameras (`.hif`) at 8–16 bits with color profiles, and WebP import.
+
+**Workspace**
+- **Search Commands** (Ctrl+F): every menu command, every tool and tool mode by name (Polygonal Lasso, Liquify, Ellipse…), ranked like a launcher.
+- **Toggle Fullscreen** (F): the canvas alone on black; F or Esc brings the panels back.
+- **Navigator** minimap from 300% zoom (View › Navigator); Ctrl+middle-drag zooms; middle-drag scrolls the layer list.
+- New Canvas in pixels, inches, cm or mm at 72 or 300 DPI, on transparent, white or black; paste an image to make the canvas; import a folder of images; drop on the tab bar to open a new project.
+- The Layers panel's adjustment-layer button sits before layer effects, as on macOS.
+- Project formats v12–v14, read and written losslessly; saves include the macOS Quick Look preview.
+
+See [the source review, verification, and remaining differences](docs/UPSTREAM_SYNC_1.5.3.md) and [project format notes](docs/project-format.md).
 
 ## What's new in version 0.4.5
 
@@ -115,7 +147,7 @@ Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Spa
 - **Image Trim**: trim transparent borders or sample edge colors
 - Multiple projects in tabs, with cross-tab layer copy and recovery
 - Crop with snapping and Alt symmetry, plus Canvas Size and Image Size
-- **Expanded format support**: native `.comp` (v1–v11 compatibility), Adobe Photoshop `.psd`, vector `.svg` / `.svgz`, Camera RAW, PNG, JPEG, TIFF, and HEIC/HEIF
+- **Expanded format support**: native `.comp` (v1–v14 compatibility), Adobe Photoshop `.psd`, vector `.svg` / `.svgz`, Camera RAW, PNG, JPEG, TIFF, and HEIC/HEIF
 - **Customizable keyboard shortcuts** dialog with searchable actions and desktop-conflict checks
 - Light, dark and follow-system themes using the system font and accent colour
 - External file change detection, conflict warning, and atomic crash-resilient saving
@@ -125,14 +157,14 @@ Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Spa
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.4.5-x86_64.AppImage
-./CompositorLX-0.4.5-x86_64.AppImage
+chmod +x CompositorLX-0.5.3-x86_64.AppImage
+./CompositorLX-0.5.3-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.4.5_amd64.deb
+sudo apt install ./compositorlx_0.5.3_amd64.deb
 compositor-lx
 ```
 
@@ -151,7 +183,8 @@ The editable suite icon is `packaging/icons/compositor-lx.svg`. After changing i
 **Ubuntu / Debian**
 
 ```sh
-sudo apt install qt6-base-dev qt6-image-formats-plugins libheif-dev libraw-dev zlib1g-dev cmake ninja-build
+sudo apt install qt6-base-dev qt6-image-formats-plugins libheif-dev libraw-dev zlib1g-dev \
+    libopenexr-dev libimath-dev liblcms2-dev libjpeg-dev libtiff-dev liblensfun-dev liblensfun-data-v1 cmake ninja-build
 ```
 
 ```sh
@@ -173,7 +206,7 @@ cmake --install build --prefix "$HOME/.local"
 | Path | What it is |
 | --- | --- |
 | `src/core` | Document, history, camera RAW, image trim, and editor commands |
-| `src/io` | `.comp` v1–v11 reader/writer, PSD, SVG, and RAW importers, export |
+| `src/io` | `.comp` v1–v14 reader/writer, PSD, SVG, and RAW importers, export |
 | `src/rendering` | Compositing, layer effects, caches, filters, local subject removal |
 | `src/ui` | Qt Widgets editor, canvas, rulers, layer effects, shortcuts, tools |
 | `tests/` | Automated test suites: project format, camera raw, SVG/PSD import, layers, selections, paint, filters, text, IO and UI |
@@ -185,6 +218,7 @@ The original macOS app remains the behavior and file-format reference. Linux-spe
 
 ## Version history
 
+- **v0.5.3**: Sync with macOS Compositor 1.5.3 (16-bit and HDR layers, CMYK proofing and export, Export As, Progressive Blur, Scanlines, Last Filter, Rotate Canvas, smooth corners, Camera Raw re-measured, RAW noise reduction and lens profiles, Search Commands, fullscreen canvas, navigator, formats v12–v14) and a commit-by-commit parity audit.
 - **v0.4.5**: Native Linux polish (light/dark/system themes, system fonts, native dialogs, Wayland and HiDPI fixes, Alt-gesture alternatives, recent projects, Help menu) and macOS behaviour-parity fixes with broad test coverage.
 - **v0.4.0**: Sync with macOS Compositor 1.4.5 (format v10/v11, per-letter text, Color Range, Dither, Grid Settings, painting tool fixes, Photoshop-accurate curves and saturation).
 - **v0.3.1**: Fix autosave conflict dialog and recovery path handling for untitled projects.

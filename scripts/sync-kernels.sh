@@ -2,7 +2,7 @@
 # Keep the vendored C kernels in step with the macOS Compositor repo.
 #   scripts/sync-kernels.sh /path/to/Compositor          report drift
 #   scripts/sync-kernels.sh /path/to/Compositor --apply  copy the mac versions over (then re-apply the Linux shims)
-# Linux shims: headers get extern "C" (wrap-extern-c.py); DitherPixels.c loses libdispatch/blocks (port-dither-kernel.py).
+# Linux shims: headers get extern "C" (wrap-extern-c.py); C sources replace libdispatch/blocks with OpenMP (port-kernel.py).
 set -euo pipefail
 mac="${1:?usage: $0 <mac-repo> [--apply]}"
 apply="${2:-}"
@@ -17,7 +17,7 @@ for f in "$src"/*Pixels.[ch] "$src"/ContentFill.[ch]; do
   cp "$f" "$tmp/$b"
   case "$b" in
     *.h) python3 "$here/wrap-extern-c.py" "$tmp/$b" ;;
-    DitherPixels.c) python3 "$here/port-dither-kernel.py" "$tmp/$b" ;;
+    *.c) python3 "$here/port-kernel.py" "$tmp/$b" ;;
   esac
   if [ ! -f "$dst/$b" ]; then echo "MISSING  $b"; drift=1
   elif ! diff -q "$tmp/$b" "$dst/$b" >/dev/null; then echo "DRIFT    $b ($(diff "$tmp/$b" "$dst/$b" | grep -c '^[<>]') lines)"; drift=1

@@ -1,4 +1,8 @@
 #include "io/ProjectWriter.h"
+#include "io/HdrImage.h"
+#include "io/ImageExporter.h"
+#include "rendering/DeepImage.h"
+#include "rendering/LayerRenderer.h"
 #include "io/AdjustmentJson.h"
 #include "io/ProjectReader.h"
 
@@ -83,6 +87,7 @@ QJsonObject shapeObject(const LayerShapeStyle &style)
     obj.insert(QStringLiteral("green"), style.green);
     obj.insert(QStringLiteral("blue"), style.blue);
     obj.insert(QStringLiteral("cornerRadius"), style.cornerRadius);
+    if (style.smoothing) obj.insert(QStringLiteral("smoothing"), *style.smoothing);
     if (style.lineWidth) obj.insert(QStringLiteral("lineWidth"), *style.lineWidth);
     if (style.start) obj.insert(QStringLiteral("start"), QJsonArray{style.start->x(), style.start->y()});
     if (style.end) obj.insert(QStringLiteral("end"), QJsonArray{style.end->x(), style.end->y()});
@@ -363,6 +368,8 @@ int ProjectWriter::minimumRequiredVersion(const Document &document)
             }
         }
         if (layer.group && layer.opacity < 0.999999) minRequired = std::max(minRequired, 8);
+        if (layer.shapeStyle && layer.shapeStyle->smoothing.value_or(false)) minRequired = std::max(minRequired, 14);
+        if (DeepImage::isDeep(layer.image)) minRequired = std::max(minRequired, DeepImage::isHDR(layer.image) ? 13 : 12);
         if (layer.text) minRequired = std::max(minRequired, layer.text->requiredFormatVersion());
     }
     if (!document.guides.isEmpty()) minRequired = std::max(minRequired, 8);
@@ -372,7 +379,7 @@ int ProjectWriter::minimumRequiredVersion(const Document &document)
 int ProjectWriter::computeTargetVersion(const Document &document)
 {
     const int minRequired = minimumRequiredVersion(document);
-    return (document.formatVersion >= 1 && document.formatVersion <= 11)
+    return (document.formatVersion >= 1 && document.formatVersion <= 14)
                ? document.formatVersion
                : std::max(minRequired, 9);
 }
@@ -578,12 +585,20 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
             value.insert(QStringLiteral("effects"), effectsObject(*layer.effects));
         }
 
+        if(DeepImage::isDeep(layer.image)&&targetVersion<(DeepImage::isHDR(layer.image)?13:12))
+            fail(QStringLiteral("The layer image requires a newer project format version."));
+        if(layer.shapeStyle&&layer.shapeStyle->smoothing.value_or(false)&&targetVersion<14)
+            fail(QStringLiteral("Smooth corners require project format version 14."));
+
         // Save image if present
         if (!layer.image.isNull() && !layer.group) {
             totalImagePixels += qint64(layer.image.width()) * layer.image.height();
             if (totalImagePixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the image pixel limit is exceeded"));
-            const QString fileName = uuid(layer.id) + QStringLiteral(".png");
-            if (!layer.image.save(root.filePath(QStringLiteral("images/") + fileName), "PNG")) {
+            const bool hdr=DeepImage::isHDR(layer.image);
+            const QString fileName=uuid(layer.id)+(hdr?QStringLiteral(".exr"):QStringLiteral(".png"));
+            const QString path=root.filePath(QStringLiteral("images/")+fileName);
+            const auto exr=hdr?HdrImage::encode(layer.image):std::optional<QByteArray>{};
+            if (hdr ? (!exr || !ImageExporter::writeAtomically(*exr,path)) : !DeepImage::canonical(layer.image).save(path,"PNG")) {
                 fail(QStringLiteral("a layer image could not be encoded"));
             }
             value.insert(QStringLiteral("imageFile"), fileName);
@@ -637,6 +652,19 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
     QSaveFile manifestFile(root.filePath(QStringLiteral("manifest.json")));
     if (!manifestFile.open(QIODevice::WriteOnly) || manifestFile.write(metadata) != metadata.size() || !manifestFile.commit()) {
         fail(QStringLiteral("the manifest could not be written"));
+    }
+
+    // The same optional embedded preview the macOS package supplies to Quick Look.
+    // It is derived data: a preview failure must not prevent saving the editable document.
+    if (qint64(document.canvasSize.width())*document.canvasSize.height() <= 50000000) {
+        try {
+            QImage preview = LayerRenderer::flattened(document);
+            if (std::max(preview.width(),preview.height()) > 1024)
+                preview = preview.scaled(1024,1024,Qt::KeepAspectRatio,Qt::SmoothTransformation);
+            const auto jpeg = ImageExporter::jpeg(preview,80,Qt::white,72);
+            if (jpeg && root.mkpath(QStringLiteral("QuickLook")))
+                ImageExporter::writeAtomically(jpeg->data,root.filePath(QStringLiteral("QuickLook/Preview.jpg")));
+        } catch (const std::exception &) {}
     }
 
     const QString destination = destinationInfo.absoluteFilePath();

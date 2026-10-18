@@ -1,6 +1,7 @@
 // Ports CompositorTests/DitherTests.swift (mac f3cd4e9, 71635e2, d0aae29, 09ab78a, 2309a85, 9c99853, cd2f998).
 #include "core/EditorSession.h"
 #include "rendering/Dither.h"
+#include "rendering/Scanlines.h"
 
 #include <QtTest>
 #include <cmath>
@@ -60,6 +61,7 @@ private slots:
     void scanlinesAreLinesOfLightThatBloomWithBrightness();
     void glowLightsBetweenTheLines();
     void dotsBreakTheLinesIntoBeads();
+
     void wobbleMovesLinesSideways();
     void everyStyleRunsAndKeepsSize();
     void blackWhiteOutputIsBinary();
@@ -90,13 +92,12 @@ void TestDither::glowLightsBetweenTheLines()
 }
 
 void TestDither::dotsBreakTheLinesIntoBeads()
-{
-    const QImage white = solid(64, 16, Qt::white);
-    const QImage solidLines = render(white, [](DitherSettings &s) { s.lineSpacing = 8; });
-    const QImage beads = render(white, [](DitherSettings &s) { s.lineSpacing = 8; s.dots = 100; });
-    for (int x = 0; x < 64; ++x) QCOMPARE(red(solidLines, x, 4), 255);
-    QVERIFY(red(beads, 3, 4) == 255 && red(beads, 4, 4) == 255 && red(beads, 0, 4) < 60 && red(beads, 8, 4) < 60);
-}
+    {
+        ScanlinesSettings settings;settings.lineSpacing=8;settings.dots=70;
+        QImage source(32,32,QImage::Format_RGBA8888_Premultiplied);source.fill(QColor::fromRgbF(.4,.4,.4));
+        const QImage beads=settings.apply(source);
+        QVERIFY(red(beads,3,4)>100&&red(beads,4,4)>100&&red(beads,0,4)<40&&red(beads,8,4)<40);
+    }
 
 void TestDither::wobbleMovesLinesSideways()
 {

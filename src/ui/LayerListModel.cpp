@@ -1,4 +1,5 @@
 #include "ui/LayerListModel.h"
+#include "rendering/DeepImage.h"
 
 #include <QIcon>
 #include <QMimeData>
@@ -223,6 +224,7 @@ QVariant LayerListModel::data(const QModelIndex &index, int role) const
         if (!layer.adjustment.isEmpty()) return tr("Adjustment · %1").arg(layer.adjustment.value(QStringLiteral("kind")).toString());
         if (!layer.image.isNull()) {
             QString text = QStringLiteral("%1 × %2 px").arg(layer.image.width()).arg(layer.image.height());
+            if(DeepImage::isDeep(layer.image))text+=DeepImage::isHDR(layer.image)?QStringLiteral(" · HDR"):QStringLiteral(" · 16-Bit");
             // A layer keeps its full pixels however small it is scaled, so a scaled one says so: "100 × 100 px · 5%" rather
             // than looking as if it had been resampled (mac 67cc31e).
             const double scale = layer.transform.size.width() / std::max(1, layer.image.width());
@@ -240,6 +242,7 @@ QVariant LayerListModel::data(const QModelIndex &index, int role) const
     if (role == Qt::UserRole + 7) return !layer.mask.isNull() && !layer.maskEnabled;                       // disabled-mask mark
     if (role == Qt::UserRole + 8) return !layer.mask.isNull() && !layer.group && layer.adjustment.isEmpty(); // link chain shown
     if (role == Qt::UserRole + 9) return layer.maskLinked;
+    if (role == Qt::UserRole + 21) return layer.shapeStyle ? int(layer.shapeStyle->kind) + 1 : 0;
     if (role == Qt::UserRole + 20) return layer.text.has_value();                                 // editable-text badge
     return {};
 }

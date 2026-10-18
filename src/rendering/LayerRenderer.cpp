@@ -1,4 +1,5 @@
 #include "rendering/LayerRenderer.h"
+#include "rendering/DeepImage.h"
 #include "rendering/LayerEffectsRenderer.h"
 #include "rendering/RasterOperations.h"
 
@@ -14,7 +15,7 @@ namespace compositor {
 QImage LayerRenderer::applyMask(const QImage &image, const QImage &mask, Sampling sampling)
 {
     if (image.isNull() || mask.isNull()) return image;
-    QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    QImage result = DeepImage::canonical(image);
     const QImage coverage = mask.scaled(result.size(), Qt::IgnoreAspectRatio,
                                         sampling == Sampling::Nearest
                                             ? Qt::FastTransformation : Qt::SmoothTransformation)
@@ -164,6 +165,14 @@ static std::array<double,3> blendColor(std::array<double,3> backdrop, std::array
         switch (mode) {
         // A black backdrop stays black under Color Dodge and a white one white under Color Burn, whatever is blended
         // over it (the W3C / Photoshop definitions).
+        case BlendMode::Darken: source[c]=std::min(backdrop[c],source[c]); break;
+        case BlendMode::Multiply: source[c]*=backdrop[c]; break;
+        case BlendMode::Lighten: source[c]=std::max(backdrop[c],source[c]); break;
+        case BlendMode::Screen: source[c]=1-(1-backdrop[c])*(1-source[c]); break;
+        case BlendMode::Overlay: source[c]=backdrop[c]<=.5?2*backdrop[c]*source[c]:1-2*(1-backdrop[c])*(1-source[c]); break;
+        case BlendMode::HardLight: source[c]=source[c]<=.5?2*backdrop[c]*source[c]:1-2*(1-backdrop[c])*(1-source[c]); break;
+        case BlendMode::Difference: source[c]=std::abs(backdrop[c]-source[c]); break;
+        case BlendMode::Exclusion: source[c]=backdrop[c]+source[c]-2*backdrop[c]*source[c]; break;
         case BlendMode::ColorDodge:
             source[c] = backdrop[c] <= 0.0 ? 0.0 : (source[c] >= 1.0) ? 1.0 : std::min(1.0, backdrop[c] / (1.0 - source[c]));
             break;
@@ -563,8 +572,64 @@ static void renderScope(const Document &document,
     }
 }
 
+// Deep documents composite in floating point, keeping highlights and precision until display quantization.
+static void deepComposite(QImage &backdrop,const QImage &source,BlendMode mode)
+{
+    const QImage top=source.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+    for(int y=0;y<backdrop.height();++y){auto *b=reinterpret_cast<float *>(backdrop.scanLine(y));const auto *s=reinterpret_cast<const float *>(top.constScanLine(y));
+        for(int x=0;x<backdrop.width();++x){const float ab=b[x*4+3],as=s[x*4+3];if(as<=0)continue;
+            std::array<double,3> cb{},cs{};for(int c=0;c<3;++c){cb[c]=ab>0?b[x*4+c]/ab:0;cs[c]=s[x*4+c]/as;}
+            const auto mixed=mode==BlendMode::Normal?cs:blendColor(cb,cs,mode);
+            for(int c=0;c<3;++c)b[x*4+c]=float((1-as)*b[x*4+c]+(1-ab)*s[x*4+c]+as*ab*mixed[c]);b[x*4+3]=as+ab-as*ab;
+        }
+    }
+}
+static QImage deepAdjusted(const QImage &original,const Document &document,const Layer &layer,const QImage &clip)
+{
+    QImage adjusted=RasterOperations::adjustment(original,layer.adjustment).convertToFormat(original.format());
+    QImage result=original;
+    const QImage mask=layer.maskEnabled&&!layer.mask.isNull()?LayerRenderer::placedMask(layer,layer,original.size()):QImage();
+    const double opacity=layer.opacity*ancestorFactor(document,layer);
+    for(int y=0;y<original.height();++y){auto *out=reinterpret_cast<float *>(result.scanLine(y));const auto *a=reinterpret_cast<const float *>(adjusted.constScanLine(y));const auto *base=reinterpret_cast<const float *>(original.constScanLine(y));
+        for(int x=0;x<original.width();++x){const double t=opacity*(mask.isNull()?1:mask.constScanLine(y)[x]/255.0)*(clip.isNull()?1:clip.constScanLine(y)[x]/255.0);
+            std::array<double,3> cb{},cs{};const float alpha=base[x*4+3],aa=a[x*4+3];
+            for(int c=0;c<3;++c){cb[c]=alpha>0?base[x*4+c]/alpha:0;cs[c]=aa>0?a[x*4+c]/aa:0;}
+            const auto color=layer.blendMode==BlendMode::Normal?cs:blendColor(cb,cs,layer.blendMode);
+            for(int c=0;c<3;++c)out[x*4+c]=float(base[x*4+c]*(1-t)+color[c]*aa*t);out[x*4+3]=float(alpha*(1-t)+aa*t);
+        }
+    }
+    return result;
+}
+static void deepMask(QImage &image,const QImage &coverage)
+{
+    if(coverage.isNull())return;
+    for(int y=0;y<image.height();++y){auto *p=reinterpret_cast<float *>(image.scanLine(y));const auto *mask=coverage.constScanLine(y);for(int x=0;x<image.width();++x)for(int c=0;c<4;++c)p[x*4+c]*=mask[x]/255.0f;}
+}
+static void renderDeepScope(const Document &document,const std::optional<QUuid> &parent,QImage &canvas,const QImage &clip={})
+{
+    QVector<const Layer *> children;for(const auto &layer:document.layers)if(layer.parentId==parent)children.push_back(&layer);
+    const auto plane=[&](const Layer &layer){QImage image(document.canvasSize,QImage::Format_RGBA32FPx4_Premultiplied);image.fill(Qt::transparent);{QPainter p(&image);drawLayer(p,document,layer,QPainter::CompositionMode_SourceOver);}return image;};
+    for(int i=0;i<children.size();++i){const Layer &layer=*children[i];if(!LayerRenderer::effectivelyVisible(document,layer))continue;
+        if(layer.group){QImage mask=clip;if(layer.maskEnabled&&!layer.mask.isNull()){QImage own=LayerRenderer::placedMask(layer,layer,document.canvasSize);if(!clip.isNull())for(int y=0;y<own.height();++y)for(int x=0;x<own.width();++x)own.scanLine(y)[x]=uchar(int(own.constScanLine(y)[x])*clip.constScanLine(y)[x]/255);mask=own;}renderDeepScope(document,layer.id,canvas,mask);continue;}
+        if(!layer.adjustment.isEmpty()){canvas=deepAdjusted(canvas,document,layer,clip);continue;}
+        if(!drawable(layer))continue;
+        QImage surface=plane(layer);
+        int end=i+1;if(!layer.maskSourceId)while(end<children.size()&&children[end]->maskSourceId==std::optional<QUuid>(layer.id))++end;
+        if(end>i+1){const QImage alpha=surface;const QImage coverage=layerCoverage(document,layer,{});
+            for(int y=0;y<surface.height();++y){auto *p=reinterpret_cast<float *>(surface.scanLine(y));for(int x=0;x<surface.width();++x){const float a=p[x*4+3];if(a>0){for(int c=0;c<3;++c)p[x*4+c]/=a;p[x*4+3]=1;}}}
+            QImage hard(document.canvasSize,QImage::Format_Grayscale8);for(int y=0;y<hard.height();++y)for(int x=0;x<hard.width();++x)hard.scanLine(y)[x]=coverage.constScanLine(y)[x*4+3]?255:0;
+            for(int j=i+1;j<end;++j){const Layer &child=*children[j];if(!LayerRenderer::effectivelyVisible(document,child))continue;if(!child.adjustment.isEmpty())surface=deepAdjusted(surface,document,child,hard);else{QImage own=plane(child);deepMask(own,hard);deepComposite(surface,own,child.blendMode);}}
+            for(int y=0;y<surface.height();++y){auto *p=reinterpret_cast<float *>(surface.scanLine(y));const auto *a=reinterpret_cast<const float *>(alpha.constScanLine(y));for(int x=0;x<surface.width();++x){const float total=p[x*4+3],target=a[x*4+3];for(int c=0;c<3;++c)p[x*4+c]=total>0?p[x*4+c]/total*target:0;p[x*4+3]=target;}}
+            i=end-1;
+        }else if(layer.maskSourceId){const auto source=std::find_if(document.layers.cbegin(),document.layers.cend(),[&](const Layer &l){return l.id==*layer.maskSourceId;});if(source!=document.layers.cend()){const QImage rgba=layerCoverage(document,*source,{});QImage gray(document.canvasSize,QImage::Format_Grayscale8);for(int y=0;y<gray.height();++y)for(int x=0;x<gray.width();++x)gray.scanLine(y)[x]=rgba.constScanLine(y)[x*4+3];deepMask(surface,gray);}else surface.fill(Qt::transparent);}
+        deepMask(surface,clip);deepComposite(canvas,surface,layer.blendMode);
+    }
+}
+static bool hasDeepLayers(const Document &document){return std::any_of(document.layers.cbegin(),document.layers.cend(),[](const Layer &layer){return DeepImage::isDeep(layer.image);});}
+
 void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
 {
+    if(hasDeepLayers(document)) {QImage canvas(document.canvasSize,QImage::Format_RGBA32FPx4_Premultiplied);if(std::none_of(document.layers.cbegin(),document.layers.cend(),[](const Layer &l){return DeepImage::isHDR(l.image);}))canvas.setText(QStringLiteral("compositorDepth"),QStringLiteral("16"));canvas.fill(Qt::transparent);renderDeepScope(document,std::nullopt,canvas);outputPainter.drawImage(0,0,canvas);return;}
     const auto findLayer = [&document](const QUuid &id) -> const Layer * {
         const auto it = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &layer) { return layer.id == id; });
         return it == document.layers.cend() ? nullptr : &*it;
@@ -589,7 +654,8 @@ void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
 
 QImage LayerRenderer::flattened(const Document &document)
 {
-    QImage output(document.canvasSize, QImage::Format_RGBA8888_Premultiplied);
+    QImage output(document.canvasSize, hasDeepLayers(document)?QImage::Format_RGBA32FPx4_Premultiplied:QImage::Format_RGBA8888_Premultiplied);
+    if(hasDeepLayers(document)&&std::none_of(document.layers.cbegin(),document.layers.cend(),[](const Layer &l){return DeepImage::isHDR(l.image);}))output.setText(QStringLiteral("compositorDepth"),QStringLiteral("16"));
     output.fill(Qt::transparent);
     QPainter painter(&output);
     draw(painter, document);
@@ -601,7 +667,7 @@ QImage LayerRenderer::flattened(const Document &document)
 QImage LayerRenderer::bakeLiveMask(const Document &document, const Layer &layer)
 {
     if (layer.image.isNull()) return {};
-    QImage own = layer.image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    QImage own = DeepImage::canonical(layer.image);
     if (!layer.maskSourceId) return own;
     const auto it = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &candidate) {
         return candidate.id == *layer.maskSourceId;

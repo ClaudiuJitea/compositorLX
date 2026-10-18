@@ -68,7 +68,7 @@ void ShortcutManager::setOverrides(const QMap<QString, QKeySequence> &overrides)
 void ShortcutManager::setOverride(const QString &id, const QKeySequence &sequence)
 {
     QMap<QString, QKeySequence> candidate = overrides_;
-    if (sequence.isEmpty() || sequence == defaultShortcut(id)) {
+    if (sequence == defaultShortcut(id)) {
         candidate.remove(id);
     } else {
         candidate.insert(id, sequence);
@@ -89,7 +89,8 @@ QString ShortcutManager::validate(const QMap<QString, QKeySequence> &candidateOv
 
     for (const ShortcutDefinition &def : definitions_) {
         const QKeySequence chord = candidateOverrides.value(def.id(), def.defaultShortcut);
-        if (chord.isEmpty() || chord.count() != 1) {
+        if (chord.isEmpty()) continue;
+        if (chord.count() != 1) {
             return QStringLiteral("Choose a single key with optional modifiers.");
         }
 
@@ -390,6 +391,7 @@ void ShortcutManager::initDefinitions()
     addEntry(QStringLiteral("Save As"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S));
     addEntry(QStringLiteral("Export PNG"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     addEntry(QStringLiteral("Export JPEG"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_S));
+    addEntry(QStringLiteral("Export As"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_W));
     addEntry(QStringLiteral("Close Project"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_W));
     addEntry(QStringLiteral("Fit Canvas"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_0));
     addEntry(QStringLiteral("Actual Pixels"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_1));
@@ -427,6 +429,11 @@ void ShortcutManager::initDefinitions()
     addEntry(QStringLiteral("Show Rulers"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_R));
     addEntry(QStringLiteral("Snap"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Semicolon));
     addEntry(QStringLiteral("Lock Guides"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Semicolon));
+    addEntry(QStringLiteral("Search Commands"),QStringLiteral("Menus"),QKeySequence(Qt::CTRL|Qt::Key_F));
+    addEntry(QStringLiteral("Toggle Fullscreen"),QStringLiteral("Menus"),QKeySequence(Qt::Key_F));
+    addEntry(QStringLiteral("Last Filter"),QStringLiteral("Menus"),QKeySequence(Qt::CTRL|Qt::ALT|Qt::Key_F));
+    addEntry(QStringLiteral("Proof Colors"),QStringLiteral("Menus"),QKeySequence(Qt::CTRL|Qt::Key_Y));
+    addEntry(QStringLiteral("Gamut Warning"),QStringLiteral("Menus"),QKeySequence(Qt::CTRL|Qt::SHIFT|Qt::Key_Y));
     addEntry(QStringLiteral("Camera Raw Filter"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
     addEntry(QStringLiteral("Feather Selection"), QStringLiteral("Menus"), QKeySequence(Qt::SHIFT | Qt::Key_F6));
     addEntry(QStringLiteral("Show Menu Bar"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));

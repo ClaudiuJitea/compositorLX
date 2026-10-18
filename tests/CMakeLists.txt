@@ -145,3 +145,8 @@ add_executable(ui_polish_tests
 target_include_directories(ui_polish_tests PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(ui_polish_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME ui_polish_tests COMMAND ui_polish_tests -platform offscreen)
+
+add_executable(upstream15_tests TestUpstream15.cpp)
+target_link_libraries(upstream15_tests PRIVATE compositor_ui Qt6::Test)
+target_compile_definitions(upstream15_tests PRIVATE FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+add_test(NAME upstream15_tests COMMAND upstream15_tests -platform offscreen -nocrashhandler)

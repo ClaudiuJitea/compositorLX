@@ -1,4 +1,7 @@
 #include "io/RawImporter.h"
+#include "io/LensCorrection.h"
+#include <QTransform>
+#include "rendering/DeepImage.h"
 
 #include <QFileInfo>
 #include <QImage>
@@ -140,6 +143,31 @@ std::optional<RawDevelopSettings> RawImporter::asShot(const QString &filePath) {
 #endif
 }
 
+#if defined(COMPOSITOR_HAVE_LIBRAW)
+static LensMetadata lensMetadata(const libraw_data_t &raw)
+{
+    return {QString::fromUtf8(raw.idata.make).trimmed(), QString::fromUtf8(raw.idata.model).trimmed(),
+            QString::fromUtf8(raw.lens.LensMake).trimmed(), QString::fromUtf8(raw.lens.Lens).trimmed(),
+            raw.other.focal_len, raw.other.aperture, 1000};
+}
+#endif
+QString RawImporter::lensProfile(const QString &filePath)
+{
+#if defined(COMPOSITOR_HAVE_LIBRAW)
+    const QFileInfo info(filePath);
+    if (!info.isFile() || info.size() <= 0 || info.size() > MaxFileBytes) return {};
+    libraw_data_t *raw = libraw_init(0);
+    if (!raw) return {};
+    const QString name = libraw_open_file(raw, filePath.toUtf8().constData()) == LIBRAW_SUCCESS
+        ? LensCorrection::profileName(lensMetadata(*raw)) : QString();
+    libraw_close(raw);
+    return name;
+#else
+    Q_UNUSED(filePath);
+    return {};
+#endif
+}
+
 QImage RawImporter::develop(const QString &filePath, const RawDevelopSettings &settings, int limit,
                             std::atomic<bool> *cancelled, qint64 pixelBudget) {
     if (cancelled && cancelled->load()) return {};
@@ -206,7 +234,13 @@ QImage RawImporter::develop(const QString &filePath, const RawDevelopSettings &s
         return {};
     }
 
-    lr->params.output_bps = 8;
+    const LensMetadata lens = lensMetadata(*lr);
+    const bool correctLens = settings.lensCorrection && !LensCorrection::profileName(lens).isEmpty();
+    const int flip = lr->sizes.flip;
+    if (correctLens) lr->params.user_flip = 0;
+    lr->params.output_bps = 16;
+    lr->params.threshold = std::clamp(settings.noiseReduction,0.0f,1.0f)*1000;
+    lr->params.highlight = settings.highlightRecovery ? 3 : 0;
     lr->params.output_color = 1; // sRGB
     lr->params.exp_correc = 1;
     lr->params.exp_shift = std::pow(2.0f, settings.exposure);
@@ -259,7 +293,7 @@ QImage RawImporter::develop(const QString &filePath, const RawDevelopSettings &s
     }
 
     libraw_processed_image_t *img = libraw_dcraw_make_mem_image(lr, &ret);
-    if (!img || img->type != LIBRAW_IMAGE_BITMAP || img->colors != 3 || img->bits != 8) {
+    if (!img || img->type != LIBRAW_IMAGE_BITMAP || img->colors != 3 || img->bits != 16) {
         if (img) libraw_dcraw_clear_mem(img);
         libraw_close(lr);
         return {};
@@ -278,39 +312,37 @@ QImage RawImporter::develop(const QString &filePath, const RawDevelopSettings &s
         return {};
     }
 
-    QImage result(img->data, img->width, img->height, img->width * 3, QImage::Format_RGB888);
-    QImage copied = result.copy().convertToFormat(QImage::Format_ARGB32_Premultiplied);
-
+    QImage wide(img->width,img->height,QImage::Format_RGBA64_Premultiplied);
+    const auto *samples=reinterpret_cast<const uint16_t *>(img->data);
+    for(int y=0;y<wide.height();++y){auto *out=reinterpret_cast<QRgba64 *>(wide.scanLine(y));for(int x=0;x<wide.width();++x){const size_t i=(size_t(y)*wide.width()+x)*3;out[x]=QRgba64::fromRgba64(samples[i],samples[i+1],samples[i+2],65535);}}
     libraw_dcraw_clear_mem(img);
     libraw_close(lr);
-
     if (cancelled && cancelled->load()) return {};
-
-    if (std::abs(settings.boost - 1.0f) > 0.01f) {
-        const float b = std::clamp(settings.boost, 0.0f, 2.0f);
-        uint8_t lut[256];
-        for (int i = 0; i < 256; ++i) {
-            float val = float(i) / 255.0f;
-            float boosted = (val < 0.5f) ? (0.5f * std::pow(2.0f * val, b)) : (1.0f - 0.5f * std::pow(2.0f * (1.0f - val), b));
-            lut[i] = static_cast<uint8_t>(std::clamp(boosted * 255.0f + 0.5f, 0.0f, 255.0f));
-        }
-        for (int y = 0; y < copied.height(); ++y) {
+    if (correctLens) {
+        wide = LensCorrection::apply(wide, lens, cancelled);
+        const int angle = flip == 3 ? 180 : flip == 5 ? -90 : flip == 6 ? 90 : 0;
+        if (angle) wide = wide.transformed(QTransform().rotate(angle));
+        else if (flip == 1 || flip == 2) wide = wide.mirrored(flip == 1,flip == 2);
+        else if (flip == 4 || flip == 7) wide = wide.transformed(QTransform(0,flip == 4 ? 1 : -1,flip == 4 ? 1 : -1,0,0,0));
+    }
+    // Finish the tone curve and preview resampling before the single final quantization.
+    if (std::abs(settings.boost - 1.0f) > .01f) {
+        const float boost = std::clamp(settings.boost, 0.0f, 2.0f);
+        for (int y = 0; y < wide.height(); ++y) {
             if (cancelled && cancelled->load()) return {};
-            QRgb *scan = reinterpret_cast<QRgb *>(copied.scanLine(y));
-            for (int x = 0; x < copied.width(); ++x) {
-                scan[x] = qRgba(lut[qRed(scan[x])], lut[qGreen(scan[x])], lut[qBlue(scan[x])], qAlpha(scan[x]));
-            }
+            auto *row = reinterpret_cast<QRgba64 *>(wide.scanLine(y));
+            const auto tone = [boost](quint16 value) {
+                const double v = value / 65535.0;
+                const double result = v < .5 ? .5 * std::pow(2*v, boost) : 1 - .5 * std::pow(2*(1-v), boost);
+                return quint16(std::clamp(qRound(result * 65535), 0, 65535));
+            };
+            for (int x = 0; x < wide.width(); ++x)
+                row[x] = QRgba64::fromRgba64(tone(row[x].red()), tone(row[x].green()), tone(row[x].blue()), row[x].alpha());
         }
     }
-
-    if (cancelled && cancelled->load()) return {};
-
-    if (limit > 0) {
-        const int longest = std::max(copied.width(), copied.height());
-        if (longest > limit) {
-            copied = copied.scaled(limit, limit, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        }
-    }
+    if (limit > 0 && std::max(wide.width(), wide.height()) > limit)
+        wide = wide.scaled(limit, limit, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    const QImage copied = DeepImage::dithered(wide).convertToFormat(QImage::Format_ARGB32_Premultiplied);
 
     if (cancelled && cancelled->load()) return {};
 

@@ -35,6 +35,7 @@ public:
     static bool probeDimensions(const QString &filePath, RawDimensions &dims);
     static bool pixelSize(const QString &filePath, int &width, int &height);
     static std::optional<RawDevelopSettings> asShot(const QString &filePath);
+    static QString lensProfile(const QString &filePath);
     static QImage develop(const QString &filePath, const RawDevelopSettings &settings, int limit = 0,
                           std::atomic<bool> *cancelled = nullptr, qint64 pixelBudget = MaxOutputPixels);
 };

@@ -15,6 +15,7 @@
 #include <memory>
 #include <functional>
 
+class QDialog;
 class QListView;
 class QLabel;
 class QComboBox;
@@ -82,6 +83,7 @@ public:
     void populateLayerContextMenu(QMenu &menu);
     void selectRowForContextMenu(const QModelIndex &index);
     void updateRulerVisibility();
+    void toggleCanvasOnly();
 
     [[nodiscard]] ScrubLabel *brushSizeLabel() const { return brushSizeLabel_; }
     [[nodiscard]] ScrubLabel *brushHardnessLabel() const { return brushHardnessLabel_; }
@@ -180,10 +182,13 @@ private:
     void createActions();
     void chooseProject();
     void newProject();
+    QString nextUntitledTitle() const;
     void importImages();
     bool confirmReplacement();
     [[nodiscard]] QString newRecoveryPath() const;
     void exportPng(bool jpegDefault = false);
+    void exportAsDialog(bool jpegDefault = false);
+    void setupCMYK(QMenu *view);
     void resizeImageDialog();
     void resizeCanvasDialog();
     void cropDialog();
@@ -208,6 +213,14 @@ private:
     void vignetteDialog();
     void bloomGlowDialog();
     void ditherDialog();
+    void scanlinesDialog();
+    void progressiveBlurDialog();
+    void searchCommands();
+    int runPortDialog(QDialog &dialog);
+    ScanlinesSettings scanlinesSettings_;
+    std::optional<QPoint> layerPanStart_;
+    int layerPanScroll_ = 0;
+    std::optional<QUuid> revealedLayer_;
     void tonalContrastDialog();
     void removeBackgroundDialog();
     void keyboardShortcutsDialog();
@@ -254,13 +267,16 @@ private:
     QAction *actionLockGuides_ = nullptr;
     QAction *actionClearGuides_ = nullptr;
     QStackedWidget *canvasStack_ = nullptr;
-    QSpinBox *newCanvasWidth_ = nullptr;
-    QSpinBox *newCanvasHeight_ = nullptr;
+    QDoubleSpinBox *newCanvasWidth_ = nullptr;
+    QDoubleSpinBox *newCanvasHeight_ = nullptr;
     LayerListModel *layerModel_ = nullptr;
     QListView *layerView_ = nullptr;
     QLabel *tabTitle_ = nullptr;
     QTabBar *tabs_ = nullptr;
     QToolButton *layerMenuButton_ = nullptr;
+    QAction *actionFullscreen_ = nullptr;
+    bool canvasOnly_ = false;
+    Qt::WindowStates stateBeforeCanvasOnly_;
     QDoubleSpinBox *zoomField_ = nullptr;
     QLabel *layerCount_ = nullptr;
     QLabel *statusDimensions_ = nullptr;
@@ -321,6 +337,7 @@ private:
     QPushButton *transformApply_ = nullptr;
     QPushButton *transformCancel_ = nullptr;
     std::shared_ptr<Document> document_;
+    QPointer<InlineTextEditor> inlineTextEditor_;
     EditorSession session_;
     double brushDiameter_ = 40;
     double brushHardness_ = 1;

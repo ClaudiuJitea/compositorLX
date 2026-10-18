@@ -1,4 +1,6 @@
 #include "io/ProjectReader.h"
+#include "io/HdrImage.h"
+#include "rendering/DeepImage.h"
 
 #include "core/DocumentLimits.h"
 
@@ -129,7 +131,7 @@ QImage loadPng(const QDir &root, const QString &fileName, qint64 &pixelBudget, b
     const QString path = checkedAssetPath(root, fileName);
     QImageReader reader(path, "PNG");
     // Qt refuses images over 256 MB by default (64 MP); the document budget is the limit that applies here.
-    reader.setAllocationLimit(int(std::min<qint64>(2047, DocumentLimits::documentPixelBudget() * 4 / (1024 * 1024)) + 1));
+    reader.setAllocationLimit(int(std::min<qint64>(2047, DocumentLimits::documentPixelBudget() * 8 / (1024 * 1024)) + 1));
     if (!reader.canRead()) {
         invalid(QStringLiteral("an image is damaged or cannot be read"));
     }
@@ -150,7 +152,7 @@ QImage loadPng(const QDir &root, const QString &fileName, qint64 &pixelBudget, b
     if (isMask) {
         return image.convertToFormat(QImage::Format_Grayscale8);
     }
-    return image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    return DeepImage::canonical(image);
 }
 
 void validateHierarchy(const QVector<Layer> &layers)
@@ -456,6 +458,7 @@ std::optional<LayerShapeStyle> parseShape(const QJsonObject &obj)
     style.green = number(obj, QStringLiteral("green"), 0.0);
     style.blue = number(obj, QStringLiteral("blue"), 0.0);
     style.cornerRadius = number(obj, QStringLiteral("cornerRadius"), 0.0);
+    if (obj.contains(QStringLiteral("smoothing"))) style.smoothing = boolean(obj, QStringLiteral("smoothing"), false);
     if (obj.contains(QStringLiteral("lineWidth"))) {
         style.lineWidth = number(obj, QStringLiteral("lineWidth"), 1.0);
     }
@@ -530,8 +533,8 @@ Document ProjectReader::load(const QString &projectDirectory)
 
     Document document;
     document.formatVersion = manifest.value(QStringLiteral("version")).toInt(-1);
-    if (document.formatVersion < 1 || document.formatVersion > 11) {
-        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–11.").arg(document.formatVersion));
+    if (document.formatVersion < 1 || document.formatVersion > 14) {
+        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–14.").arg(document.formatVersion));
     }
     if (manifest.value(QStringLiteral("colorSpace")).toString() != QStringLiteral("sRGB")) {
         invalid(QStringLiteral("only the sRGB working space is supported"));
@@ -621,10 +624,20 @@ Document ProjectReader::load(const QString &projectDirectory)
         if (!layer.imageFile.isEmpty()) {
             if (layer.group) invalid(QStringLiteral("a group cannot contain an image file"));
             const QString expectedId = layer.id.toString(QUuid::WithoutBraces);
-            if (layer.imageFile.compare(expectedId + QStringLiteral(".png"), Qt::CaseInsensitive) != 0) {
+            if (layer.imageFile.compare(expectedId + QStringLiteral(".png"), Qt::CaseInsensitive) != 0
+                && layer.imageFile.compare(expectedId + QStringLiteral(".exr"), Qt::CaseInsensitive) != 0) {
                 invalid(QStringLiteral("unexpected layer image filename"));
             }
-            layer.image = loadPng(root, layer.imageFile, imagePixels, false);
+            if (layer.imageFile.endsWith(QStringLiteral(".exr"),Qt::CaseInsensitive)) {
+                if (document.formatVersion<13) invalid(QStringLiteral("EXR images require format version 13 or later"));
+                layer.image=HdrImage::read(checkedAssetPath(root,layer.imageFile));
+                if(layer.image.isNull()) invalid(QStringLiteral("an EXR image could not be decoded"));
+                imagePixels+=qint64(layer.image.width())*layer.image.height();
+                if(imagePixels>DocumentLimits::documentPixelBudget()) invalid(QStringLiteral("image pixel limit exceeded"));
+            } else {
+                layer.image = loadPng(root, layer.imageFile, imagePixels, false);
+                if(DeepImage::isDeep(layer.image)&&document.formatVersion<12) invalid(QStringLiteral("16-bit images require format version 12 or later"));
+            }
         }
 
         layer.maskFile = object.value(QStringLiteral("maskFile")).toString();
@@ -675,6 +688,8 @@ Document ProjectReader::load(const QString &projectDirectory)
         if (object.contains(QStringLiteral("shape")) && object.value(QStringLiteral("shape")).isObject()) {
             layer.shape = object.value(QStringLiteral("shape")).toObject();
             layer.shapeStyle = parseShape(layer.shape);
+            if (layer.shapeStyle && layer.shapeStyle->smoothing.value_or(false) && document.formatVersion < 14)
+                invalid(QStringLiteral("smooth corners require format version 14 or later"));
         }
 
         // Migrate LX legacy shape.kind == "Text"

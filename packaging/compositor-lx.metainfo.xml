@@ -18,6 +18,7 @@
   <requires><display_length compare="ge">768</display_length></requires>
   <supports><control>pointing</control><control>keyboard</control></supports>
   <releases>
+    <release version="0.5.3" date="2026-10-18" />
     <release version="0.4.5" date="2026-10-04" />
     <release version="0.4.0" date="2026-10-03" />
   </releases>

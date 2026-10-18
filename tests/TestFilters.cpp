@@ -245,7 +245,7 @@ void TestFilters::blurHonoursASelectionAndKeepsTheMask()
     QCOMPARE(px(canvas, 30, 10), (std::array<int, 4>{255, 255, 255, 255}));
     const auto edge = px(canvas, 10, 10);
     QVERIFY2(edge[0] > 20 && edge[0] < 235, "the selected part's hard edge is now soft");
-    QVERIFY2(px(canvas, 0, 10)[3] < 255, "inside the selection the layer's own edge fades too");
+    QCOMPARE(px(canvas, 0, 10)[3], 255); // Upstream 9a0ad3e: canvas edges stay solid.
 }
 
 void TestFilters::motionBlurStreaksAlongItsAngleCounterclockwiseFromHorizontal()

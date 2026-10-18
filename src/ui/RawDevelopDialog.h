@@ -3,6 +3,7 @@
 #include "core/CameraRaw.h"
 
 #include <QDialog>
+#include <QCheckBox>
 #include <QLabel>
 #include <QSlider>
 #include <QDoubleSpinBox>
@@ -57,6 +58,10 @@ private:
     QSlider *tempSlider_ = nullptr;
     QDoubleSpinBox *tintSpin_ = nullptr;
     QSlider *tintSlider_ = nullptr;
+    QDoubleSpinBox *noiseSpin_ = nullptr;
+    QSlider *noiseSlider_ = nullptr;
+    QCheckBox *lensBox_ = nullptr;
+    QCheckBox *highlightBox_ = nullptr;
     QDoubleSpinBox *boostSpin_ = nullptr;
     QSlider *boostSlider_ = nullptr;
     QPushButton *resetButton_ = nullptr;

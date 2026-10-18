@@ -1,0 +1,4 @@
+<RCC><qresource prefix="/camera-raw">
+<file alias="CameraRawTables.bin">resources/CameraRawTables.bin</file>
+<file alias="CameraRawShadows.bin">resources/CameraRawShadows.bin</file>
+</qresource></RCC>

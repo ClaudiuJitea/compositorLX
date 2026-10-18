@@ -5676,9 +5676,9 @@ void TestProjectFormat::testSection7PSDImport()
         QVERIFY(!PSDReader::read(fix.build(), res, &error));
         QVERIFY(error.contains(QStringLiteral("8-bit RGB")));
 
-        // Unsupported color mode CMYK (4)
+        // Unsupported color mode Lab (9)
         fix = TestPSDFixture{};
-        fix.colorMode = 4;
+        fix.colorMode = 9;
         QVERIFY(!PSDReader::read(fix.build(), res, &error));
         QVERIFY(error.contains(QStringLiteral("8-bit RGB")));
 
@@ -10677,37 +10677,37 @@ void TestProjectFormat::testSection10NumericScrubInteractionAndParity()
             QCOMPARE(radiusLabel->sensitivity(), 0.1);
             QCOMPARE(radiusLabel->step(), std::optional<double>(0.1));
 
-            // Initial radius is 1.0 px (mac FilterSettings.radius default)
-            QCOMPARE(radiusSpin->value(), 1.0);
+            // Initial radius is 5.0 px (mac FilterSettings.radius default)
+            QCOMPARE(radiusSpin->value(), 5.0);
 
-            // Drag radius +50px -> 1.0 + 50 * 0.1 = 6.0 px
+            // Drag radius +50px -> 5.0 + 50 * 0.1 = 10.0 px
             QMouseEvent pPress(QEvent::MouseButtonPress, QPointF(5, 5), QPointF(5, 5),
                                Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
             QCoreApplication::sendEvent(radiusLabel, &pPress);
             QMouseEvent pMove(QEvent::MouseMove, QPointF(55, 5), QPointF(55, 5),
                               Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
             QCoreApplication::sendEvent(radiusLabel, &pMove);
-            QCOMPARE(radiusSpin->value(), 6.0);
+            QCOMPARE(radiusSpin->value(), 10.0);
 
             // Verify live preview modified active layer pixels
             QCoreApplication::processEvents();
             QVERIFY(session.activeLayer()->image != origImg);
 
-            // Test Escape key cancels back to initial 1.0 px
+            // Test Escape key cancels back to initial 5.0 px
             QKeyEvent escKey(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
             QCoreApplication::sendEvent(radiusLabel, &escKey);
-            QCOMPARE(radiusSpin->value(), 1.0);
+            QCOMPARE(radiusSpin->value(), 5.0);
 
-            // Scrub again: drag +70px -> 8.0 px
+            // Scrub again: drag +70px -> 12.0 px
             QCoreApplication::sendEvent(radiusLabel, &pPress);
             QMouseEvent pMove2(QEvent::MouseMove, QPointF(75, 5), QPointF(75, 5),
                                Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
             QCoreApplication::sendEvent(radiusLabel, &pMove2);
-            QCOMPARE(radiusSpin->value(), 8.0);
+            QCOMPARE(radiusSpin->value(), 12.0);
             QMouseEvent pRelease(QEvent::MouseButtonRelease, QPointF(75, 5), QPointF(75, 5),
                                  Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
             QCoreApplication::sendEvent(radiusLabel, &pRelease);
-            QCOMPARE(radiusSpin->value(), 8.0);
+            QCOMPARE(radiusSpin->value(), 12.0);
         });
 
         // Cancel rollback verification: image restored byte-for-byte, undo count unchanged
@@ -10844,7 +10844,7 @@ void TestProjectFormat::testSection10RemappableKeyboardShortcuts()
         // 2a: Empty or multi-chord sequence
         QMap<QString, QKeySequence> bad;
         bad[QStringLiteral("Menus:Undo")] = QKeySequence();
-        QCOMPARE(ShortcutManager::instance().validate(bad), QStringLiteral("Choose a single key with optional modifiers."));
+        QVERIFY(ShortcutManager::instance().validate(bad).isEmpty());
 
         bad[QStringLiteral("Menus:Undo")] = QKeySequence(QStringLiteral("Ctrl+X, Ctrl+S"));
         QCOMPARE(ShortcutManager::instance().validate(bad), QStringLiteral("Choose a single key with optional modifiers."));

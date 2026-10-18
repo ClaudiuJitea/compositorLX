@@ -24,6 +24,7 @@ struct PSDConversion {
 struct PSDImportResult {
     Document document;
     QVector<PSDConversion> conversions;
+    QByteArray cmykProfile;
 };
 
 enum class PSDErrorCode {

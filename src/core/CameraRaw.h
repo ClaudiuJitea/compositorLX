@@ -48,6 +48,7 @@ struct CameraRawCurveSettings {
     [[nodiscard]] bool adjusts() const;
     static bool isLinear(const QVector<CurvePoint> &pts);
     [[nodiscard]] double parametric(double tone) const;
+    [[nodiscard]] bool hasMeasuredDividers() const { return shadowSplit == 25 && darkSplit == 50 && lightSplit == 75 && refineSaturation == 0; }
     [[nodiscard]] std::array<float, 256> toneTable() const;
     [[nodiscard]] std::array<float, 256> channelTable(const QVector<CurvePoint> &pts) const;
     [[nodiscard]] CameraRawCurveSettings nudged(CameraRawPointChannel ch, double tone, double delta) const;
@@ -249,6 +250,9 @@ struct CameraRawSettings {
                                              bool showsOptics = true, bool showsGeometry = true,
                                              bool showsCalibration = true) const;
 
+    [[nodiscard]] CameraRawSettings resetting(int group) const {
+        return applying(group!=0,group!=1,group!=2,group!=3,group!=4,group!=5,group!=6,group!=7,group!=8,group!=9);
+    }
     [[nodiscard]] double grainKernelSize() const { return 0.5 + (grainSize / 100.0) * 19.5; }
     [[nodiscard]] std::tuple<double, double, double> gains() const;
 
@@ -278,15 +282,19 @@ struct RawDevelopSettings {
     float temperature = 5000.0f;
     float tint = 0.0f;
     float boost = 1.0f;
+    float noiseReduction = 0.0f;
+    bool lensCorrection = false;
+    bool highlightRecovery = false;
     float asShotTemperature = 5000.0f;
     float asShotTint = 0.0f;
 
     [[nodiscard]] bool isAsShot() const {
-        return exposure == 0.0f && boost == 1.0f &&
+        return exposure == 0.0f && boost == 1.0f && noiseReduction == 0 && !lensCorrection && !highlightRecovery &&
                temperature == asShotTemperature && tint == asShotTint;
     }
     void reset() {
         exposure = 0.0f;
+        noiseReduction = 0; lensCorrection = false; highlightRecovery = false;
         boost = 1.0f;
         temperature = asShotTemperature;
         tint = asShotTint;

@@ -5,6 +5,10 @@
 #include "rendering/TextLayout.h"
 
 #include <QTextEdit>
+#include <QGraphicsView>
+#include <QGraphicsScene>
+#include <QGraphicsProxyWidget>
+#include <QPointer>
 #include <QLabel>
 #include <QPainter>
 #include <QKeyEvent>
@@ -24,7 +28,7 @@ namespace compositor {
 class InlineTextEditor final : public QTextEdit {
     Q_OBJECT
 public:
-    explicit InlineTextEditor(QWidget *parent = nullptr) : QTextEdit(parent)
+    explicit InlineTextEditor(QWidget *parent = nullptr) : QTextEdit(parent), canvas_(dynamic_cast<CanvasWidget *>(parent))
     {
         setObjectName(QStringLiteral("inlineTextEditor"));
         setAcceptRichText(false);
@@ -62,10 +66,36 @@ public:
     double leading = 0.0;
     double fontSize = 48.0;   // in layer pixels; a leading of 0 is Auto, 120% of it
 
+    void setLayerPlacement(const LayerTransform &placement, const QSize &pixels)
+    {
+        rotation_ = placement.rotation; flipX_ = placement.flipX; flipY_ = placement.flipY;
+        scaleX_ = pixels.width() > 0 ? placement.size.width()/pixels.width() : 1;
+        scaleY_ = pixels.height() > 0 ? placement.size.height()/pixels.height() : 1;
+        if (!canvas_ || (rotation_ == 0 && !flipX_ && !flipY_ && qFuzzyCompare(scaleX_,1) && qFuzzyCompare(scaleY_,1))) return;
+        view_ = new QGraphicsView(canvas_);
+        view_->setObjectName(QStringLiteral("transformedTextView"));
+        view_->setFrameShape(QFrame::NoFrame);
+        view_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        view_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        view_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        view_->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+        view_->setAttribute(Qt::WA_TranslucentBackground);
+        view_->viewport()->setAutoFillBackground(false);
+        view_->setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+        auto *scene = new QGraphicsScene(view_); view_->setScene(scene);
+        setParent(nullptr);
+        proxy_ = scene->addWidget(this);
+        setAutoFillBackground(false); viewport()->setAutoFillBackground(false);
+        setAttribute(Qt::WA_TranslucentBackground);
+        QPalette transparent = palette(); transparent.setColor(QPalette::Base,Qt::transparent);
+        setPalette(transparent); viewport()->setPalette(transparent);
+        syncCanvasGeometry(); view_->show(); view_->raise();
+    }
+
     void syncCanvasGeometry()
     {
         if (canvasBox.isEmpty() || finishing_) return;
-        auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
+        auto *canvas = canvas_.data();
         const qreal zoom = canvas ? canvas->zoom() : 1.0;
         const QRect geometry = canvas ? canvas->widgetRectForDocumentRect(canvasBox).toAlignedRect() : canvasBox.toAlignedRect();
         // The letters sit kTextPadding inside the box, as in the layer raster; a fixed line height puts the first baseline
@@ -75,21 +105,37 @@ public:
         const QMargins margins(qRound(kTextPadding * zoom), std::max(0, qRound(kTextPadding * zoom + shift)),
                                qRound(kTextPadding * zoom), qRound(kTextPadding * zoom));
         if (viewportMargins() != margins) setViewportMargins(margins);
-        setGeometry(geometry);
-        const int wrapWidth = std::max(1, qRound((canvasBox.width() - 2 * kTextPadding) * zoom));
+        if (proxy_ && view_ && canvas) {
+            view_->setGeometry(canvas->rect()); view_->setSceneRect(QRectF(canvas->rect()));
+            const QSizeF size(std::max(1.0, geometry.width()/scaleX_), std::max(1.0, geometry.height()/scaleY_));
+            resize(size.toSize()); proxy_->resize(size);
+            QTransform transform;
+            transform.translate(geometry.width()/2.0,geometry.height()/2.0);
+            transform.rotate(rotation_); transform.scale((flipX_?-1:1)*scaleX_,(flipY_?-1:1)*scaleY_);
+            transform.translate(-size.width()/2,-size.height()/2);
+            proxy_->setTransform(transform); proxy_->setPos(geometry.topLeft());
+            const QPolygon polygon = proxy_->mapToScene(proxy_->boundingRect().adjusted(-8,-8,8,8)).toPolygon();
+            view_->setMask(QRegion(polygon));
+        } else setGeometry(geometry);
+        const int wrapWidth = std::max(1, qRound((canvasBox.width()/scaleX_ - 2 * kTextPadding) * zoom));
         if (areaText && lineWrapColumnOrWidth() != wrapWidth) setLineWrapColumnOrWidth(wrapWidth);
     }
 
     void growPointText()
     {
         if (areaText || wasResized_ || finishing_) return;
-        auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
+        auto *canvas = canvas_.data();
         const qreal zoom = canvas ? canvas->zoom() : 1.0;
         const double lineHeight = std::max(1.0, document()->firstBlock().blockFormat().lineHeight());
         // The text measures in the document's (zoomed) pixels; the padding is in layer pixels.
         const double width = (document()->idealWidth() + std::max(1, document()->defaultFont().pixelSize()) * 0.1) / zoom + 2 * kTextPadding;
         const double height = std::max(document()->size().height() / zoom, lineHeight / zoom) + 2 * kTextPadding;
-        canvasBox.setSize(QSizeF(std::max(16.0, std::ceil(width)), std::max(16.0, std::ceil(height))));
+        const QSizeF size(std::max(16.0,std::ceil(width))*scaleX_, std::max(16.0,std::ceil(height))*scaleY_);
+        QTransform orientation; orientation.rotate(rotation_); orientation.scale(flipX_?-1:1,flipY_?-1:1);
+        const QPointF anchor = canvasBox.center() + orientation.map(-QPointF(canvasBox.width()/2,canvasBox.height()/2));
+        canvasBox.setSize(size);
+        canvasBox.moveCenter(anchor - orientation.map(-QPointF(size.width()/2,size.height()/2)));
+
         syncCanvasGeometry();
     }
 
@@ -266,7 +312,8 @@ public:
         // A replacement editor may be created before deferred deletion runs.
         setObjectName(QString());
         hide();
-        if (parentWidget()) parentWidget()->setFocus(Qt::OtherFocusReason);
+        if (canvas_) canvas_->setFocus(Qt::OtherFocusReason);
+        if (view_) { view_->hide(); view_->deleteLater(); }
         if (finished) finished(commit);
         deleteLater();
     }
@@ -289,7 +336,7 @@ public:
 
     void applySpacing()
     {
-        auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
+        auto *canvas = canvas_.data();
         const qreal zoom = canvas ? canvas->zoom() : 1.0;
         // Spacing lives in the default font, so it never touches the letters' own formats or the undo history.
         QFont spaced = document()->defaultFont();
@@ -310,7 +357,7 @@ public:
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override
     {
-        if (watched == parentWidget() && (event->type() == QEvent::Resize || event->type() == QEvent::Paint)) {
+        if (watched == canvas_ && (event->type() == QEvent::Resize || event->type() == QEvent::Paint)) {
             syncCanvasGeometry();
         }
         return QTextEdit::eventFilter(watched, event);
@@ -390,11 +437,12 @@ protected:
 
     void mousePressEvent(QMouseEvent *event) override
     {
-        const int handle = event->button() == Qt::LeftButton ? handleAt(mapFromGlobal(event->globalPosition().toPoint())) : -1;
+        const int handle = event->button() == Qt::LeftButton ? handleAt(proxy_ ? event->position().toPoint() : mapFromGlobal(event->globalPosition().toPoint())) : -1;
         if (handle >= 0) {
             resizeHandle_ = handle;
             resizeStart_ = event->globalPosition();
             originalGeometry_ = geometry();
+            originalCanvasBox_ = canvasBox;
             event->accept();
             return;
         }
@@ -404,8 +452,12 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override
     {
         if (resizeHandle_ >= 0) {
-            const QPointF delta = event->globalPosition() - resizeStart_;
-            auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
+            QPointF delta = event->globalPosition() - resizeStart_;
+            if (proxy_) {
+                QTransform orientation; orientation.rotate(rotation_); orientation.scale((flipX_?-1:1)*scaleX_,(flipY_?-1:1)*scaleY_);
+                delta = orientation.inverted().map(delta);
+            }
+            auto *canvas = canvas_.data();
             const qreal zoom = canvas ? canvas->zoom() : 1.0;
             const int minimum = std::max(1, qRound(16 * zoom));
             QRect rect = originalGeometry_;
@@ -418,7 +470,13 @@ protected:
             // A box holds its text and wraps it rather than scaling it, whatever it was before.
             wasResized_ = true;
             areaText = true;
-            if (canvas) canvasBox = canvas->documentRectForWidgetRect(QRectF(rect));
+            if (proxy_) {
+                QTransform orientation; orientation.rotate(rotation_); orientation.scale((flipX_?-1:1)*scaleX_,(flipY_?-1:1)*scaleY_);
+                const QPointF deltaCenter = (QRectF(rect).center()-QRectF(originalGeometry_).center())/zoom;
+                const QSizeF size(rect.width()/zoom*scaleX_,rect.height()/zoom*scaleY_);
+                canvasBox = QRectF(QPointF(),size);
+                canvasBox.moveCenter(originalCanvasBox_.center()+orientation.map(deltaCenter));
+            } else if (canvas) canvasBox = canvas->documentRectForWidgetRect(QRectF(rect));
             else canvasBox = QRectF(rect);
             setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
             setLineWrapMode(QTextEdit::FixedPixelWidth);
@@ -426,7 +484,7 @@ protected:
             event->accept();
             return;
         }
-        const int handle = handleAt(mapFromGlobal(event->globalPosition().toPoint()));
+        const int handle = handleAt(proxy_ ? event->position().toPoint() : mapFromGlobal(event->globalPosition().toPoint()));
         setCursor(cursorForHandle(handle));
         viewport()->setCursor(cursorForHandle(handle));
         QTextEdit::mouseMoveEvent(event);
@@ -464,9 +522,9 @@ private:
     [[nodiscard]] bool overflows() const
     {
         if (!areaText) return false;
-        auto *canvas = dynamic_cast<CanvasWidget *>(parentWidget());
+        auto *canvas = canvas_.data();
         const qreal zoom = canvas ? canvas->zoom() : 1.0;
-        const double room = (canvasBox.height() - 2 * kTextPadding) * zoom;
+        const double room = (canvasBox.height()/scaleY_ - 2 * kTextPadding) * zoom;
         return document()->size().height() > room + 0.5;
     }
 
@@ -508,6 +566,12 @@ private:
 
     bool previewPushed_ = false;
     int previewSteps_ = 0;
+    QPointer<CanvasWidget> canvas_;
+    QPointer<QGraphicsView> view_;
+    QPointer<QGraphicsProxyWidget> proxy_;
+    double rotation_ = 0, scaleX_ = 1, scaleY_ = 1;
+    bool flipX_ = false, flipY_ = false;
+    QRectF originalCanvasBox_;
     QWidget *grip_ = nullptr;
     int resizeHandle_ = -1;
     bool wasResized_ = false;

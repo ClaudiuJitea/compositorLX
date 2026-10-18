@@ -66,6 +66,10 @@ void ShortcutRecorderButton::keyPressEvent(QKeyEvent *event)
         return;
     }
 
+    if ((event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Delete) && event->modifiers() == Qt::NoModifier) {
+        setSequence({}); setRecording(false); emit sequenceChanged({}); emit recordingFinished(true);
+        event->accept(); return;
+    }
     const int key = event->key();
     if (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt || key == Qt::Key_Meta) {
         event->accept();

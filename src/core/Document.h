@@ -639,6 +639,7 @@ struct LayerShapeStyle {
     double green = 0.0;
     double blue = 0.0;
     double cornerRadius = 0.0;
+    std::optional<bool> smoothing;
     std::optional<double> lineWidth;
     std::optional<QPointF> start;
     std::optional<QPointF> end;

@@ -1,4 +1,8 @@
 #include "rendering/RasterOperations.h"
+#include "core/CameraRawTables.h"
+#include "rendering/DeepImage.h"
+#include "PatchPixels.h"
+#include "DeepPixels.h"
 #include "core/CameraRaw.h"
 
 extern "C" {
@@ -184,6 +188,7 @@ std::optional<QImage> RasterOperations::magicWandMask(const QImage &image, const
 
 QImage RasterOperations::inverted(const QImage &image)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return inverted(low); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     for (int y = 0; y < result.height(); ++y) {
         uchar *p = result.scanLine(y);
@@ -197,6 +202,7 @@ QImage RasterOperations::inverted(const QImage &image)
 
 QImage RasterOperations::addNoise(const QImage &image, float amount, bool gaussian, bool monochromatic, quint32 seed)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return addNoise(low, amount, gaussian, monochromatic, seed); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     noise_add(result.bits(), size_t(result.width()), size_t(result.height()), size_t(result.bytesPerLine()),
               amount, gaussian ? 1 : 0, monochromatic ? 1 : 0, seed);
@@ -205,6 +211,7 @@ QImage RasterOperations::addNoise(const QImage &image, float amount, bool gaussi
 
 QImage RasterOperations::lensDistorted(const QImage &image, double amount)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return lensDistorted(low, amount); });
     const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     QImage result(source.size(), source.format());
     result.fill(Qt::transparent);
@@ -232,6 +239,7 @@ static double applyLevel(double input, const LevelRange &raw)
 
 QImage RasterOperations::levels(const QImage &image, const LevelsSettings &settings)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return levels(low, settings); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     std::array<float, 3 * 256> tables{};
     for (int channel = 0; channel < 3; ++channel) for (int value = 0; value < 256; ++value)
@@ -280,6 +288,10 @@ LevelsSettings RasterOperations::sampledLevels(const LevelsSettings &settings, c
 
 QImage RasterOperations::exposure(const QImage &image, double stops, double offset, double gamma)
 {
+    if(DeepImage::isHDR(image)) {
+        QImage out=DeepImage::canonical(image);deep_hdr_exposure(reinterpret_cast<uint16_t *>(out.bits()),out.bytesPerLine(),out.width(),out.height(),float(std::pow(2.0,stops)),float(offset),float(1/gamma));return out;
+    }
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return exposure(low, stops, offset, gamma); });
     if (!std::isfinite(stops) || !std::isfinite(offset) || !std::isfinite(gamma)) return image;
     stops = std::clamp(stops, -20.0, 20.0); offset = std::clamp(offset, -.5, .5); gamma = std::clamp(gamma, .01, 9.99);
     const double scale = std::pow(2, stops);
@@ -331,6 +343,7 @@ std::optional<std::array<quint8, 3>> RasterOperations::colorRangeSample(const QI
 
 QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationSettings &settings)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return hueSaturation(low, settings); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (settings.isIdentity()) return result;
     struct Response { double hue = 0, saturation = 0, lightness = 0; };
@@ -370,6 +383,7 @@ QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationS
 
 QImage RasterOperations::curves(const QImage &image, const CurvesSettings &settings)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return curves(low, settings); });
     if (!settings.isValid()) return image;
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     std::array<float, 3 * 256> tables{};
@@ -484,6 +498,7 @@ QImage RasterOperations::adjustment(const QImage &image, const QJsonObject &sett
 
 QImage RasterOperations::blackWhite(const QImage &image, const float *weights, bool tint, double tintHue, double tintSaturation)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return blackWhite(low, weights, tint, tintHue, tintSaturation); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     adjust_black_white(result.bits(), size_t(result.width()), size_t(result.height()),
                        size_t(result.bytesPerLine()), weights, tint ? 1 : 0, tintHue, tintSaturation);
@@ -492,6 +507,7 @@ QImage RasterOperations::blackWhite(const QImage &image, const float *weights, b
 
 QImage RasterOperations::colorBalance(const QImage &image, const float *shadows, const float *midtones, const float *highlights, bool preserveLuminosity)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return colorBalance(low, shadows, midtones, highlights, preserveLuminosity); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     adjust_color_balance(result.bits(), size_t(result.width()), size_t(result.height()),
                          size_t(result.bytesPerLine()), shadows, midtones, highlights, preserveLuminosity ? 1 : 0);
@@ -502,6 +518,7 @@ QImage RasterOperations::vignette(const QImage &image, double amount, const QCol
                                   double midpoint, double roundness, double feather,
                                   double highlights, const std::optional<QRectF> &canvasFrame)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return vignette(low, amount, color, midpoint, roundness, feather, highlights, canvasFrame); }, false);
     if (image.isNull()) return image;
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (!std::isfinite(amount) || amount <= 0) return result;
@@ -528,6 +545,24 @@ QImage RasterOperations::vignette(const QImage &image, double amount, const QCol
 
 QImage RasterOperations::bloomGlow(const QImage &image, double amount, double radius)
 {
+    if (DeepImage::isDeep(image)) {
+        if (!std::isfinite(amount) || amount <= 0 || !std::isfinite(radius) || radius <= 0) return image;
+        const QImage source = image.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+        const QImage soft = DeepImage::gaussianBlur(source,std::clamp(radius,1.0,150.0));
+        QImage out = source;
+        const float gain = float(std::clamp(amount,0.0,100.0)/50);
+        for (int y=0;y<out.height();++y) {
+            const auto *a = reinterpret_cast<const float *>(source.constScanLine(y));
+            const auto *b = reinterpret_cast<const float *>(soft.constScanLine(y));
+            auto *p = reinterpret_cast<float *>(out.scanLine(y));
+            for (int x=0;x<out.width();++x) {
+                const float alpha = a[x*4+3], glowAlpha = std::clamp(b[x*4+3]*gain,0.f,1.f);
+                p[x*4+3] = alpha+glowAlpha*(1-alpha);
+                for(int c=0;c<3;++c) p[x*4+c] = a[x*4+c]+std::max(0.f,b[x*4+c]*gain)*(1-std::clamp(a[x*4+c],0.f,1.f));
+            }
+        }
+        return out.convertToFormat(image.format());
+    }
     if (image.isNull()) return image;
     const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (!std::isfinite(amount) || amount <= 0 || !std::isfinite(radius) || radius <= 0) return source;
@@ -571,6 +606,7 @@ QImage RasterOperations::bloomGlow(const QImage &image, double amount, double ra
 QImage RasterOperations::tonalContrast(const QImage &image, double amount, double radius,
                                        double shadows, double midtones, double highlights)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return tonalContrast(low, amount, radius, shadows, midtones, highlights); }, true);
     if (image.isNull()) return image;
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (!std::isfinite(amount) || amount <= 0 || (shadows == 0 && midtones == 0 && highlights == 0)) return result;
@@ -590,6 +626,7 @@ QImage RasterOperations::tonalContrast(const QImage &image, double amount, doubl
 
 QImage RasterOperations::gradientMap(const QImage &image, const QColor &shadows, const QColor &highlights, bool reversed)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return gradientMap(low, shadows, highlights, reversed); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     const QColor dark = reversed ? highlights : shadows, light = reversed ? shadows : highlights;
     std::array<uint8_t, 256 * 3> table{};
@@ -605,6 +642,7 @@ QImage RasterOperations::gradientMap(const QImage &image, const QColor &shadows,
 QImage RasterOperations::grain(const QImage &image, double amount, double size, double roughness, quint32 seed,
                                const QPointF &origin, double unitsPerPixel)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return grain(low, amount, size, roughness, seed, origin, unitsPerPixel); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (amount <= 0) return result;
     adjust_grain(result.bits(), size_t(result.width()), size_t(result.height()), size_t(result.bytesPerLine()),
@@ -615,6 +653,7 @@ QImage RasterOperations::grain(const QImage &image, double amount, double size, 
 
 QImage RasterOperations::gaussianBlur(const QImage &image, double radius)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::gaussianBlur(image, radius);
     const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (!std::isfinite(radius) || radius <= 0) return source;
     radius = std::clamp(radius, .1, 250.0);
@@ -748,6 +787,7 @@ QImage horizontalStreak(const QImage &source, double slope, int reach)
 
 QImage RasterOperations::motionBlur(const QImage &image, double angleDegrees, double distance)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::motionBlur(image, angleDegrees, distance);
     const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (!std::isfinite(angleDegrees) || !std::isfinite(distance) || distance <= 0) return source;
     angleDegrees = std::clamp(angleDegrees, -90.0, 90.0); distance = std::clamp(distance, 1.0, 2000.0);
@@ -875,6 +915,7 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
                                    CameraRawClipping clipping, double scale, quint32 seed,
                                    int visualizePointColor, bool sharpenMask)
 {
+    if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return cameraRaw(low, settingsIn, clipping, scale, seed, visualizePointColor, sharpenMask); }, true);
     if (image.isNull() || image.width() <= 0 || image.height() <= 0) return image;
     const CameraRawSettings settings = settingsIn.normalized();
     if (settings.isIdentity() && clipping == CameraRawClipping::None && visualizePointColor < 0 && !sharpenMask) {
@@ -882,11 +923,12 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
     }
     if (!settings.isValid()) return image;
 
-    const auto [redGain, greenGain, blueGain] = settings.gains();
     const int mode = static_cast<int>(clipping);
     const double pixelScale = (scale > 0.0) ? scale : 1.0;
 
-    const bool paintColor = (clipping == CameraRawClipping::None && !sharpenMask) &&
+    const bool foldsColor = clipping == CameraRawClipping::None && !sharpenMask && visualizePointColor < 0
+        && settings.mixer.points.isEmpty() && settings.curve.refineSaturation == 0;
+    const bool paintColor = !foldsColor && (clipping == CameraRawClipping::None && !sharpenMask) &&
         (settings.adjustsCurve() || settings.adjustsMixer() || settings.adjustsGrading() || visualizePointColor >= 0);
     const bool paintEffects = (clipping == CameraRawClipping::None && !sharpenMask && settings.adjustsEffects());
     const bool paintDetailOptics = (clipping == CameraRawClipping::None) &&
@@ -907,21 +949,33 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
     if (clipping == CameraRawClipping::None && !sharpenMask && settings.adjustsCalibration()) {
         adjust_camera_raw_calibration(pixels, width, height, stride,
                                       settings.calibration.shadowTint,
-                                      settings.calibration.redHue, settings.calibration.redSaturation,
-                                      settings.calibration.greenHue, settings.calibration.greenSaturation,
-                                      settings.calibration.blueHue, settings.calibration.blueSaturation,
+                                      0, 0, 0, 0, 0, 0,
                                       static_cast<int>(settings.calibration.process));
     }
 
-    // 2. Light & Color
-    if (settings.adjustsLight() || settings.adjustsColor() || clipping != CameraRawClipping::None) {
-        adjust_camera_raw(pixels, width, height, stride,
-                          redGain, greenGain, blueGain,
-                          settings.exposure, settings.contrast,
-                          settings.highlights, settings.shadows,
-                          settings.whites, settings.blacks,
-                          settings.vibrance, settings.saturation, mode);
+    // Compose the measured stages once; Shadows measures neighboring pixels between the two halves.
+    using namespace CameraRawTables;
+    const Brightness measured = (settings.contrast != 0 || settings.highlights != 0) ? brightness(source) : Brightness{};
+    if (settings.shadows != 0) {
+        const auto before = compose(stages(settings, measured, Part::BeforeShadows));
+        if (!before.empty()) adjust_camera_raw(pixels, width, height, stride, before.data(), grid, 0);
+        applyShadows(result, settings.shadows, pixelScale);
+        pixels = result.bits();
     }
+    auto table = compose(stages(settings, measured, settings.shadows != 0 ? Part::AfterShadows : Part::All));
+    if (foldsColor && (settings.adjustsCurve() || settings.adjustsMixer() || settings.adjustsGrading())) {
+        if (table.empty()) table = compose({}, true);
+        if (settings.adjustsCurve()) {
+            const auto tone = settings.curve.toneTable(), red = settings.curve.channelTable(settings.curve.red),
+                       green = settings.curve.channelTable(settings.curve.green), blue = settings.curve.channelTable(settings.curve.blue);
+            camera_raw_table_curves(table.data(), grid, tone.data(), red.data(), green.data(), blue.data());
+        }
+        auto colorStages = mixerStages(settings.mixer);
+        const auto grading = gradingStages(settings.grading);
+        colorStages.insert(colorStages.end(), grading.begin(), grading.end());
+        camera_raw_compose_onto(table.data(), grid, colorStages.data(), int(colorStages.size()), size);
+    }
+    if (!table.empty() || mode != 0) adjust_camera_raw(pixels, width, height, stride, table.empty() ? nullptr : table.data(), grid, mode);
 
     // 3. Curve, Mixer, Grading
     if (paintColor) {
@@ -929,16 +983,19 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
         const auto redTable = settings.curve.channelTable(settings.curve.red);
         const auto greenTable = settings.curve.channelTable(settings.curve.green);
         const auto blueTable = settings.curve.channelTable(settings.curve.blue);
-        const auto mixer = settings.mixer.mixerFloats();
+        const std::array<float, 24> mixer{};
+        const auto mixerTable = compose(mixerStages(settings.mixer));
         const auto points = settings.mixer.pointFloats();
-        const auto grade = settings.grading.gradeFloats();
+        const std::array<float, 12> grade{};
+        const auto gradeTable = compose(gradingStages(settings.grading));
 
         adjust_camera_raw_curve_color(pixels, width, height, stride,
                                       luma.data(), redTable.data(), greenTable.data(), blueTable.data(),
                                       settings.curve.refineSaturation / 100.0, mixer.data(),
                                       static_cast<int>(settings.mixer.points.size()), points.constData(),
                                       grade.data(), settings.grading.blending / 100.0, settings.grading.balance / 100.0,
-                                      visualizePointColor);
+                                      visualizePointColor, mixerTable.empty() ? nullptr : mixerTable.data(),
+                                      gradeTable.empty() ? nullptr : gradeTable.data(), grid);
     }
 
     // 4. Effects
@@ -985,7 +1042,7 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
                                          settings.optics.greenHueHigh,
                                          settings.optics.vignetteAmount,
                                          settings.optics.vignetteMidpoint,
-                                         pixelScale);
+                                         pixelScale, exposureTables(), size);
             }
             if (settings.adjustsDetail()) {
                 adjust_camera_raw_detail(pixels, width, height, stride,

@@ -64,6 +64,7 @@ public:
     // Calibration. A hidden group is left out of the preview and of OK without clearing its sliders.
     [[nodiscard]] QCheckBox *eyeBox(int group) const { return showBoxes_.at(size_t(group)); }
     [[nodiscard]] CameraRawSettings renderSettings() const;
+    std::array<QPushButton *,10> sectionResetButtons_{};
     void setSettings(const CameraRawSettings &settings);   // loads every control, as Reset does
     enum class Probe { None, PointColor, Defringe, CurveTarget, MixerTarget, Guide };
     void setProbe(Probe probe);

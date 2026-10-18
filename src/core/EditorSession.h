@@ -1,4 +1,6 @@
 #pragma once
+#include "rendering/Scanlines.h"
+#include "rendering/ProgressiveBlur.h"
 
 #include "rendering/Dither.h"
 #include "core/CameraRaw.h"
@@ -44,6 +46,7 @@ public:
     // mac EditorSession.filterSettings: the last values each filter was committed with, which its panel reopens with.
     CameraRawSettings lastCameraRaw;
     QVariantMap filterMemory;
+    DitherSettings lastDither;
 
     [[nodiscard]] const std::shared_ptr<Document> &document() const { return document_; }
     [[nodiscard]] std::shared_ptr<Document> &document() { return document_; }
@@ -58,7 +61,7 @@ public:
     [[nodiscard]] bool isModified() const { return history_.isModified(); }
     [[nodiscard]] const DocumentHistory &history() const { return history_; }
 
-    void createDocument(int width, int height, bool emptyLayer = false);
+    void createDocument(int width, int height, bool emptyLayer = false, double resolution = 72, const std::optional<QColor> &background = std::nullopt);
     bool openProject(const QString &path);
     bool insertImage(const QImage &image, const QString &name, const std::optional<QPointF> &center = std::nullopt);
     bool insertSvg(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
@@ -163,7 +166,7 @@ public:
     bool addShape(ShapeKind kind, const QRectF &rect, const QColor &fill, const QColor &stroke = Qt::transparent,
                   double strokeWidth = 2, double cornerRadius = 0,
                   const std::optional<QPointF> &start = std::nullopt,
-                  const std::optional<QPointF> &end = std::nullopt);
+                  const std::optional<QPointF> &end = std::nullopt, bool smoothing = false);
     bool addShape(const QRectF &rect, const QColor &fill, const QColor &stroke,
                   double strokeWidth = 2, bool ellipse = false, double cornerRadius = 0);
     bool addText(const QString &text, const QRectF &box, const QString &fontFamily,
@@ -190,7 +193,13 @@ public:
     bool applyCurves(const CurvesSettings &settings);
     bool applyGradientMap(const QColor &shadows, const QColor &highlights, bool reversed = false);
     bool applyGrain(double amount, double size, double roughness, quint32 seed);
-    bool applyGaussianBlur(double radius);
+    bool applyGaussianBlur(double radius, bool preserveTransparency = false);
+    bool applyScanlines(const ScanlinesSettings &settings);
+    bool applyProgressiveBlur(const ProgressiveBlurSettings &settings);
+    bool convertDepth(bool sixteenBit);
+    bool applyLastFilter();
+    bool hasLastFilter() const { return bool(lastFilter_); }
+    QString lastFilterName() const { return lastFilterName_; }
     bool applyMotionBlur(double angleDegrees, double distance);
     bool applyBlackWhite(const float *weights, bool tint, double tintHue, double tintSaturation);
     bool applyColorBalance(const float *shadows, const float *midtones, const float *highlights, bool preserveLuminosity);
@@ -279,6 +288,7 @@ public:
     [[nodiscard]] std::optional<QRect> selectionBounds() const;
     bool flipLayers(bool horizontally);
     bool flipCanvas(bool horizontally);
+    bool rotateCanvas(bool clockwise);
     [[nodiscard]] bool canMergeLayers() const;
     [[nodiscard]] QString mergeTitle() const;
     bool mergeLayers();
@@ -425,14 +435,25 @@ public:
     [[nodiscard]] QUuid currentRevision() const { return history_.currentRevision(); }
     void markSaved() { history_.markSaved(); }
     void markSaved(const QUuid &revision) { history_.markSaved(revision); }
-    void beginEdit(const QString &name) { history_.begin(name, document_); }
+    void beginEdit(const QString &name) {
+        if (editDepth_++ == 0) { pendingFilter_ = {}; editRevision_ = history_.currentRevision(); }
+        history_.begin(name, document_);
+    }
     void endEdit() {
         raiseFormatVersion();
         history_.end(document_);
+        if (editDepth_ > 0 && --editDepth_ == 0) {
+            if (history_.currentRevision() != editRevision_ && pendingFilter_) { lastFilter_ = pendingFilter_; lastFilterName_ = history_.undoName(); }
+            pendingFilter_ = {};
+        }
         advanceRevision();
     }
 
 private:
+    QString lastFilterName_;
+    int editDepth_ = 0;
+    QUuid editRevision_;
+    std::function<bool(EditorSession &)> lastFilter_, pendingFilter_;
     // Whatever an edit just put into the document (a mask, a blend mode, an adjustment...) may need a newer project
     // format than the one it was opened as; the version is raised with the edit, inside its undo step, so Undo restores
     // the older one and saving never refuses a document the user could edit.
@@ -487,6 +508,8 @@ private:
         bool maskGrown = false;
         QRect maskSourceRect;
         QRect sourceRect;
+        QImage deepBase;
+        bool sparseBlank = false;
     };
     std::optional<BrushState> brush_;
     struct WarpState {
@@ -500,6 +523,8 @@ private:
         QImage working;
         QImage coverage;
         QByteArray carried;
+        QImage deepWorking;
+        QVector<float> deepCarried;
         // Liquify: how far each pixel's source lies from it, in tiles allocated as the stroke reaches them.
         QHash<qint64, QVector<float>> offsets;
         bool changed = false;
@@ -508,6 +533,7 @@ private:
         BrushState::Restore restore;
         bool grown = false;
         QRect sourceRect;
+        QImage deepBase;
     };
     std::optional<WarpState> warp_;
     std::optional<QPointF> cloneSource_;
@@ -544,11 +570,12 @@ private:
     static inline GridAppearance gridAppearance_;
     bool snapEnabled_ = ToolDefaults::boolean(QStringLiteral("snap"), true);
     bool snapToGuides_ = ToolDefaults::boolean(QStringLiteral("snapGuides"), true);
-    bool snapToGrid_ = ToolDefaults::boolean(QStringLiteral("snapGrid"), false);
+    bool snapToGrid_ = ToolDefaults::boolean(QStringLiteral("snapGrid"), true);
     bool snapToDocumentBounds_ = ToolDefaults::boolean(QStringLiteral("snapBounds"), true);
     bool snapToLayers_ = ToolDefaults::boolean(QStringLiteral("snapLayers"), true);
     std::optional<QPointF> smoothedBrushPoint(const QPointF &point);
     void continueBrushStrokeInternal(const QPointF &documentPoint);
+    void updateBlurStroke(const QRect &dirty);
 
     double brushSmoothing_ = 0.0;
     double viewportZoom_ = 1.0;
