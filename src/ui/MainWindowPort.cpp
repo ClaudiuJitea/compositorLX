@@ -330,6 +330,7 @@ void MainWindow::scanlinesDialog()
 }
 void MainWindow::progressiveBlurDialog()
 {
+    if (session_.activeLayer() && session_.activeLayer()->adjustment.value("kind").toString() == "Progressive Blur") { filterLayerDialog("Progressive Blur"); return; }
     const auto *layer = session_.activeLayer();
     if (!layer || layer->image.isNull())
         return;
@@ -436,6 +437,8 @@ void MainWindow::progressiveBlurDialog()
 } // namespace compositor
 
 #include "io/ImageExporter.h"
+#include "io/GifIO.h"
+#include "io/ChannelPack.h"
 #include "io/PrintExporter.h"
 #include "io/HdrImage.h"
 #include "io/CMYK.h"
@@ -565,12 +568,14 @@ void MainWindow::exportAsDialog(bool jpegDefault)
     layout->addLayout(form);
     auto *format = new QComboBox(&dialog);
     format->setObjectName(QStringLiteral("exportFormat"));
-    enum Kind { Png, Jpeg, Pdf, Exr, Tiff };
+    enum Kind { Png, Jpeg, Pdf, Exr, Tiff, Gif, Pack };
     // JPEG and PNG first, as on macOS, then TIFF, PDF and (with an HDR layer) EXR.
     format->addItem(tr("JPEG"), Jpeg);
     format->addItem(tr("PNG"), Png);
     format->addItem(tr("TIFF"), Tiff);
+    format->addItem(tr("Channel Pack (PNG)"), Pack);
     format->addItem(tr("PDF"), Pdf);
+    format->addItem(tr("GIF"), Gif);
     if (hasHDR)
         format->addItem(tr("OpenEXR"), Exr);
     // The format the last export used, offered first next time; Export JPEG… always starts on JPEG.
@@ -579,6 +584,26 @@ void MainWindow::exportAsDialog(bool jpegDefault)
     format->setCurrentIndex(std::max(0, format->findData(startFormat)));
     const auto kind = [format] { return format->currentData().toInt(); };
     form->addRow(tr("Format"), format);
+    auto *gifLoop = new QCheckBox(tr("Loop forever"), &dialog); gifLoop->setChecked(true);
+    auto *gifTransparent = new QCheckBox(tr("Transparency"), &dialog); gifTransparent->setChecked(true);
+    form->addRow(gifLoop); form->addRow(gifTransparent);
+    std::array<QComboBox *, 4> channels{};
+    const QStringList channelNames{"Red", "Green", "Blue", "Alpha"};
+    for (int c = 0; c < 4; ++c) {
+        auto *combo = new QComboBox(&dialog); channels[c] = combo; combo->setObjectName("pack" + channelNames[c]);
+        combo->addItem(tr("Black"), QStringLiteral("black")); combo->addItem(tr("White"), QStringLiteral("white")); combo->setCurrentIndex(c == 3 ? 1 : 0);
+        for (const auto &layer : document_->layers) {
+            combo->addItem(layer.name, layer.id.toString());
+            const QString name = layer.name.trimmed().toLower();
+            if (name == channelNames[c].toLower() || name == channelNames[c].left(1).toLower()) combo->setCurrentIndex(combo->count() - 1);
+        }
+        form->addRow(channelNames[c], combo);
+    }
+    const auto pack = [&](const QSize &size) {
+        std::array<ChannelSource, 4> sources;
+        for (int c = 0; c < 4; ++c) { const auto id = channels[c]->currentData().toString(); sources[c] = {QUuid(id), id == "white"}; }
+        return ChannelPack::render(*document_, sources, size);
+    };
     auto *width = new QSpinBox(&dialog), *height = new QSpinBox(&dialog);
     width->setObjectName(QStringLiteral("exportWidth"));
     height->setObjectName(QStringLiteral("exportHeight"));
@@ -659,6 +684,8 @@ void MainWindow::exportAsDialog(bool jpegDefault)
     const auto refresh = [&] {
         fileSize.clear();
         const int f = kind();
+        for (auto *channel : channels) setRow(channel, f == Pack);
+        setRow(gifLoop, f == Gif); setRow(gifTransparent, f == Gif);
         const bool supportsCMYK = f == Jpeg || f == Pdf || f == Tiff;
         setRow(quality, f == Jpeg);
         setRow(sixteenBit, f == Png && hasDeep);
@@ -677,7 +704,9 @@ void MainWindow::exportAsDialog(bool jpegDefault)
         const QSize size = requested.width() > 8192 || requested.height() > 8192
                                ? requested.scaled(8192, 8192, Qt::KeepAspectRatio)
                                : requested;
-        QImage shown = source().scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        QImage shown = f == Pack ? pack(size) : source().scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        if (f == Pack) for (int y = 0; y < shown.height(); ++y) for (int x = 0; x < shown.width(); ++x) shown.scanLine(y)[x * 4 + 3] = 255;
+        if (shown.isNull()) { status->setText(tr("Could not render export preview.")); buttons->button(QDialogButtonBox::Save)->setEnabled(false); return; }
         if (f == Jpeg || f == Pdf || color->currentIndex() == 1) {
             QImage flat(shown.size(), QImage::Format_RGB32);
             flat.fill(matte);
@@ -717,6 +746,7 @@ void MainWindow::exportAsDialog(bool jpegDefault)
         height->setValue(std::max(1, qRound(original.height() * factor)));
         timer->start();
     });
+    for (auto *channel : channels) connect(channel, &QComboBox::currentIndexChanged, timer, qOverload<>(&QTimer::start));
     connect(sixteenBit, &QCheckBox::toggled, timer, qOverload<>(&QTimer::start));
     connect(timer, &QTimer::timeout, &dialog, refresh);
     connect(matteButton, &QPushButton::clicked, &dialog, [&] {
@@ -740,7 +770,7 @@ void MainWindow::exportAsDialog(bool jpegDefault)
     if (kind() == Jpeg)
         QSettings().setValue(QStringLiteral("jpegExportQuality"), quality->value());
     const QStringList extensions{QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("pdf"),
-                                 QStringLiteral("exr"), QStringLiteral("tiff")};
+                                 QStringLiteral("exr"), QStringLiteral("tiff"), QStringLiteral("gif"), QStringLiteral("png")};
     const QString ext = extensions[kind()];
     // Named after the project, as on macOS.
     const QString baseName = document_->projectPath.isEmpty() ? QStringLiteral("Untitled")
@@ -751,6 +781,18 @@ void MainWindow::exportAsDialog(bool jpegDefault)
         return;
     if (QFileInfo(path).suffix().isEmpty())
         path += QLatin1Char('.') + ext;
+    if (kind() == Pack) {
+        const auto bytes = ChannelPack::png(pack(QSize(width->value(), height->value())), document_->resolution);
+        QString error;
+        if (bytes.isEmpty() || !ImageExporter::writeAtomically(bytes, path, &error)) QMessageBox::warning(this, tr("Could Not Export Channel Pack"), error.isEmpty() ? tr("Could not render channel pack.") : error);
+        return;
+    }
+    if (kind() == Gif) {
+        QString error;
+        if (!GifIO::write(*document_, path, QSize(width->value(), height->value()), gifLoop->isChecked(), gifTransparent->isChecked(), &error))
+            QMessageBox::warning(this, tr("Could Not Export GIF"), error);
+        return;
+    }
     QImage image =
         source().scaled(width->value(), height->value(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     const std::optional<CMYKProfile> profile =

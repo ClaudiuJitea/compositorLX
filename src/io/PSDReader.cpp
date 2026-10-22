@@ -1604,6 +1604,7 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
         layer.name = rawLayer.name.isEmpty() ? QStringLiteral("Layer") : rawLayer.name;
         layer.parentId = parentId;
         layer.group = isGroup;
+        if (isGroup) if (const auto board = PSDText::artboard(rawLayer.extra)) result.artboardBounds.insert(id, *board);
         layer.visible = !rawLayer.hidden;
 
         const PSDLayerKind kind = layerKind(rawLayer, isGroup);
@@ -1830,6 +1831,39 @@ bool PSDReader::read(const QByteArray &data, PSDImportResult &result, QString *e
     result.document = std::move(tempDoc);
     result.conversions = std::move(conversions);
     return true;
+}
+
+QVector<QPair<QString, Document>> PSDImportResult::artboards() const
+{
+    QVector<QPair<QString, Document>> result;
+    QHash<QUuid, std::optional<QUuid>> parents;
+    for (const auto &layer : document.layers) parents.insert(layer.id, layer.parentId);
+    const auto owner = [&](const Layer &layer) {
+        auto parent = layer.parentId; QSet<QUuid> seen;
+        while (parent && !seen.contains(*parent)) {
+            seen.insert(*parent); if (artboardBounds.contains(*parent)) return *parent;
+            parent = parents.value(*parent);
+        }
+        return QUuid();
+    };
+    for (const auto &board : document.layers) {
+        if (!artboardBounds.contains(board.id)) continue;
+        const QRect rect = artboardBounds.value(board.id).toAlignedRect();
+        if (rect.isEmpty() || rect.width() > DocumentLimits::maxSide || rect.height() > DocumentLimits::maxSide || qint64(rect.width()) * rect.height() > DocumentLimits::maxSurfacePixels) continue;
+        Document part = document; part.id = QUuid::createUuid(); part.canvasSize = rect.size(); part.layers.clear(); part.activeLayerId.reset(); part.projectPath.clear();
+        QSet<QUuid> ids;
+        for (auto layer : document.layers) if (owner(layer) == board.id) {
+            if (layer.parentId == board.id) layer.parentId.reset();
+            layer.transform.origin -= rect.topLeft();
+            if (layer.maskPlacement) layer.maskPlacement->origin -= rect.topLeft();
+            part.layers.append(layer); ids.insert(layer.id);
+        }
+        for (auto &layer : part.layers) if (layer.maskSourceId && !ids.contains(*layer.maskSourceId)) layer.maskSourceId.reset();
+        for (auto &guide : part.guides) guide = guide.offset(-rect.x(), -rect.y());
+        if (!part.layers.isEmpty()) part.activeLayerId = part.layers.last().id;
+        result.append({board.name, part});
+    }
+    return result;
 }
 
 } // namespace compositor

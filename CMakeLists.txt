@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CompositorLX VERSION 0.5.3 LANGUAGES C CXX)
+project(CompositorLX VERSION 0.5.5 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(FetchContent)
@@ -13,6 +13,10 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Network)
 find_package(ZLIB REQUIRED)
+find_path(POPPLER_QT6_INCLUDE_DIR poppler-qt6.h PATH_SUFFIXES poppler/qt6 REQUIRED)
+find_library(POPPLER_QT6_LIBRARY NAMES poppler-qt6 REQUIRED)
+find_path(GIF_INCLUDE_DIR gif_lib.h REQUIRED)
+find_library(GIF_LIBRARY NAMES gif libgif.so.7 REQUIRED)
 find_library(LCMS2_LIBRARY NAMES lcms2 REQUIRED)
 find_path(JPEG_INCLUDE_DIR jpeglib.h REQUIRED)
 find_path(LENSFUN_INCLUDE_DIR lensfun.h PATH_SUFFIXES lensfun REQUIRED)
@@ -91,6 +95,9 @@ add_library(compositor_core
     src/core/Document.h
     src/core/DocumentHistory.cpp
     src/core/DocumentHistory.h
+    src/core/EditorSessionGif.cpp
+    src/io/ChannelPack.cpp
+    src/io/GifIO.cpp
     src/core/EditorSession.cpp
     src/core/EditorSessionLayers.cpp
     src/core/EditorSession.h
@@ -117,6 +124,7 @@ add_library(compositor_core
     src/io/PrintExporter.cpp
     src/io/CMYK.cpp
     src/io/HdrImage.cpp
+    src/io/PdfImporter.cpp
     src/io/ImageImporter.cpp
     src/io/ImageImporter.h
     src/io/PSDReader.cpp
@@ -135,6 +143,7 @@ add_library(compositor_core
     src/rendering/LayerRenderer.h
     src/rendering/LayerEffectsRenderer.cpp
     src/rendering/LayerEffectsRenderer.h
+    src/rendering/RgbSplit.cpp
     src/rendering/ProgressiveBlur.cpp
     src/rendering/DeepImage.cpp
     src/rendering/Scanlines.cpp
@@ -158,14 +167,14 @@ add_library(compositor_core
     vendor/compositor-rendering/NoisePixels.c
     vendor/compositor-rendering/WandPixels.c
 )
-target_include_directories(compositor_core PUBLIC src vendor/compositor-rendering PRIVATE ${LENSFUN_INCLUDE_DIR} ${OPENEXR_INCLUDE_DIR} ${IMATH_INCLUDE_DIR} ${IMATH_INCLUDE_DIR}/Imath ${JPEG_INCLUDE_DIR} ${TIFF_INCLUDE_DIR})
-target_link_libraries(compositor_core PRIVATE ${LENSFUN_LIBRARY} ${OPENEXR_LIBRARY} ${IMATH_LIBRARY} ${LCMS2_LIBRARY} ${JPEG_LIBRARY} ${TIFF_LIBRARY})
+target_include_directories(compositor_core PUBLIC src vendor/compositor-rendering PRIVATE ${POPPLER_QT6_INCLUDE_DIR} ${GIF_INCLUDE_DIR} ${LENSFUN_INCLUDE_DIR} ${OPENEXR_INCLUDE_DIR} ${IMATH_INCLUDE_DIR} ${IMATH_INCLUDE_DIR}/Imath ${JPEG_INCLUDE_DIR} ${TIFF_INCLUDE_DIR})
+target_link_libraries(compositor_core PRIVATE ${POPPLER_QT6_LIBRARY} ${GIF_LIBRARY} ${LENSFUN_LIBRARY} ${OPENEXR_LIBRARY} ${IMATH_LIBRARY} ${LCMS2_LIBRARY} ${JPEG_LIBRARY} ${TIFF_LIBRARY})
 if(LENSFUN_DATA_DIR)
     target_compile_definitions(compositor_core PRIVATE COMPOSITOR_LENSFUN_DATA_DIR="${LENSFUN_DATA_DIR}")
 endif()
-find_package(OpenMP COMPONENTS C)
+find_package(OpenMP COMPONENTS C CXX)
 if(OpenMP_C_FOUND)
-    target_link_libraries(compositor_core PRIVATE OpenMP::OpenMP_C)
+    target_link_libraries(compositor_core PRIVATE OpenMP::OpenMP_C OpenMP::OpenMP_CXX)
 endif()
 target_link_libraries(compositor_core PUBLIC Qt6::Core Qt6::Gui Qt6::Concurrent ZLIB::ZLIB)
 if(TARGET heif OR LIBHEIF_FOUND OR (LIBHEIF_INCLUDE_DIR AND LIBHEIF_LIBRARY))
@@ -213,6 +222,8 @@ add_library(compositor_ui STATIC
     src/ui/LayerListModel.cpp
     src/ui/LayerListModel.h
     src/ui/MainWindowPort.cpp
+    src/ui/GifTimeline.cpp
+    src/ui/MainWindowFilterLayers.cpp
     src/ui/MainWindow.cpp
     src/ui/MainWindowLayerMenu.cpp
     src/ui/MainWindow.h
@@ -234,6 +245,7 @@ add_executable(compositor-lx
     src/main.cpp
 )
 target_link_libraries(compositor-lx PRIVATE compositor_ui)
+target_compile_definitions(compositor-lx PRIVATE COMPOSITOR_VERSION="${PROJECT_VERSION}")
 target_compile_options(compositor-lx PRIVATE -Wall -Wextra -Wpedantic)
 
 enable_testing()
@@ -250,6 +262,7 @@ install(FILES "${SUBJECT_MODEL_LICENSE}" DESTINATION ${CMAKE_INSTALL_DATADIR}/do
 if(ONNXRUNTIME_ROOT)
     install(FILES "${ONNXRUNTIME_ROOT}/LICENSE" DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/compositor-lx RENAME ONNXRuntime-MIT.txt)
 endif()
+install(DIRECTORY packaging/licenses/ DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/compositor-lx/licenses)
 install(FILES packaging/compositor-lx.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES packaging/compositor-lx.metainfo.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
 install(FILES packaging/icons/compositor-lx.svg

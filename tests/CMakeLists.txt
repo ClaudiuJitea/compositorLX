@@ -150,3 +150,7 @@ add_executable(upstream15_tests TestUpstream15.cpp)
 target_link_libraries(upstream15_tests PRIVATE compositor_ui Qt6::Test)
 target_compile_definitions(upstream15_tests PRIVATE FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 add_test(NAME upstream15_tests COMMAND upstream15_tests -platform offscreen -nocrashhandler)
+
+add_executable(upstream155_tests TestUpstream155.cpp)
+target_link_libraries(upstream155_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME upstream155_tests COMMAND upstream155_tests -platform offscreen -nocrashhandler)

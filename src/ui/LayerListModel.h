@@ -29,6 +29,8 @@ public:
     };
 
     void setDocument(std::shared_ptr<Document> document, bool reset = true);
+    void setFilter(const QString &name, const QString &type, const QSet<QUuid> &selected = {});
+    bool isFiltered() const { return !filterName_.isEmpty() || filterType_ != "All"; }
     // The layer whose mask is shown alone on the canvas; its mask thumbnail is outlined in white.
     void setMaskAlone(const std::optional<QUuid> &id);
     [[nodiscard]] std::optional<QUuid> layerId(const QModelIndex &index) const;
@@ -70,6 +72,8 @@ private:
     [[nodiscard]] QVector<Item> visibleItems() const;
     [[nodiscard]] int depthFor(const Layer &layer) const;
     std::shared_ptr<Document> document_;
+    QString filterName_, filterType_ = "All";
+    QSet<QUuid> filterSelected_;
     QSet<QUuid> collapsed_;
     QSet<QUuid> effectsCollapsed_;
 };

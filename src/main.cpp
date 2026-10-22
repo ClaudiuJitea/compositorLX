@@ -15,7 +15,7 @@ int main(int argc, char *argv[])
     Q_INIT_RESOURCE(resources);
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("CompositorLX"));
-    QApplication::setApplicationVersion(QStringLiteral("0.5.3"));
+    QApplication::setApplicationVersion(QStringLiteral(COMPOSITOR_VERSION));
     QApplication::setOrganizationName(QStringLiteral("Compositor"));
     QApplication::setDesktopFileName(QStringLiteral("compositor-lx"));
     // The installed theme icon (hicolor, or one the icon theme provides), else the bundled vector one.

@@ -25,6 +25,8 @@ struct PSDImportResult {
     Document document;
     QVector<PSDConversion> conversions;
     QByteArray cmykProfile;
+    QMap<QUuid, QRectF> artboardBounds;
+    QVector<QPair<QString, Document>> artboards() const;
 };
 
 enum class PSDErrorCode {

@@ -1,4 +1,6 @@
 #include "io/ProjectReader.h"
+#include "io/GifIO.h"
+#include "io/AdjustmentJson.h"
 #include "io/HdrImage.h"
 #include "rendering/DeepImage.h"
 
@@ -241,10 +243,13 @@ void validateGuides(const QVector<CanvasGuide> &guides, int version)
 
 void validateAdjustmentSettings(const QJsonObject &adj, int version)
 {
+    if (const QString problem = adjustmentJsonError(adj); !problem.isEmpty()) invalid(problem);
     const QString kindStr = adj.value(QStringLiteral("kind")).toString();
     const auto kind = adjustmentKindFromString(kindStr);
     if (!kind) invalid(QStringLiteral("unknown adjustment kind: %1").arg(kindStr));
 
+    if ((isVersion16Adjustment(*kind) || adj.contains(QStringLiteral("filterLayerSettings"))) && version < 16)
+        invalid(QStringLiteral("Filter layers require format version 16"));
     if (isVersion9Adjustment(*kind) && version < 9) {
         invalid(QStringLiteral("%1 adjustment requires format version 9").arg(kindStr));
     }
@@ -459,6 +464,8 @@ std::optional<LayerShapeStyle> parseShape(const QJsonObject &obj)
     style.blue = number(obj, QStringLiteral("blue"), 0.0);
     style.cornerRadius = number(obj, QStringLiteral("cornerRadius"), 0.0);
     if (obj.contains(QStringLiteral("smoothing"))) style.smoothing = boolean(obj, QStringLiteral("smoothing"), false);
+    if (obj.contains(QStringLiteral("lineStyle"))) style.lineStyle = obj.value("lineStyle").toString();
+    if (obj.contains(QStringLiteral("lineCap"))) style.lineCap = obj.value("lineCap").toString();
     if (obj.contains(QStringLiteral("lineWidth"))) {
         style.lineWidth = number(obj, QStringLiteral("lineWidth"), 1.0);
     }
@@ -533,8 +540,8 @@ Document ProjectReader::load(const QString &projectDirectory)
 
     Document document;
     document.formatVersion = manifest.value(QStringLiteral("version")).toInt(-1);
-    if (document.formatVersion < 1 || document.formatVersion > 14) {
-        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–14.").arg(document.formatVersion));
+    if (document.formatVersion < 1 || document.formatVersion > 17) {
+        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–17.").arg(document.formatVersion));
     }
     if (manifest.value(QStringLiteral("colorSpace")).toString() != QStringLiteral("sRGB")) {
         invalid(QStringLiteral("only the sRGB working space is supported"));
@@ -688,10 +695,33 @@ Document ProjectReader::load(const QString &projectDirectory)
         if (object.contains(QStringLiteral("shape")) && object.value(QStringLiteral("shape")).isObject()) {
             layer.shape = object.value(QStringLiteral("shape")).toObject();
             layer.shapeStyle = parseShape(layer.shape);
+            if (layer.shapeStyle && (layer.shapeStyle->lineStyle || layer.shapeStyle->lineCap) && document.formatVersion < 15)
+                invalid(QStringLiteral("Line styles require format version 15"));
             if (layer.shapeStyle && layer.shapeStyle->smoothing.value_or(false) && document.formatVersion < 14)
                 invalid(QStringLiteral("smooth corners require format version 14 or later"));
         }
 
+        if (object.contains("gif")) {
+            if (document.formatVersion < 17 || !object.value("gif").isObject() || layer.group || !layer.adjustment.isEmpty() || layer.text || layer.shapeStyle || layer.image.isNull())
+                invalid(QStringLiteral("Invalid GIF layer or format version"));
+            const auto meta = object.value("gif").toObject();
+            const QString id = layer.id.toString(QUuid::WithoutBraces);
+            const QString source = meta.value("sourceFile").toString();
+            if (source.compare(id + ".gif", Qt::CaseInsensitive) != 0) invalid(QStringLiteral("Unexpected GIF source filename"));
+            QString error;
+            auto animation = GifIO::readFile(checkedAssetPath(root, source), &error);
+            if (!animation || !GifIO::restoreMetadata(*animation, meta, &error)) invalid(error);
+            if (meta.contains("framePixels") && !meta.value("framePixels").isArray()) invalid(QStringLiteral("Invalid GIF frame pixels"));
+            for (const auto &v : meta.value("framePixels").toArray()) {
+                const auto entry = v.toObject(); const int index = entry.value("index").toInt(-1);
+                const QString file = entry.value("imageFile").toString();
+                if (index < 0 || index >= 8192 || animation->pixels.contains(index) || file.compare(id + QStringLiteral(".frame-%1.png").arg(index), Qt::CaseInsensitive) != 0)
+                    invalid(QStringLiteral("Invalid GIF frame asset"));
+                animation->pixels.insert(index, loadPng(root, file, imagePixels, false));
+            }
+            if (!animation->valid()) invalid(QStringLiteral("Invalid GIF timeline"));
+            layer.gif = *animation;
+        }
         // Migrate LX legacy shape.kind == "Text"
         migrateLegacyLxText(layer);
 

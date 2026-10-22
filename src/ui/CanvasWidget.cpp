@@ -1,4 +1,6 @@
 #include "ui/CanvasWidget.h"
+#include "rendering/ShapeLine.h"
+#include <QTabletEvent>
 #include "rendering/ShapePath.h"
 #include "rendering/DeepImage.h"
 #include "rendering/NavigatorGeometry.h"
@@ -417,6 +419,7 @@ void CanvasWidget::setDocument(std::shared_ptr<Document> document, bool invalida
     panOffset_ = {};
     fitPending_ = true;
     fitCanvas();
+    if (zoom_ > 1) zoomTo(1, rect().center());
 }
 
 void CanvasWidget::fitCanvas()
@@ -856,9 +859,7 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
             const QPointF p1 = target.topLeft() + lineStart * zoom_;
             const QPointF p2 = target.topLeft() + lineEnd * zoom_;
             const double thickness = std::max(1.0, shapeLineWidth_ * zoom_);
-            QPen linePen(paletteForeground_, thickness, Qt::SolidLine, Qt::RoundCap);
-            painter.setPen(linePen);
-            painter.drawLine(p1, p2);
+            drawShapeLine(painter, p1, p2, thickness, paletteForeground_, shapeLineStyle_, shapeLineCap_);
         } else {
             const QRectF box(first, last);
             if (shapeKind_ == ShapeKind::Ellipse || (tool_ != Tool::Shape && ellipticalShape_)) {
@@ -958,14 +959,15 @@ bool CanvasWidget::event(QEvent *event)
     // tap just switches. One way to reach the eyedropper, zoom and so on where the desktop keeps Alt-clicks for itself.
     if (event->type() == QEvent::ShortcutOverride) {
         auto *key = static_cast<QKeyEvent *>(event);
-        if (!key->isAutoRepeat() && key->modifiers() == Qt::NoModifier && key->key() >= Qt::Key_A && key->key() <= Qt::Key_Z
+        const int physicalKey = ShortcutManager::sequenceFromKeyEvent(key)[0].key();
+        if (!key->isAutoRepeat() && key->modifiers() == Qt::NoModifier && physicalKey >= Qt::Key_A && physicalKey <= Qt::Key_Z
             && !brushDrawing_ && !movingLayer_) {
-            springKey_ = key->key(); springFrom_ = tool_; springTimer_.start();
+            springKey_ = physicalKey; springFrom_ = tool_; springTimer_.start();
         }
     }
     if (event->type() == QEvent::KeyRelease) {
         auto *key = static_cast<QKeyEvent *>(event);
-        if (!key->isAutoRepeat() && springKey_ && key->key() == *springKey_) {
+        if (!key->isAutoRepeat() && springKey_ && ShortcutManager::sequenceFromKeyEvent(key)[0].key() == *springKey_) {
             const bool held = springTimer_.isValid() && springTimer_.elapsed() >= 350;
             const Tool from = springFrom_;
             springKey_.reset();
@@ -1006,6 +1008,22 @@ void CanvasWidget::centerViewOn(const QPointF &point)
 {
     if(!document_)return;
     setPanOffset(QPointF(document_->canvasSize.width()/2.0-point.x(),document_->canvasSize.height()/2.0-point.y())*zoom_);
+}
+
+void CanvasWidget::tabletEvent(QTabletEvent *event)
+{
+    if (tool_ != Tool::Brush && tool_ != Tool::Eraser) { event->ignore(); return; }
+    emit penUsed();
+    tabletDispatch_ = true;
+    if (event->type() != QEvent::TabletRelease) penPressure_ = event->pressure();
+    const auto type = event->type() == QEvent::TabletPress ? QEvent::MouseButtonPress : event->type() == QEvent::TabletRelease ? QEvent::MouseButtonRelease : QEvent::MouseMove;
+    QMouseEvent mouse(type, event->position(), event->globalPosition(), type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                      type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton, event->modifiers());
+    if (type == QEvent::MouseButtonPress) mousePressEvent(&mouse);
+    else if (type == QEvent::MouseButtonRelease) mouseReleaseEvent(&mouse);
+    else mouseMoveEvent(&mouse);
+    tabletDispatch_ = false;
+    event->accept();
 }
 
 void CanvasWidget::mousePressEvent(QMouseEvent *event)

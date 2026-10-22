@@ -1,4 +1,5 @@
 #pragma once
+#include "rendering/RgbSplit.h"
 #include "rendering/Scanlines.h"
 #include "rendering/ProgressiveBlur.h"
 
@@ -64,6 +65,12 @@ public:
     void createDocument(int width, int height, bool emptyLayer = false, double resolution = 72, const std::optional<QColor> &background = std::nullopt);
     bool openProject(const QString &path);
     bool insertImage(const QImage &image, const QString &name, const std::optional<QPointF> &center = std::nullopt);
+    bool insertGif(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
+    bool selectGifFrame(int index);
+    bool duplicateGifFrame();
+    bool deleteGifFrame();
+    bool setGifDelay(int milliseconds, bool sameForAll = false, bool original = false);
+    bool insertPdf(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
     bool insertSvg(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
     bool insertPhotoshop(const PSDImportResult &imported, const QString &named,
                          const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
@@ -166,7 +173,8 @@ public:
     bool addShape(ShapeKind kind, const QRectF &rect, const QColor &fill, const QColor &stroke = Qt::transparent,
                   double strokeWidth = 2, double cornerRadius = 0,
                   const std::optional<QPointF> &start = std::nullopt,
-                  const std::optional<QPointF> &end = std::nullopt, bool smoothing = false);
+                  const std::optional<QPointF> &end = std::nullopt, bool smoothing = false,
+                  const QString &lineStyle = "Solid", const QString &lineCap = "Square");
     bool addShape(const QRectF &rect, const QColor &fill, const QColor &stroke,
                   double strokeWidth = 2, bool ellipse = false, double cornerRadius = 0);
     bool addText(const QString &text, const QRectF &box, const QString &fontFamily,
@@ -197,6 +205,8 @@ public:
     bool applyScanlines(const ScanlinesSettings &settings);
     bool applyProgressiveBlur(const ProgressiveBlurSettings &settings);
     bool convertDepth(bool sixteenBit);
+    bool applyRgbSplit(const RgbSplitSettings &settings);
+    bool splitChannels();
     bool applyLastFilter();
     bool hasLastFilter() const { return bool(lastFilter_); }
     QString lastFilterName() const { return lastFilterName_; }
@@ -233,6 +243,7 @@ public:
     void continueBrushStroke(const QPointF &documentPoint);
     bool endBrushStroke();
     bool cancelBrushStroke();
+    void setPenInput(double pressure, bool size, bool opacity) { penPressure_ = std::clamp(pressure, 0.0, 1.0); penSize_ = size; penOpacity_ = opacity; }
     void setBrushSmoothing(double smoothing) { brushSmoothing_ = std::clamp(smoothing, 0.0, 100.0); }
     [[nodiscard]] double brushSmoothing() const { return brushSmoothing_; }
     void setViewportZoom(double zoom) { viewportZoom_ = std::max(0.01, zoom); }
@@ -436,10 +447,11 @@ public:
     void markSaved() { history_.markSaved(); }
     void markSaved(const QUuid &revision) { history_.markSaved(revision); }
     void beginEdit(const QString &name) {
-        if (editDepth_++ == 0) { pendingFilter_ = {}; editRevision_ = history_.currentRevision(); }
+        if (editDepth_++ == 0) { captureGifEdits(); pendingFilter_ = {}; editRevision_ = history_.currentRevision(); }
         history_.begin(name, document_);
     }
     void endEdit() {
+        if (editDepth_ == 1) commitGifEdits();
         raiseFormatVersion();
         history_.end(document_);
         if (editDepth_ > 0 && --editDepth_ == 0) {
@@ -450,6 +462,10 @@ public:
     }
 
 private:
+    void captureGifEdits();
+    void commitGifEdits();
+    QMap<QUuid, Layer> gifBefore_;
+    QSize gifCanvasBefore_;
     QString lastFilterName_;
     int editDepth_ = 0;
     QUuid editRevision_;
@@ -474,6 +490,8 @@ private:
     std::shared_ptr<Document> document_;
     QSet<QUuid> selectedLayerIds_;
     DocumentHistory history_;
+    double penPressure_ = 1;
+    bool penSize_ = false, penOpacity_ = false;
     struct BrushState {
         QUuid layerId;
         QPointF previousPixel;
@@ -510,6 +528,8 @@ private:
         QRect sourceRect;
         QImage deepBase;
         bool sparseBlank = false;
+        bool pressureStroke = false, pressureSize = false, pressureOpacity = false;
+        double previousPressure = 1;
     };
     std::optional<BrushState> brush_;
     struct WarpState {

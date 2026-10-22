@@ -1634,7 +1634,7 @@ void TestIoAudit::menuStructureMatchesMac()
         QVERIFY2(topMenu(bar, title), qPrintable(title));
     struct Expect { const char *menu; const char *item; };
     const Expect expected[] = {
-        {"File", "New Canvas"}, {"File", "Open Project"}, {"File", "Open Recent"}, {"File", "Import Images"}, {"File", "Save"}, {"File", "Save As"},
+        {"File", "New Canvas"}, {"File", "Open Project"}, {"File", "Open Recent"}, {"File", "Import"}, {"File", "Save"}, {"File", "Save As"},
         {"File", "Export As"}, {"File", "Export JPEG"}, {"File", "Close Project"}, {"File", "Quit"},
         {"Edit", "Undo"}, {"Edit", "Redo"}, {"Edit", "Cut"}, {"Edit", "Copy"}, {"Edit", "Copy Merged"}, {"Edit", "Paste"}, {"Edit", "Keyboard Shortcuts"},
         {"Edit", "Fill with Foreground Color"}, {"Edit", "Fill with Background Color"}, {"Edit", "Clear Selection Pixels"},
@@ -1657,14 +1657,15 @@ void TestIoAudit::menuStructureMatchesMac()
     QMenu *filter = topMenu(bar, QStringLiteral("Filter"));
     for (const QString &name : {QStringLiteral("Gaussian Blur"), QStringLiteral("Motion Blur"), QStringLiteral("Vignette")})
         QVERIFY2(menuItem(filter, name), qPrintable(name));
-    // New Adjustment Layer lists all 12 kinds.
+    // New Adjustment Layer lists all 15 kinds, with a separator before the filters.
     QMenu *layer = topMenu(bar, QStringLiteral("Layer"));
     QAction *adjustments = menuItem(layer, QStringLiteral("New Adjustment Layer"));
     QVERIFY(adjustments && adjustments->menu());
     window.session().createDocument(20, 20, true);
     window.syncDocumentViews();
     emit adjustments->menu()->aboutToShow();
-    QCOMPARE(adjustments->menu()->actions().size(), 12);
+    QCOMPARE(adjustments->menu()->actions().size(), 16);
+    for (const QString &name : {QStringLiteral("Progressive Blur"), QStringLiteral("Bloom / Glow"), QStringLiteral("RGB Split")}) QVERIFY(menuItem(adjustments->menu(), name));
 }
 
 void TestIoAudit::fileMenuEnabledStates()

@@ -86,22 +86,27 @@ std::optional<DocumentHistory::Snapshot> DocumentHistory::redo()
 
 qsizetype DocumentHistory::retainedBytes(const std::shared_ptr<Document> &current) const
 {
-    QSet<qint64> live;
-    if (current) for (const Layer &layer : current->layers) {
-        if (!layer.image.isNull()) live.insert(layer.image.cacheKey());
-        if (!layer.mask.isNull()) live.insert(layer.mask.cacheKey());
-    }
-    QSet<qint64> seen = live;
+    QSet<qint64> seen;
+    QSet<const GifSource *> sources;
     qsizetype bytes = 0;
-    const auto count = [&](const Snapshot &value) {
-        if (!value.document) return;
-        for (const Layer &layer : value.document->layers) for (const QImage *image : {&layer.image, &layer.mask}) {
-            if (!image->isNull() && !seen.contains(image->cacheKey())) {
-                seen.insert(image->cacheKey());
-                bytes += image->sizeInBytes();
+    const auto countImage = [&](const QImage &image, bool live) {
+        if (!image.isNull() && !seen.contains(image.cacheKey())) { seen.insert(image.cacheKey()); if (!live) bytes += image.sizeInBytes(); }
+    };
+    const auto countDocument = [&](const Document &doc, bool live) {
+        for (const Layer &layer : doc.layers) {
+            countImage(layer.image, live); countImage(layer.mask, live);
+            if (layer.gif) {
+                for (const auto &image : layer.gif->pixels) countImage(image, live);
+                if (layer.gif->source && !sources.contains(layer.gif->source.get())) {
+                    sources.insert(layer.gif->source.get());
+                    if (!live) bytes += layer.gif->source->data.size();
+                    for (const auto &image : layer.gif->source->thumbnails) countImage(image, live);
+                }
             }
         }
     };
+    if (current) countDocument(*current, true);
+    const auto count = [&](const Snapshot &value) { if (value.document) countDocument(*value.document, false); };
     for (const Entry &entry : past_) { count(entry.before); count(entry.after); }
     for (const Entry &entry : future_) { count(entry.before); count(entry.after); }
     return bytes;

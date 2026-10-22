@@ -242,7 +242,11 @@ bool ShortcutManager::dispatchKeyEvent(const QKeyEvent *event)
 QKeySequence ShortcutManager::sequenceFromKeyEvent(const QKeyEvent *event)
 {
     if (!event) return QKeySequence();
-    const int key = event->key();
+    int key = event->key();
+    if (key > 127 && key < Qt::Key_Escape && event->nativeScanCode()) {
+        static const QHash<quint32, int> latin{{24,Qt::Key_Q},{25,Qt::Key_W},{26,Qt::Key_E},{27,Qt::Key_R},{28,Qt::Key_T},{29,Qt::Key_Y},{30,Qt::Key_U},{31,Qt::Key_I},{32,Qt::Key_O},{33,Qt::Key_P},{38,Qt::Key_A},{39,Qt::Key_S},{40,Qt::Key_D},{41,Qt::Key_F},{42,Qt::Key_G},{43,Qt::Key_H},{44,Qt::Key_J},{45,Qt::Key_K},{46,Qt::Key_L},{52,Qt::Key_Z},{53,Qt::Key_X},{54,Qt::Key_C},{55,Qt::Key_V},{56,Qt::Key_B},{57,Qt::Key_N},{58,Qt::Key_M}};
+        key = latin.value(event->nativeScanCode(), key);
+    }
     if (key == 0 || key == Qt::Key_unknown) {
         return QKeySequence();
     }
@@ -288,6 +292,7 @@ TranslatedKeyEvent ShortcutManager::translateCanvasKeyEvent(const QKeyEvent *eve
             const QKeySequence current = shortcut(def.id());
             if (current == input) {
                 if (current == def.defaultShortcut) {
+                    result.key = int(input[0].key());
                     return result; // Unmodified default
                 }
                 if (def.defaultShortcut.isEmpty()) {
@@ -344,6 +349,7 @@ TranslatedKeyEvent ShortcutManager::translateTextKeyEvent(const QKeyEvent *event
             const QKeySequence current = shortcut(def.id());
             if (current == input) {
                 if (current == def.defaultShortcut) {
+                    result.key = int(input[0].key());
                     return result; // Unmodified default
                 }
                 if (def.defaultShortcut.isEmpty()) {

@@ -313,6 +313,9 @@ QString adjustmentKindToString(AdjustmentKind kind)
     case AdjustmentKind::ColorBalance: return QStringLiteral("Color Balance");
     case AdjustmentKind::GaussianBlur: return QStringLiteral("Gaussian Blur");
     case AdjustmentKind::MotionBlur: return QStringLiteral("Motion Blur");
+    case AdjustmentKind::ProgressiveBlur: return QStringLiteral("Progressive Blur");
+    case AdjustmentKind::BloomGlow: return QStringLiteral("Bloom / Glow");
+    case AdjustmentKind::RgbSplit: return QStringLiteral("RGB Split");
     case AdjustmentKind::AddNoise: return QStringLiteral("Add Noise");
     }
     return QStringLiteral("Hue/Saturation");
@@ -331,8 +334,16 @@ std::optional<AdjustmentKind> adjustmentKindFromString(const QString &value)
     if (value == QStringLiteral("Color Balance")) return AdjustmentKind::ColorBalance;
     if (value == QStringLiteral("Gaussian Blur")) return AdjustmentKind::GaussianBlur;
     if (value == QStringLiteral("Motion Blur")) return AdjustmentKind::MotionBlur;
+    if (value == QStringLiteral("Progressive Blur")) return AdjustmentKind::ProgressiveBlur;
+    if (value == QStringLiteral("Bloom / Glow")) return AdjustmentKind::BloomGlow;
+    if (value == QStringLiteral("RGB Split")) return AdjustmentKind::RgbSplit;
     if (value == QStringLiteral("Add Noise")) return AdjustmentKind::AddNoise;
     return std::nullopt;
+}
+
+bool isVersion16Adjustment(AdjustmentKind kind)
+{
+    return kind == AdjustmentKind::ProgressiveBlur || kind == AdjustmentKind::BloomGlow || kind == AdjustmentKind::RgbSplit;
 }
 
 bool isVersion9Adjustment(AdjustmentKind kind)

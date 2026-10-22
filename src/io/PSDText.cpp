@@ -626,6 +626,18 @@ QString missingFontNote(const QString &name)
     return QStringLiteral("The font “%1” isn’t installed, so the text was drawn with the system font.").arg(name);
 }
 
+std::optional<QRectF> artboard(const QMap<QString, QByteArray> &extra)
+{
+    for (const QString &key : {QStringLiteral("artb"), QStringLiteral("artd"), QStringLiteral("abdd")}) {
+        if (!extra.contains(key)) continue;
+        Reader reader(extra.value(key));
+        const auto descriptor = reader.descriptor(true);
+        const auto rect = descriptor ? descriptor->rect("artboardRect") : std::nullopt;
+        if (rect && rect->width() >= 1 && rect->height() >= 1) return rect;
+    }
+    return {};
+}
+
 std::optional<PSDTextSource> parse(const QMap<QString, QByteArray> &extra)
 {
     QByteArray data = extra.value(QStringLiteral("TySh"));

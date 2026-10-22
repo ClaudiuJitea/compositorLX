@@ -150,6 +150,12 @@ public:
     [[nodiscard]] bool ellipticalShape() const { return shapeKind_ == ShapeKind::Ellipse; }
     void setEllipticalShape(bool enabled) { setShapeKind(enabled ? ShapeKind::Ellipse : ShapeKind::Rectangle); }
     [[nodiscard]] double shapeLineWidth() const { return shapeLineWidth_; }
+    QString shapeLineStyle() const { return shapeLineStyle_; }
+    QString shapeLineCap() const { return shapeLineCap_; }
+    void setShapeLineStyle(const QString &style) { shapeLineStyle_ = style; update(); }
+    void setShapeLineCap(const QString &cap) { shapeLineCap_ = cap; update(); }
+    double penPressure() const { return penPressure_; }
+    bool usingPen() const { return tabletDispatch_; }
     void setShapeLineWidth(double width) { shapeLineWidth_ = std::clamp(width, 1.0, 5000.0); update(); }
     void refreshPendingGradient();
     void resolvePendingGradient(bool commit = true);
@@ -164,6 +170,7 @@ public:
     void setTextEditingLayer(const std::optional<QUuid> &id) { textEditingLayer_ = id; invalidateDocument(); }
 
 signals:
+    void penUsed();
     void zoomChanged(double zoom);
     void viewportChanged();
     void toolChanged(Tool tool);
@@ -225,6 +232,7 @@ signals:
     void guideChanged();
 
 protected:
+    void tabletEvent(QTabletEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
@@ -386,7 +394,10 @@ private:
     ShapeKind shapeKind_ = ShapeKind::Rectangle;
     bool ellipticalShape_ = false;
     double shapeCornerRadius_ = 0;
+    double penPressure_ = 1;
+    bool tabletDispatch_ = false;
     bool shapeSmoothing_ = false;
+    QString shapeLineStyle_ = "Solid", shapeLineCap_ = "Square";
     bool middleZoom_ = false;
     double zoomDragPreviousX_ = 0;
     double shapeLineWidth_ = 2.0;

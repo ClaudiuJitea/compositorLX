@@ -26,7 +26,7 @@ done
 cmake -S "$source_dir" -B "$work_dir" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release
 cmake --build "$work_dir" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
-ctest --test-dir "$work_dir" --output-on-failure
+OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" ctest --test-dir "$work_dir" --output-on-failure
 
 mkdir -p "$output_dir"
 (cd "$work_dir" && cpack -G DEB)
@@ -43,6 +43,7 @@ chmod +x "$tool_dir"/*.AppImage
 DESTDIR="$app_dir" cmake --install "$work_dir" --prefix /usr
 (
     cd "$work_dir"
+    EXTRA_PLATFORM_PLUGINS="libqoffscreen.so${EXTRA_PLATFORM_PLUGINS:+;$EXTRA_PLATFORM_PLUGINS}" \
     QMAKE=$(command -v qmake6) "$tool_dir/linuxdeploy-x86_64.AppImage" \
         --appimage-extract-and-run \
         --appdir "$app_dir" \
@@ -55,8 +56,14 @@ cp "$work_dir/CompositorLX-${appimage_arch}.AppImage" \
     "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage"
 chmod +x "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage"
 
-"$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage" \
+QT_QPA_PLATFORM=offscreen "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage" \
     --appimage-extract-and-run --check-subject-model
+QT_QPA_PLATFORM=offscreen "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage" \
+    --appimage-extract-and-run --version
 dpkg-deb --info "$output_dir/compositorlx_${version}_${architecture}.deb" >/dev/null
-sha256sum "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage" \
-    "$output_dir/compositorlx_${version}_${architecture}.deb"
+(
+    cd "$output_dir"
+    sha256sum "CompositorLX-${version}-${appimage_arch}.AppImage" \
+        "compositorlx_${version}_${architecture}.deb" > SHA256SUMS
+    sha256sum --check SHA256SUMS
+)

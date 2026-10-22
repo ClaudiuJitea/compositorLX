@@ -40,6 +40,7 @@ QString justifyNote();
 // Null when the face is installed.
 QString missingFontNote(const QString &name);
 
+std::optional<QRectF> artboard(const QMap<QString, QByteArray> &extra);
 std::optional<PSDTextSource> parse(const QMap<QString, QByteArray> &extra);
 std::optional<PSDTextRendered> render(const PSDTextSource &source);
 } // namespace PSDText

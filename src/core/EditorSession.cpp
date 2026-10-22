@@ -1,4 +1,6 @@
 #include "core/EditorSession.h"
+#include "rendering/ShapeLine.h"
+#include "io/PdfImporter.h"
 #include "rendering/ShapePath.h"
 #include "rendering/DeepImage.h"
 #include "core/SelectionOps.h"
@@ -1112,12 +1114,30 @@ bool EditorSession::applyGradient(const QPointF &start, const QPointF &end, cons
     beginEdit(QStringLiteral("Gradient")); document_->layers[index].image = result; rasterizeLayer(document_->layers[index]); endEdit(); return true;
 }
 
+bool EditorSession::insertPdf(const QString &path, const std::optional<QPointF> &center, QString *error)
+{
+    qint64 used = 0;
+    if (document_) for (const Layer &layer : document_->layers) used += qint64(layer.image.width()) * layer.image.height();
+    const auto pages = PdfImporter::read(path, document_ ? document_->canvasSize : QSize(), error, DocumentLimits::documentPixelBudget() - used);
+    if (pages.isEmpty() || (document_ ? document_->layers.size() : 0) + pages.size() > 10000) return false;
+    const bool fresh = !document_;
+    beginEdit(QStringLiteral("Import PDF"));
+    for (int i = 0; i < pages.size(); ++i) {
+        if (!insertImage(pages[i], QFileInfo(path).completeBaseName() + QStringLiteral(" — Page %1").arg(i + 1), center)) {
+            endEdit(); return false;
+        }
+    }
+    if (fresh) document_->resolution = 300;
+    endEdit();
+    return true;
+}
+
 bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &fill, const QColor &stroke,
                              double strokeWidth, double cornerRadius,
                              const std::optional<QPointF> &start,
-                             const std::optional<QPointF> &end, bool smoothing)
+                             const std::optional<QPointF> &end, bool smoothing, const QString &lineStyle, const QString &lineCap)
 {
-    if (!document_ || !fill.isValid() || !stroke.isValid() || !std::isfinite(strokeWidth) || strokeWidth < 0 || strokeWidth > 1000
+    if (!document_ || !fill.isValid() || !stroke.isValid() || !std::isfinite(strokeWidth) || strokeWidth < 0 || strokeWidth > 5000
         || !std::isfinite(cornerRadius) || cornerRadius < 0 || cornerRadius > 5000) return false;
     QRectF rect = input.normalized();
     if (rect.width() < 1 || rect.height() < 1 || rect.width() > 30000 || rect.height() > 30000) return false;
@@ -1141,8 +1161,10 @@ bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &
         const double minY = std::min(from.y(), to.y());
         const double spanW = std::abs(to.x() - from.x());
         const double spanH = std::abs(to.y() - from.y());
-        const double pad = thickness / 2.0;
-        rect = QRectF(minX - pad, minY - pad, std::max(1.0, spanW + thickness), std::max(1.0, spanH + thickness));
+        const double length = QLineF(from, to).length();
+        const double corner = length > 0 ? thickness / 2 * (std::abs(to.x() - from.x()) + std::abs(to.y() - from.y())) / length : thickness / 2;
+        const double pad = thickness / 2 + (lineCap == "Square" ? std::ceil(corner - thickness / 2 - .0001) : 0);
+        rect = QRectF(minX - pad, minY - pad, std::max(1.0, spanW + pad * 2), std::max(1.0, spanH + pad * 2));
         startUnit = QPointF(rect.width() > 0 ? (from.x() - rect.left()) / rect.width() : 0.5,
                             rect.height() > 0 ? (from.y() - rect.top()) / rect.height() : 0.5);
         endUnit = QPointF(rect.width() > 0 ? (to.x() - rect.left()) / rect.width() : 0.5,
@@ -1164,10 +1186,8 @@ bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &
     if (kind == ShapeKind::Line) {
         const double thickness = std::max(1.0, strokeWidth > 0 ? strokeWidth : 2.0);
         const QColor color = (fill.isValid() && fill != Qt::transparent) ? fill : (stroke.isValid() ? stroke : Qt::black);
-        QPen pen(color, thickness, Qt::SolidLine, Qt::RoundCap);
-        painter.setPen(pen);
-        painter.drawLine(QPointF(startUnit.x() * size.width(), startUnit.y() * size.height()),
-                         QPointF(endUnit.x() * size.width(), endUnit.y() * size.height()));
+        drawShapeLine(painter, QPointF(startUnit.x() * size.width(), startUnit.y() * size.height()),
+                      QPointF(endUnit.x() * size.width(), endUnit.y() * size.height()), thickness, color, lineStyle, lineCap);
     } else {
         const int margin = strokeWidth > 0 ? qCeil(strokeWidth / 2.0) + 2 : 0;
         const QRectF bounds(margin, margin, rect.width(), rect.height());
@@ -1202,6 +1222,8 @@ bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &
         if (kind == ShapeKind::Rectangle && smoothing) style.smoothing = true;
         if (kind == ShapeKind::Line) {
             style.lineWidth = strokeWidth > 0 ? strokeWidth : 2.0;
+            if (lineStyle != "Solid") style.lineStyle = lineStyle;
+            if (lineCap != "Round") style.lineCap = lineCap;
             style.start = startUnit;
             style.end = endUnit;
         }
@@ -1499,10 +1521,14 @@ void EditorSession::redrawSelectedShapes()
                 if (!lineColor.isValid()) lineColor = Qt::black;
             }
             thickness = std::max(1.0, thickness);
-            QPen pen(lineColor, thickness, Qt::SolidLine, Qt::RoundCap);
-            painter.setPen(pen);
-            painter.drawLine(QPointF(startUnit.x() * width, startUnit.y() * height),
-                             QPointF(endUnit.x() * width, endUnit.y() * height));
+            const double oldWidth = std::max(1, layer.image.width()), oldHeight = std::max(1, layer.image.height());
+            painter.save(); painter.scale(width / oldWidth, height / oldHeight);
+            drawShapeLine(painter, QPointF(startUnit.x() * oldWidth, startUnit.y() * oldHeight),
+                          QPointF(endUnit.x() * oldWidth, endUnit.y() * oldHeight), thickness, lineColor,
+                          layer.shapeStyle ? layer.shapeStyle->lineStyle.value_or("Solid") : "Solid",
+                          layer.shapeStyle ? layer.shapeStyle->lineCap.value_or("Round") : "Round");
+            painter.restore();
+            if (layer.shapeStyle) layer.shapeStyle->lineWidth = std::clamp(thickness * std::sqrt(width / oldWidth * height / oldHeight), 0.0, 5000.0);
         } else {
             const QColor fill = layer.shapeStyle
                 ? QColor::fromRgbF(layer.shapeStyle->red, layer.shapeStyle->green, layer.shapeStyle->blue)
@@ -1754,6 +1780,61 @@ bool EditorSession::applyScanlines(const ScanlinesSettings &settings)
     beginEdit(QStringLiteral("Scanlines"));document_->layers[index].image=result;rasterizeLayer(document_->layers[index]);
     pendingFilter_=[=](EditorSession &s){return s.applyScanlines(settings);};endEdit();return true;
 }
+bool EditorSession::applyRgbSplit(const RgbSplitSettings &settings)
+{
+    const Layer *layer = activeLayer();
+    if (!layer || layer->image.isNull() || !canPaint() || maskSelected_) return false;
+    const double margin = std::ceil(settings.distance + settings.blur + 2);
+    auto local = settings;
+    bool ok = false;
+    const auto map = LayerRenderer::pixelToDocument(layer->transform, layer->image.size()).inverted(&ok);
+    if (!ok) return false;
+    local.center = map.map(settings.center) + QPointF(margin, margin);
+    beginEdit(QStringLiteral("RGB Split"));
+    const bool changed = applySpreadingFilter(QStringLiteral("RGB Split"), margin,
+        [local](const QImage &image) { return local.apply(image); });
+    if (changed) pendingFilter_ = [settings](EditorSession &s) { return s.applyRgbSplit(settings); };
+    endEdit();
+    return changed;
+}
+
+bool EditorSession::splitChannels()
+{
+    const Layer *active = activeLayer();
+    if (!active || active->image.isNull() || maskSelected_ || selectedLayerIds_.size() > 1 || document_->layers.size() > 9996) return false;
+    const Layer original = *active;
+    const QImage source = original.image.convertToFormat(QImage::Format_RGBA8888);
+    QVector<Layer> children;
+    Layer group;
+    group.id = QUuid::createUuid(); group.name = original.name; group.group = true;
+    group.parentId = original.parentId; group.transform.size = document_->canvasSize;
+    const QStringList names{"Red", "Green", "Blue", "Alpha"};
+    for (int c = 3; c >= 0; --c) {
+        Layer child;
+        child.id = QUuid::createUuid(); child.name = names[c]; child.parentId = group.id;
+        child.transform = original.transform;
+        child.image = QImage(source.size(), QImage::Format_RGBA8888_Premultiplied);
+        if (child.image.isNull()) return false;
+        for (int y = 0; y < source.height(); ++y) {
+            const auto *in = source.constScanLine(y); auto *out = child.image.scanLine(y);
+            for (int x = 0; x < source.width(); ++x) {
+                out[x*4] = out[x*4+1] = out[x*4+2] = in[x*4+c]; out[x*4+3] = 255;
+            }
+        }
+        children.append(child);
+    }
+    // Preserve clipping links by retaining the source identity as the red plane.
+    children.last().id = original.id;
+    beginEdit(QStringLiteral("Split Channels"));
+    const int index = indexOf(original.id);
+    document_->layers[index] = group;
+    for (int c = 0; c < children.size(); ++c) document_->layers.insert(index + 1 + c, children[c]);
+    document_->activeLayerId = children.last().id;
+    document_->formatVersion = std::max(2, document_->formatVersion);
+    endEdit();
+    return true;
+}
+
 bool EditorSession::applyProgressiveBlur(const ProgressiveBlurSettings &settings)
 {
     const Layer *layer=activeLayer();
@@ -2101,7 +2182,7 @@ static QImage selectionCoverageForLayer(const Layer &layer, const QSize &size, c
 void EditorSession::raiseFormatVersion()
 {
     // 0 means "work it out from the content when saving"; only an explicit version needs raising.
-    if (!document_ || document_->formatVersion < 1 || document_->formatVersion >= 14) return;
+    if (!document_ || document_->formatVersion < 1 || document_->formatVersion >= 17) return;
     document_->formatVersion = std::max(document_->formatVersion, ProjectWriter::minimumRequiredVersion(*document_));
 }
 
@@ -2378,6 +2459,8 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
                         maskValue, clonePixel ? *clonePixel - *pixel : QPointF(),
                         healMode, effectSeed, original, original, coverage, coverage, {}, {}, {}, {}};
     if(!paintingMask&&DeepImage::isDeep(editable.image)){brush_->deepBase=editable.image;editable.image=original;}
+    brush_->pressureStroke = !cloneSource && healMode < 0 && (penSize_ || penOpacity_);
+    brush_->pressureSize = penSize_; brush_->pressureOpacity = penOpacity_; brush_->previousPressure = penPressure_;
     brush_->sparseBlank = sparseBlank;
     brush_->restore = restore; brush_->blank = blank; brush_->grown = grown; brush_->sourceRect = sourceRect;
     brush_->maskGrown = maskGrown; brush_->maskSourceRect = maskSourceRect;
@@ -2786,7 +2869,32 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
     const double spacing = softDabSpacing(radius, 1.0);
     QRect dirty = brush_->dirtyPixels;
     brush_->dirtyPixels = {};
-    if (brush_->samples.isEmpty()) {
+    if (brush_->pressureStroke) {
+        const QPointF first = brush_->samples.isEmpty() ? *current : brush_->previousPixel;
+        const double distance = QLineF(first, *current).length();
+        const int steps = std::max(1, int(std::ceil(distance / std::max(.5, radius * .08))));
+        for (int step = 0; step <= steps; ++step) {
+            const double t = double(step) / steps;
+            const QPointF center = first + (*current - first) * t;
+            const double pressure = brush_->previousPressure * (1 - t) + penPressure_ * t;
+            const double r = brush_->pressureSize ? std::max(.5, radius * pressure) : radius;
+            const double opacity = brush_->pressureOpacity ? pressure : 1;
+            if (pressure <= 0) continue;
+            const QRect bounds = brushPathBounds(center, center, r, brush_->coverage.size());
+            dirty |= bounds;
+            for (int y = bounds.top(); y <= bounds.bottom(); ++y) {
+                auto *row = brush_->coverage.scanLine(y);
+                for (int x = bounds.left(); x <= bounds.right(); ++x) {
+                    const double d = std::hypot(x + .5 - center.x(), y + .5 - center.y());
+                    double cover;
+                    if (brush_->hardness >= .999) cover = std::clamp(r + .5 - d, 0.0, 1.0);
+                    else { const double f = std::clamp((r - d) / std::max(.001, r * (1 - brush_->hardness)), 0.0, 1.0); cover = f * f * (3 - 2 * f); }
+                    row[x] = std::max(row[x], uchar(qRound(255 * cover * opacity)));
+                }
+            }
+        }
+        brush_->samples = {*current}; brush_->previousPressure = penPressure_;
+    } else if (brush_->samples.isEmpty()) {
         brush_->samples.push_back(*current);
         stampBrushCoverage(brush_->settledCoverage, *current, radius, brush_->hardness);
         stampBrushCoverage(brush_->coverage, *current, radius, brush_->hardness);
@@ -3986,10 +4094,17 @@ bool EditorSession::addAdjustment(const QString &kind, const QJsonObject &settin
         if (!layer.adjustment.contains(QStringLiteral("noiseMonochromatic"))) layer.adjustment.insert(QStringLiteral("noiseMonochromatic"), false);
         if (!layer.adjustment.contains(QStringLiteral("noiseSeed"))) layer.adjustment.insert(QStringLiteral("noiseSeed"), double(QRandomGenerator::global()->generate()));
     }
+    if (isVersion16Adjustment(*optKind) && !layer.adjustment.contains("filterLayerSettings")) {
+        const double w = document_->canvasSize.width(), h = document_->canvasSize.height();
+        layer.adjustment.insert("filterLayerSettings", QJsonObject{{"progressiveStart", QJsonArray{w / 2, h * .35}},
+            {"progressiveEnd", QJsonArray{w / 2, h}}, {"rgbSplitCenter", QJsonArray{w / 2, h / 2}},
+            {"rgbSplitReach", std::max(1.0, std::hypot(w, h) / 2)}});
+    }
     layer.adjustment.insert(QStringLiteral("kind"), kind);
     if (const Layer *active = activeLayer()) layer.parentId = active->group ? document_->activeLayerId : active->parentId;
     const int insertion = document_->activeLayerId ? indexOf(*document_->activeLayerId) + 1 : document_->layers.size();
     beginEdit(QStringLiteral("New %1 Adjustment").arg(kind));
+    if (isVersion16Adjustment(*optKind)) document_->formatVersion = std::max(document_->formatVersion, 16);
     if (isVersion9Adjustment(*optKind)) {
         document_->formatVersion = std::max(document_->formatVersion, 9);
     }

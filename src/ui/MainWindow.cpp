@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "ui/GifTimeline.h"
 #include "core/ToolDefaults.h"
 #include "core/SelectionOps.h"
 #include "io/ImageExporter.h"
@@ -66,6 +67,7 @@
 #include <QFormLayout>
 #include <QListWidget>
 #include <QFontComboBox>
+#include <QScreen>
 #include <QImageReader>
 #include <QKeySequence>
 #include <QLabel>
@@ -266,6 +268,51 @@ void installFontMenuPreviews(QFontComboBox *combo, const std::function<InlineTex
         if (InlineTextEditor *target = editor()) { target->endPreview(false); target->growPointText(); }
     }));
 }
+
+// Search stays above the scrolling list. Every installed family/style pair is available.
+class SearchFontCombo final : public QFontComboBox {
+public:
+    using QFontComboBox::QFontComboBox;
+    std::function<InlineTextEditor *()> editor;
+    void showPopup() override {
+        auto *popup = new QFrame(this, Qt::Popup); popup->setObjectName("fontSearchPopup"); popup->setAttribute(Qt::WA_DeleteOnClose);
+        auto *layout = new QVBoxLayout(popup); layout->setContentsMargins(6, 6, 6, 6);
+        auto *search = new QLineEdit(popup); search->setObjectName("fontSearch"); search->setPlaceholderText(tr("Search fonts")); search->setClearButtonEnabled(true); search->setMinimumHeight(30);
+        auto *list = new QListWidget(popup); list->setObjectName("fontSearchResults"); list->setMouseTracking(true);
+        layout->addWidget(search); layout->addWidget(list);
+        for (const QString &family : QFontDatabase::families()) for (const QString &style : QFontDatabase::styles(family)) {
+            const QString face = family + " " + style;
+            auto *item = new QListWidgetItem(face, list); item->setData(Qt::UserRole, face);
+            QFont font = QFontDatabase::font(family, style, fontInfo().pointSize());
+            const QFontMetrics metrics(font);
+            if (std::all_of(face.begin(), face.end(), [&](QChar c) { return c.isSpace() || metrics.inFont(c); })) item->setFont(font);
+        }
+        const auto choose = [this, list, popup](QListWidgetItem *item) {
+            if (!item) return;
+            const QString face = item->data(Qt::UserRole).toString();
+            { const QSignalBlocker blocker(this); setCurrentFont(textFontForFace(face, 12)); setEditText(face); setProperty("chosenFace", face); }
+            if (auto *target = editor ? editor() : nullptr) { target->endPreview(false); target->applyFace(face); target->growPointText(); }
+            popup->close();
+            if (auto *target = editor ? editor() : nullptr) target->setFocus(Qt::OtherFocusReason);
+        };
+        connect(list, &QListWidget::itemClicked, popup, choose); connect(list, &QListWidget::itemActivated, popup, choose);
+        connect(list, &QListWidget::itemEntered, popup, [this](QListWidgetItem *item) {
+            if (auto *target = editor ? editor() : nullptr) { const auto face = item->data(Qt::UserRole).toString(); target->previewLetterFormat([target, face] { target->applyFace(face); }); target->growPointText(); }
+        });
+        connect(search, &QLineEdit::textChanged, popup, [list](const QString &text) {
+            QListWidgetItem *first = nullptr;
+            for (int i = 0; i < list->count(); ++i) { auto *item = list->item(i); item->setHidden(!item->text().contains(text, Qt::CaseInsensitive)); if (!item->isHidden() && !first) first = item; }
+            list->setCurrentItem(first);
+        });
+        connect(search, &QLineEdit::returnPressed, popup, [list, choose] { choose(list->currentItem()); });
+        popup->installEventFilter(new PopupHideFilter(popup, [this] { if (auto *target = editor ? editor() : nullptr) { target->endPreview(false); target->growPointText(); } }));
+        const QRect available = screen()->availableGeometry();
+        popup->resize(340, std::min(460, available.height() - 40));
+        QPoint point = mapToGlobal(QPoint(0, height())); point.setX(std::clamp(point.x(), available.left(), std::max(available.left(), available.right() - popup->width())));
+        if (point.y() + popup->height() > available.bottom()) point.setY(std::max(available.top(), mapToGlobal(QPoint()).y() - popup->height()));
+        popup->move(point); popup->show(); search->setFocus();
+    }
+};
 
 class SnapSlider final : public QSlider {
 public:
@@ -1281,8 +1328,10 @@ MainWindow::MainWindow(QWidget *parent)
     shapeLineWidthField_ = numberField(transformBar, QStringLiteral("Width"), 5000, &shapeLineWidthLabel_, 1.0); shapeLineWidthField_->setObjectName(QStringLiteral("shapeLineWidth")); shapeLineWidthField_->setRange(1, 5000); shapeLineWidthField_->setValue(2); shapeLineWidthField_->setVisible(false);
     shapeLineWidthLabel_->setObjectName(QStringLiteral("shapeLineWidthLabel")); shapeLineWidthLabel_->setVisible(false); shapeLineWidthLabel_->setToolTip(tr("Stroke Width"));
     auto *shapeLineWidth = shapeLineWidthField_;
+    auto *lineStyle = new QComboBox(transformBar); lineStyle->setObjectName("shapeLineStyle"); lineStyle->addItems({"Solid", "Dotted", "Dashed", "Long Dash"}); lineStyle->hide();
+    auto *lineCap = new QComboBox(transformBar); lineCap->setObjectName("shapeLineCap"); lineCap->addItems({"Square", "Round"}); lineCap->hide();
     auto *shapeKind = new SegmentedControl({tr("Rectangle"), tr("Ellipse"), tr("Line")}, transformBar); shapeKind->setObjectName(QStringLiteral("shapeKind")); shapeKind->setVisible(false);
-    auto *textFont = new QFontComboBox(transformBar); textFont->setObjectName(QStringLiteral("textFont")); textFont->setFixedWidth(170); textFont->setEditable(true); textFont->setInsertPolicy(QComboBox::NoInsert); textFont->setMaxVisibleItems(16); textFont->setToolTip(tr("Type to search or open the font list")); textFont->setVisible(false);
+    auto *textFont = new SearchFontCombo(transformBar); textFont->editor = [this] { return inlineTextEditor(); }; textFont->setObjectName(QStringLiteral("textFont")); textFont->setFixedWidth(170); textFont->setEditable(true); textFont->setInsertPolicy(QComboBox::NoInsert); textFont->setMaxVisibleItems(16); textFont->setToolTip(tr("Type to search or open the font list")); textFont->setVisible(false);
     if (textFont->completer()) { textFont->completer()->setCaseSensitivity(Qt::CaseInsensitive); textFont->completer()->setCompletionMode(QCompleter::PopupCompletion); }
     if (textFont->lineEdit()) { textFont->lineEdit()->setPlaceholderText(tr("Search fonts")); textFont->lineEdit()->setClearButtonEnabled(false); }
     textSizeField_ = new QSpinBox(transformBar); textSizeField_->setObjectName(QStringLiteral("textSize")); textSizeField_->setRange(1, 2000); textSizeField_->setValue(48); textSizeField_->setSuffix(tr(" px")); textSizeField_->setFixedWidth(88); textSizeField_->setVisible(false);
@@ -1373,6 +1422,8 @@ MainWindow::MainWindow(QWidget *parent)
     brushOpacityField_ = numberField(transformBar, QStringLiteral("Opacity"), 100, &brushOpacityLabel_, 1.0);
     brushOpacityField_->setRange(1, 100); brushOpacityField_->setValue(100); brushOpacityField_->setSuffix(QStringLiteral(" %"));
     brushOpacityField_->setVisible(false); brushOpacityLabel_->setVisible(false);
+    auto *pressureSize = new QCheckBox(tr("Pen size"), transformBar); pressureSize->setObjectName("penSize"); pressureSize->setChecked(true); pressureSize->hide();
+    auto *pressureOpacity = new QCheckBox(tr("Pen opacity"), transformBar); pressureOpacity->setObjectName("penOpacity"); pressureOpacity->hide();
     blurRadiusField_ = numberField(transformBar, QStringLiteral("Radius"), 50, &blurRadiusLabel_, 0.5);
     blurRadiusField_->setRange(0.5, 50); blurRadiusField_->setDecimals(1); blurRadiusField_->setValue(blurRadius_); blurRadiusField_->setSuffix(QStringLiteral(" px"));
     blurRadiusField_->setObjectName(QStringLiteral("blurRadius")); blurRadiusLabel_->setObjectName(QStringLiteral("blurRadiusLabel"));
@@ -1420,7 +1471,7 @@ MainWindow::MainWindow(QWidget *parent)
     transformLayout->addGroup({sampling_});
     transformLayout->addGroup({brushMode, smearMode, healingMode, cropRatio});
     transformLayout->addGroup({shapeKind});
-    transformLayout->addGroup({shapeRadiusLabel_, shapeRadiusField_, smoothCorners, shapeLineWidthLabel_, shapeLineWidthField_});
+    transformLayout->addGroup({shapeRadiusLabel_, shapeRadiusField_, smoothCorners, shapeLineWidthLabel_, shapeLineWidthField_, lineStyle, lineCap});
     transformLayout->addGroup({brushSizeLabel_, brushSizeField_, brushHardnessLabel_, brushHardnessField_,
                                brushOpacityLabel_, brushOpacityField_, blurRadiusLabel_, blurRadiusField_, brushSmoothingLabel_, brushSmoothingField_});
     transformLayout->addGroup({cloneAligned});
@@ -1438,6 +1489,7 @@ MainWindow::MainWindow(QWidget *parent)
     textFont->setFixedWidth(210); textSize->setFixedWidth(70); textTracking->setFixedWidth(70); textLeading->setFixedWidth(70);
     transformLayout->addGroup({textStyleGroup});
     transformLayout->addGroup({textAlignment});
+    transformLayout->addGroup({pressureSize, pressureOpacity});
     transformLayout->addGroup({gradientShape});
     transformLayout->addGroup({gradientStyle});
     transformLayout->addGroup({gradientOpacityLabel_, gradientOpacityField_, gradientReverse});
@@ -1493,12 +1545,12 @@ MainWindow::MainWindow(QWidget *parent)
     toolScroll->setFrameShape(QFrame::NoFrame); toolScroll->setWidgetResizable(true);
     toolScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); toolScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     auto *toolHost = new QWidget(toolScroll); toolHost->setObjectName(QStringLiteral("toolRailTools"));
-    auto *toolLayout = new QVBoxLayout(toolHost); toolLayout->setContentsMargins(0, 0, 0, 0); toolLayout->setSpacing(5);
+    auto *toolLayout = new QGridLayout(toolHost); toolLayout->setContentsMargins(0, 0, 0, 0); toolLayout->setSpacing(5);
     const std::array<const char *, 15> tips = {"Move", "Marquee", "Lasso", "Magic Wand", "Crop", "Brush", "Healing", "Clone Stamp", "Blur", "Gradient", "Shape", "Text", "Eyedropper", "Hand", "Zoom"};
     const std::array<int, 15> iconKinds = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 11, 12, 23};
     QVector<QToolButton *> toolButtons;
     for (int i = 0; i < int(tips.size()); ++i) {
-        if (i == 5 || i == 12) toolLayout->addSpacing(4);
+
         auto *button = toolButton(toolHost, iconKinds[size_t(i)], tr(tips[size_t(i)]), i == 0);
         toolButtons.push_back(button);
         connect(button, &QToolButton::clicked, this, [this, i] {
@@ -1513,9 +1565,11 @@ MainWindow::MainWindow(QWidget *parent)
                 canvas_->setTool(tool);
             }
         });
-        toolLayout->addWidget(button, 0, Qt::AlignHCenter);
+        toolLayout->addWidget(button, i, 0, Qt::AlignHCenter);
     }
-    toolLayout->addStretch();
+    toolLayout->setRowStretch(15, 1);
+    toolScroll->viewport()->setObjectName("toolRailViewport");
+    toolScroll->viewport()->installEventFilter(this);
     toolScroll->setWidget(toolHost);
     railLayout->addWidget(toolScroll, 1);
     // Each tool's tooltip names its key, as it is set now in Keyboard Shortcuts ("Brush (B)").
@@ -1569,6 +1623,12 @@ MainWindow::MainWindow(QWidget *parent)
 
     canvas_ = new CanvasWidget(workspace);
     canvas_->setEditorSession(&session_);
+    const auto refreshPen = [this, pressureSize, pressureOpacity] {
+        const bool show = canvas_->property("penSeen").toBool() && (canvas_->tool() == CanvasWidget::Tool::Brush || canvas_->tool() == CanvasWidget::Tool::Eraser);
+        pressureSize->setVisible(show); pressureOpacity->setVisible(show);
+    };
+    connect(canvas_, &CanvasWidget::penUsed, this, [this, refreshPen] { canvas_->setProperty("penSeen", true); refreshPen(); });
+    connect(canvas_, &CanvasWidget::toolChanged, this, refreshPen);
     // Auto Select, the transform box and the pixel grid are the person's, not the project's: remembered across launches
     // (mac ToolDefaults).
     autoSelect->setChecked(ToolDefaults::boolean(QStringLiteral("autoSelect"), false));
@@ -1589,6 +1649,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::transformApplyRequested, this, [this] { finishPersistentTransform(true); });
     connect(shapeRadius, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeCornerRadius);
     connect(smoothCorners, &QCheckBox::toggled, canvas_, &CanvasWidget::setShapeSmoothing);
+    connect(lineStyle, &QComboBox::currentTextChanged, canvas_, &CanvasWidget::setShapeLineStyle);
+    connect(lineCap, &QComboBox::currentTextChanged, canvas_, &CanvasWidget::setShapeLineCap);
     connect(shapeLineWidth, qOverload<double>(&QDoubleSpinBox::valueChanged), canvas_, &CanvasWidget::setShapeLineWidth);
     connect(brushSizeField_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) { brushDiameter_ = value; canvas_->setBrushDiameter(value); });
     connect(canvas_, &CanvasWidget::brushTipDragged, this, [this](double diameter, double hardness) {
@@ -1616,6 +1678,8 @@ MainWindow::MainWindow(QWidget *parent)
         shapeRadiusLabel_->setVisible(isShape && kind == ShapeKind::Rectangle);
         findChild<QCheckBox *>(QStringLiteral("shapeSmoothing"))->setVisible(isShape && kind == ShapeKind::Rectangle);
         shapeLineWidth->setVisible(isShape && kind == ShapeKind::Line);
+        findChild<QComboBox *>("shapeLineStyle")->setVisible(isShape && kind == ShapeKind::Line);
+        findChild<QComboBox *>("shapeLineCap")->setVisible(isShape && kind == ShapeKind::Line);
         shapeLineWidthLabel_->setVisible(isShape && kind == ShapeKind::Line);
     });
     connect(canvas_, &CanvasWidget::shapeKindChanged, shapeKind, [shapeKind, shapeRadius, shapeLineWidth, this](ShapeKind kind) {
@@ -1625,6 +1689,8 @@ MainWindow::MainWindow(QWidget *parent)
         shapeRadiusLabel_->setVisible(isShape && kind == ShapeKind::Rectangle);
         findChild<QCheckBox *>(QStringLiteral("shapeSmoothing"))->setVisible(isShape && kind == ShapeKind::Rectangle);
         shapeLineWidth->setVisible(isShape && kind == ShapeKind::Line);
+        findChild<QComboBox *>("shapeLineStyle")->setVisible(isShape && kind == ShapeKind::Line);
+        findChild<QComboBox *>("shapeLineCap")->setVisible(isShape && kind == ShapeKind::Line);
         shapeLineWidthLabel_->setVisible(isShape && kind == ShapeKind::Line);
     });
     connect(marqueeKind, &SegmentedControl::currentIndexChanged, canvas_, [this](int index) { canvas_->setMarqueeElliptical(index == 1); });
@@ -1720,6 +1786,8 @@ MainWindow::MainWindow(QWidget *parent)
         shapeRadiusLabel_->setVisible(shapeRect);
         findChild<QCheckBox *>(QStringLiteral("shapeSmoothing"))->setVisible(shapeRect);
         shapeLineWidth->setVisible(shapeLine);
+        findChild<QComboBox *>("shapeLineStyle")->setVisible(shapeLine);
+        findChild<QComboBox *>("shapeLineCap")->setVisible(shapeLine);
         shapeLineWidthLabel_->setVisible(shapeLine);
         const bool text = tool == CanvasWidget::Tool::Text;
         textFont->setVisible(text);
@@ -1881,6 +1949,8 @@ MainWindow::MainWindow(QWidget *parent)
     canvasGrid->addWidget(horizontalRuler_, 0, 1);
     canvasGrid->addWidget(verticalRuler_, 1, 0);
     canvasGrid->addWidget(canvasStack_, 1, 1);
+    gifTimeline_ = new GifTimeline(session_, [this] { syncDocumentViews(); }, canvasContainer);
+    canvasGrid->addWidget(gifTimeline_, 2, 0, 1, 2);
     canvasGrid->setRowStretch(1, 1);
     canvasGrid->setColumnStretch(1, 1);
 
@@ -1906,6 +1976,19 @@ MainWindow::MainWindow(QWidget *parent)
     layerCount_ = new QLabel(QStringLiteral("0"), layerHeading); layerCount_->setObjectName(QStringLiteral("mutedLabel"));
     headingLayout->addWidget(layersTitle); headingLayout->addStretch(); headingLayout->addWidget(layerCount_);
     inspectorLayout->addWidget(layerHeading);
+    auto *layerSearch = new QLineEdit(inspector); layerSearch->setObjectName("layerSearch"); layerSearch->setPlaceholderText(tr("Search layers")); layerSearch->setClearButtonEnabled(true); layerSearch->setMinimumHeight(30);
+    auto *layerType = new QComboBox(layerHeading); layerType->setObjectName("layerTypeFilter"); layerType->addItems({"All", "Selected", "Images", "Text", "Shapes", "Adjustments", "Groups", "GIF"}); layerType->setMaximumWidth(105); headingLayout->insertWidget(1, layerType);
+    inspectorLayout->addWidget(layerSearch);
+    const auto filterLayers = [this, layerSearch, layerType] {
+        const auto selected = session_.selectedLayerIds();
+        const QSignalBlocker block(layerView_->selectionModel());
+        layerModel_->setFilter(layerSearch->text(), layerType->currentText(), selected);
+        for (int row = 0; row < layerModel_->rowCount(); ++row) {
+            const auto index = layerModel_->index(row, 0); const auto id = layerModel_->layerId(index);
+            if (id && selected.contains(*id)) layerView_->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+        }
+    };
+    connect(layerSearch, &QLineEdit::textChanged, this, filterLayers); connect(layerType, &QComboBox::currentTextChanged, this, filterLayers);
     auto *appearance = new QWidget(inspector); appearance->setObjectName(QStringLiteral("appearancePanel")); appearance->setFixedHeight(83);
     auto *appearanceLayout = new QVBoxLayout(appearance); appearanceLayout->setContentsMargins(12, 8, 12, 8); appearanceLayout->setSpacing(6);
     auto *blendRow = new QHBoxLayout; auto *blendLabel = new QLabel(tr("Blend"), appearance);
@@ -2163,6 +2246,9 @@ MainWindow::MainWindow(QWidget *parent)
         else if (kind == QStringLiteral("Color Balance")) colorBalanceDialog();
         else if (kind == QStringLiteral("Gaussian Blur")) gaussianBlurDialog();
         else if (kind == QStringLiteral("Motion Blur")) motionBlurDialog();
+        else if (kind == QStringLiteral("Progressive Blur")) progressiveBlurDialog();
+        else if (kind == QStringLiteral("Bloom / Glow")) bloomGlowDialog();
+        else if (kind == QStringLiteral("RGB Split")) filterLayerDialog(kind);
         else if (kind == QStringLiteral("Add Noise")) addNoiseDialog();
     });
     layerView_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -2410,12 +2496,15 @@ MainWindow::MainWindow(QWidget *parent)
     const auto explainRefusal = [this] { return refusePaint(session_, canvas_); };
     connect(canvas_, &CanvasWidget::brushStrokeStarted, this, [this, explainRefusal](const QPointF &point, bool erasing) {
         if (explainRefusal()) return;
+        if (gifTimeline_) gifTimeline_->stop();
         session_.setViewportZoom(canvas_->zoom());
         session_.setBrushSmoothing(brushSmoothing_);
+        session_.setPenInput(canvas_->usingPen() ? canvas_->penPressure() : 1, canvas_->usingPen() && findChild<QCheckBox *>("penSize")->isChecked(), canvas_->usingPen() && findChild<QCheckBox *>("penOpacity")->isChecked());
         session_.beginBrushStroke(point, session_.paletteColor(false), brushDiameter_, brushHardness_, brushOpacity_, erasing);
         canvas_->invalidateDocument();
     });
     connect(canvas_, &CanvasWidget::brushStrokeContinued, this, [this](const QPointF &point) {
+        session_.setPenInput(canvas_->usingPen() ? canvas_->penPressure() : 1, canvas_->usingPen() && findChild<QCheckBox *>("penSize")->isChecked(), canvas_->usingPen() && findChild<QCheckBox *>("penOpacity")->isChecked());
         session_.continueBrushStroke(point); canvas_->invalidateDocument();
     });
     connect(canvas_, &CanvasWidget::brushStrokeFinished, this, [this] {
@@ -2467,7 +2556,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(gradientReverse, &QCheckBox::toggled, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(gradientOpacityField_, &QDoubleSpinBox::valueChanged, canvas_, &CanvasWidget::refreshPendingGradient);
     connect(canvas_, &CanvasWidget::shapeCreated, this, [this](ShapeKind kind, const QRectF &rect, double strokeWidth, double cornerRadius, const std::optional<QPointF> &start, const std::optional<QPointF> &end) {
-        if (session_.addShape(kind, rect, session_.foregroundColor(), session_.foregroundColor(), strokeWidth, cornerRadius, start, end, canvas_->shapeSmoothing())) syncDocumentViews();
+        if (session_.addShape(kind, rect, session_.foregroundColor(), session_.foregroundColor(), strokeWidth, cornerRadius, start, end, canvas_->shapeSmoothing(), canvas_->shapeLineStyle(), canvas_->shapeLineCap())) syncDocumentViews();
     });
     const auto applyInlineTextFormat = [this, textFont, textSize, textTracking, textLeading, textAlignment] {
         auto *editor = inlineTextEditor();
@@ -2490,7 +2579,8 @@ MainWindow::MainWindow(QWidget *parent)
     };
     // The face applies to the selected letters (all the text when nothing is selected). The combo takes the focus,
     // but the editor keeps its selection, so the choice still lands on those letters.
-    connect(textFont, &QFontComboBox::currentFontChanged, this, [this, textBold, textItalic](const QFont &font) {
+    connect(textFont, &QFontComboBox::currentFontChanged, this, [this, textFont, textBold, textItalic](const QFont &font) {
+        textFont->setProperty("chosenFace", QVariant());
         auto *editor = inlineTextEditor();
         if (!editor) return;
         editor->endPreview(false);
@@ -2504,7 +2594,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(textLeading, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyInlineTextFormat](double) { applyInlineTextFormat(); });
     // Bold and Italic change the face of the selected letters (all the text when nothing is selected): a face's name
     // carries its weight and slant, so what is saved is what macOS Compositor would save.
-    const auto applyTraits = [this, textBold, textItalic] {
+    const auto applyTraits = [this, textFont, textBold, textItalic] {
+        textFont->setProperty("chosenFace", QVariant());
         auto *editor = inlineTextEditor();
         if (!editor) return;
         const QString current = editor->faceAtSelection().isEmpty() ? editor->fallbackFace : editor->faceAtSelection();
@@ -2604,7 +2695,9 @@ MainWindow::MainWindow(QWidget *parent)
         TextStyle style;
         style.content.clear();
         // New text starts as the controls say: face (with Bold and Italic in its name), size, spacing.
-        style.fontName = composeTextFace(textFont->currentFont().family(), textBold->isChecked(), textItalic->isChecked());
+        const QString chosenFace = textFont->property("chosenFace").toString();
+        style.fontName = !chosenFace.isEmpty() && chosenFace == textFont->currentText() ? chosenFace
+            : composeTextFace(textFont->currentFont().family(), textBold->isChecked(), textItalic->isChecked());
         style.tracking = textTracking->value();
         style.leading = textLeading->value();
         style.fontSize = textSize->value();
@@ -2994,7 +3087,7 @@ void MainWindow::createActions()
     openRecentMenu_->setObjectName(QStringLiteral("menuOpenRecent"));
     connect(openRecentMenu_, &QMenu::aboutToShow, this, &MainWindow::rebuildOpenRecentMenu);
     rebuildOpenRecentMenu();
-    auto *importAction = file->addAction(tr("&Import Images…"));
+    auto *importAction = file->addAction(tr("&Import…"));
     connect(importAction, &QAction::triggered, this, &MainWindow::importImages);
     auto *importFolder=file->addAction(tr("Import Folder as Layers…"));importFolder->setObjectName(QStringLiteral("cmdImportFolder"));
     connect(importFolder,&QAction::triggered,this,[this]{const QString folder=QFileDialog::getExistingDirectory(this,tr("Import Folder as Layers"));if(!folder.isEmpty())importImageFiles({folder});});
@@ -3178,10 +3271,12 @@ void MainWindow::createActions()
         static const QStringList allKinds{
             QStringLiteral("Hue/Saturation"), QStringLiteral("Levels"), QStringLiteral("Curves"),
             QStringLiteral("Exposure"), QStringLiteral("Gradient Map"), QStringLiteral("Grain"),
+            QStringLiteral("Invert"), QStringLiteral("Black & White"), QStringLiteral("Color Balance"),
             QStringLiteral("Add Noise"), QStringLiteral("Gaussian Blur"), QStringLiteral("Motion Blur"),
-            QStringLiteral("Invert"), QStringLiteral("Black & White"), QStringLiteral("Color Balance")
+            QStringLiteral("Progressive Blur"), QStringLiteral("Bloom / Glow"), QStringLiteral("RGB Split")
         };
         for (const QString &kind : allKinds) {
+            if (kind == "Add Noise") adjustments->addSeparator();
             if (!session_.canSaveAdjustment(kind)) continue;
             auto *act = adjustments->addAction(QString(kind).replace(QLatin1Char('&'), QStringLiteral("&&")) + (kind == QStringLiteral("Invert") ? QString() : QStringLiteral("…")));
             connect(act, &QAction::triggered, this, [this, kind] {
@@ -3209,7 +3304,10 @@ void MainWindow::createActions()
                 else if (kind == QStringLiteral("Color Balance")) colorBalanceDialog();
                 else if (kind == QStringLiteral("Gaussian Blur")) gaussianBlurDialog();
                 else if (kind == QStringLiteral("Motion Blur")) motionBlurDialog();
-                else if (kind == QStringLiteral("Add Noise")) addNoiseDialog();
+                else if (kind == QStringLiteral("Progressive Blur")) progressiveBlurDialog();
+        else if (kind == QStringLiteral("Bloom / Glow")) bloomGlowDialog();
+        else if (kind == QStringLiteral("RGB Split")) filterLayerDialog(kind);
+        else if (kind == QStringLiteral("Add Noise")) addNoiseDialog();
             });
         }
     };
@@ -3231,6 +3329,9 @@ void MainWindow::createActions()
         else if (kind == QStringLiteral("Color Balance")) colorBalanceDialog();
         else if (kind == QStringLiteral("Gaussian Blur")) gaussianBlurDialog();
         else if (kind == QStringLiteral("Motion Blur")) motionBlurDialog();
+        else if (kind == QStringLiteral("Progressive Blur")) progressiveBlurDialog();
+        else if (kind == QStringLiteral("Bloom / Glow")) bloomGlowDialog();
+        else if (kind == QStringLiteral("RGB Split")) filterLayerDialog(kind);
         else if (kind == QStringLiteral("Add Noise")) addNoiseDialog();
     });
     layerMenuActions->addSeparator();
@@ -3354,6 +3455,9 @@ void MainWindow::createActions()
     auto *gaussianBlur = filterMenu->addAction(tr("Gaussian Blur…"));
     auto *motionBlur = filterMenu->addAction(tr("Motion Blur…"));
     auto *vignetteAction = filterMenu->addAction(tr("Vignette…"));
+    auto *rgbSplitAction = filterMenu->addAction(tr("RGB Split…"));
+    rgbSplitAction->setObjectName("cmdRgbSplit");
+    connect(rgbSplitAction, &QAction::triggered, this, [this] { filterLayerDialog("RGB Split"); });
     auto *bloomGlowAction = filterMenu->addAction(tr("Bloom / Glow…"));
     auto *ditherAction = filterMenu->addAction(tr("Dither…"));
     auto *tonalContrastAction = filterMenu->addAction(tr("Tonal Contrast…"));
@@ -4957,6 +5061,7 @@ void MainWindow::vignetteDialog()
 
 void MainWindow::bloomGlowDialog()
 {
+    if (session_.activeLayer() && session_.activeLayer()->adjustment.value("kind").toString() == "Bloom / Glow") { filterLayerDialog("Bloom / Glow"); return; }
     Layer *active = session_.activeLayer();
     if (!active || active->group || active->image.isNull()) return;
     const QUuid target = active->id;
@@ -5619,7 +5724,7 @@ void MainWindow::resizeImageDialog()
     if (dialog.exec() != QDialog::Accepted) return;
     const Sampling modes[] = {Sampling::HighQuality, Sampling::Smooth, Sampling::Nearest};
     const QSize resultSize = draft->resample ? QSize(qRound(draft->width), qRound(draft->height)) : originalSize;
-    if (session_.resizeImage(resultSize, draft->resolution, modes[sampling->currentIndex()])) { syncDocumentViews(); canvas_->fitCanvas(); }
+    if (session_.resizeImage(resultSize, draft->resolution, modes[sampling->currentIndex()])) { const auto view = canvas_->viewState(); syncDocumentViews(); canvas_->restoreViewState(view); }
 }
 
 void MainWindow::resizeCanvasDialog()
@@ -5710,7 +5815,7 @@ void MainWindow::resizeCanvasDialog()
     case 5: background = extension; break;
     default: break;
     }
-    if (session_.resizeCanvas(QSize(qRound(draft->width), qRound(draft->height)), anchor->currentIndex(), background)) { syncDocumentViews(); canvas_->fitCanvas(); }
+    if (session_.resizeCanvas(QSize(qRound(draft->width), qRound(draft->height)), anchor->currentIndex(), background)) { const auto view = canvas_->viewState(); syncDocumentViews(); canvas_->restoreViewState(view); }
 }
 
 void MainWindow::cropDialog()
@@ -5780,15 +5885,15 @@ void MainWindow::newProject()
 
 void MainWindow::importImages()
 {
-    const QStringList paths = QFileDialog::getOpenFileNames(this, tr("Import Images"), {},
-        tr("Images, SVG, Photoshop and Camera RAW Files (*.png *.jpg *.jpeg *.webp *.exr *.hdr *.hif *.heic *.heif *.tif *.tiff *.svg *.svgz *.psd *.psb *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;Vector Graphics (*.svg *.svgz);;Photoshop Files (*.psd *.psb);;Camera RAW Files (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;All Files (*)"));
+    const QStringList paths = QFileDialog::getOpenFileNames(this, tr("Import…"), {},
+        tr("Images, PDF, SVG, Photoshop and Camera RAW Files (*.pdf *.gif *.png *.jpg *.jpeg *.webp *.exr *.hdr *.hif *.heic *.heif *.tif *.tiff *.svg *.svgz *.psd *.psb *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;Vector Graphics (*.svg *.svgz);;Photoshop Files (*.psd *.psb);;Camera RAW Files (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;All Files (*)"));
     importImageFiles(paths);
 }
 
 bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<QPointF> &requestedCenter)
 {
     QStringList expanded;
-    for(const QString &path:paths){if(QFileInfo(path).isDir()){const QDir dir(path);for(const auto &file:dir.entryList(QDir::Files,QDir::Name|QDir::IgnoreCase)){const QString suffix=QFileInfo(file).suffix().toLower();if(QStringList{QStringLiteral("png"),QStringLiteral("jpg"),QStringLiteral("jpeg"),QStringLiteral("webp"),QStringLiteral("tif"),QStringLiteral("tiff"),QStringLiteral("exr"),QStringLiteral("hdr"),QStringLiteral("heic"),QStringLiteral("heif"),QStringLiteral("hif"),QStringLiteral("svg"),QStringLiteral("svgz"),QStringLiteral("psd")}.contains(suffix)||RawImporter::matches(dir.filePath(file)))expanded<<dir.filePath(file);}}else expanded<<path;}
+    for(const QString &path:paths){if(QFileInfo(path).isDir()){const QDir dir(path);for(const auto &file:dir.entryList(QDir::Files,QDir::Name|QDir::IgnoreCase)){const QString suffix=QFileInfo(file).suffix().toLower();if(QStringList{QStringLiteral("pdf"),QStringLiteral("gif"),QStringLiteral("png"),QStringLiteral("jpg"),QStringLiteral("jpeg"),QStringLiteral("webp"),QStringLiteral("tif"),QStringLiteral("tiff"),QStringLiteral("exr"),QStringLiteral("hdr"),QStringLiteral("heic"),QStringLiteral("heif"),QStringLiteral("hif"),QStringLiteral("svg"),QStringLiteral("svgz"),QStringLiteral("psd")}.contains(suffix)||RawImporter::matches(dir.filePath(file)))expanded<<dir.filePath(file);}}else expanded<<path;}
 
     bool imported = false;
     QStringList failures;
@@ -5851,6 +5956,13 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
                 }
                 if (!confirmed) continue;
             }
+            if (const auto profile = CMYKProfile::fromData(result.cmykProfile)) CMYK::choose(*profile);
+            const auto boards = result.artboards();
+            if (!boards.isEmpty()) {
+                session_.endEdit();
+                for (const auto &[name, doc] : boards) { EditorSession opened; opened.setDocument(std::make_shared<Document>(doc), false); installInNewTab(std::move(opened), name); }
+                session_.beginEdit(QStringLiteral("Import Images")); imported = true; continue;
+            }
             if(const auto profile=CMYKProfile::fromData(result.cmykProfile))CMYK::choose(*profile);
             if (!session_.insertPhotoshop(result, QFileInfo(path).completeBaseName(), center, &psdError)) {
                 failures << tr("%1: %2").arg(QFileInfo(path).fileName(), psdError);
@@ -5860,6 +5972,18 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
             continue;
         }
 
+        if (suffix == QStringLiteral("gif")) {
+            QString error;
+            if (session_.insertGif(path, center, &error)) imported = true;
+            else failures << tr("%1: %2").arg(QFileInfo(path).fileName(), error);
+            continue;
+        }
+        if (suffix == QStringLiteral("pdf")) {
+            QString error;
+            if (session_.insertPdf(path, center, &error)) imported = true;
+            else failures << tr("%1: %2").arg(QFileInfo(path).fileName(), error);
+            continue;
+        }
         if (SvgImporter::matches(path)) {
             QString svgError;
             if (!session_.insertSvg(path, center, &svgError)) {
@@ -6897,6 +7021,11 @@ bool MainWindow::openProject(const QString &requestedPath)
             }
             if (!confirmed) return false;
         }
+        const auto boards = result.artboards();
+        if (!boards.isEmpty()) {
+            for (const auto &[name, doc] : boards) { EditorSession opened; opened.setDocument(std::make_shared<Document>(doc), false); installInNewTab(std::move(opened), name); }
+            return true;
+        }
         EditorSession opened;
         if (!opened.insertPhotoshop(result, QFileInfo(path).completeBaseName(), std::nullopt, &psdError)) {
             showMessage(this, tr("Could Not Open Photoshop File"), psdError);
@@ -6915,6 +7044,18 @@ bool MainWindow::openProject(const QString &requestedPath)
         return true;
     }
 
+    if (suffix == QStringLiteral("gif")) {
+        EditorSession opened; QString error;
+        if (!opened.insertGif(path, std::nullopt, &error)) { showMessage(this, tr("Could Not Open GIF"), error); return false; }
+        installInNewTab(std::move(opened), QFileInfo(path).completeBaseName()); return true;
+    }
+    if (suffix == QStringLiteral("pdf")) {
+        EditorSession opened;
+        QString error;
+        if (!opened.insertPdf(path, std::nullopt, &error)) { showMessage(this, tr("Could Not Open PDF"), error); return false; }
+        installInNewTab(std::move(opened), QFileInfo(path).completeBaseName());
+        return true;
+    }
     if (SvgImporter::matches(path)) {
         EditorSession opened;
         QString svgError;
@@ -7206,6 +7347,7 @@ void MainWindow::selectLayer(const QModelIndex &index)
 
 void MainWindow::updateInspector()
 {
+    if (gifTimeline_) gifTimeline_->refresh(canvasOnly_);
     if (!document_ || !document_->activeLayerId) {
         const std::array<QWidget *, 14> fields = {xLabel_, xField_, yLabel_, yField_, widthLabel_, widthField_, heightLabel_, heightField_, scaleField_, rotationLabel_, rotationField_, sampling_, blendMode_, opacitySlider_};
         for (QWidget *field : fields) {
@@ -7326,7 +7468,7 @@ void MainWindow::updateCommandStates()
         for (const char *name : {"cmdExpand", "cmdContract", "commandFeatherSelection"}) enabled(name, hasSelection);
         for (const char *name : {"cmdLevels", "cmdHueSaturation", "cmdCurves"}) enabled(name, adjustableOrLive);
         for (const char *name : {"cmdExposure", "cmdGradientMap", "cmdGrain", "cmdBlackWhite", "cmdColorBalance", "cmdAddNoise", "cmdLens", "cmdCameraRaw",
-                                 "cmdGaussianBlur", "cmdMotionBlur", "cmdProgressiveBlur", "cmdScanlines", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdRemoveBackground"}) enabled(name, adjustable);
+                                 "cmdRgbSplit", "cmdGaussianBlur", "cmdMotionBlur", "cmdProgressiveBlur", "cmdScanlines", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdRemoveBackground"}) enabled(name, adjustable);
         enabled("cmdVignette", vignetteOk);
         enabled("cmdLastFilter", session_.hasLastFilter() && (adjustable || (vignetteOk && session_.lastFilterName() == QStringLiteral("Vignette"))));
         const bool depthOk = paintOk && single && !maskTarget && !editingText && active && !active->text;
@@ -7396,6 +7538,7 @@ void MainWindow::toggleCanvasOnly()
         return;
     }
     canvasOnly_ = entering;
+    if (gifTimeline_) gifTimeline_->refresh(canvasOnly_);
     for (const char *name : {"tabBar", "transformBar", "toolRail", "inspector", "bottomStatus"})
         if (auto *widget = findChild<QWidget *>(QLatin1String(name))) widget->setVisible(!entering);
     // Collapsed rather than hidden, so the menus' shortcuts keep working.
@@ -7496,6 +7639,8 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
     }
     {
         const QSignalBlocker blocker(layerView_->selectionModel());
+        if (auto *type = findChild<QComboBox *>("layerTypeFilter"); type && type->currentText() == "Selected")
+            layerModel_->setFilter(findChild<QLineEdit *>("layerSearch")->text(), "Selected", session_.selectedLayerIds());
         layerView_->selectionModel()->clearSelection();
         QModelIndex primaryIndex;
         if (document_) {
@@ -7754,6 +7899,21 @@ void MainWindow::syncHeldModifiers()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched->objectName() == "toolRailViewport" && event->type() == QEvent::Resize) {
+        auto *host = findChild<QWidget *>("toolRailTools"); auto *rail = findChild<QWidget *>("toolRail");
+        auto *grid = host ? qobject_cast<QGridLayout *>(host->layout()) : nullptr;
+        if (grid) {
+            auto buttons = host->findChildren<QToolButton *>(QString(), Qt::FindDirectChildrenOnly);
+            const int cellHeight = buttons.isEmpty() ? 32 : buttons.first()->height();
+            const int columns = static_cast<QWidget *>(watched)->height() < buttons.size() * (cellHeight + grid->spacing()) ? 2 : 1;
+            if (host->property("columns").toInt() != columns) {
+                host->setProperty("columns", columns);
+                for (int row = 0; row <= 15; ++row) grid->setRowStretch(row, 0);
+                for (int i = 0; i < buttons.size(); ++i) { grid->removeWidget(buttons[i]); grid->addWidget(buttons[i], i / columns, i % columns, Qt::AlignHCenter); }
+                grid->setRowStretch((buttons.size() + columns - 1) / columns, 1); rail->setFixedWidth(columns == 2 ? 94 : 52);
+            }
+        }
+    }
     // Escape leaves fullscreen once there's nothing in progress for it to cancel first, and isn't meant for a text field.
     if (event->type() == QEvent::KeyPress && canvasOnly_ && !QApplication::activeModalWidget() && QApplication::activeWindow() == this) {
         const auto *key = static_cast<QKeyEvent *>(event);

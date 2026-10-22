@@ -541,6 +541,7 @@ private slots:
         QVERIFY(r.session().insertImage(image, "Halves")); r.window.syncDocumentViews();
         r.canvas()->setZoom(1.0); r.canvas()->setTool(CanvasWidget::Tool::Clone);
         r.window.findChild<QDoubleSpinBox *>("brushSize")->setValue(30); r.window.findChild<QDoubleSpinBox *>("brushHardness")->setValue(100);
+        QTest::qWait(50); // Let the adaptive tool rail finish laying out before mapping pointer coordinates.
         r.press(30, 50, Qt::AltModifier); r.release(30, 50, Qt::AltModifier);       // source in the red half
         QTest::mouseMove(r.canvas(), r.at(150, 50)); QCoreApplication::processEvents();
         const QImage shot = r.canvas()->grab().toImage();
@@ -801,6 +802,7 @@ private slots:
     {
         Rig r; setup(r, 2000, 1500);
         r.canvas()->setTool(CanvasWidget::Tool::Marquee);
+        QTest::qWait(50); // The selected tool can change the options bar and rail geometry.
         const QPointF before = r.canvas()->canvasRect().topLeft();
         r.press(10, 10);
         send(r.canvas(), QEvent::MouseMove, QPoint(r.canvas()->width() + 30, r.canvas()->height() / 2), Qt::NoButton, Qt::LeftButton);

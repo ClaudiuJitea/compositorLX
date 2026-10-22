@@ -1,4 +1,5 @@
 #include "rendering/RasterOperations.h"
+#include "rendering/RgbSplit.h"
 #include "core/CameraRawTables.h"
 #include "rendering/DeepImage.h"
 #include "PatchPixels.h"
@@ -397,6 +398,8 @@ QImage RasterOperations::adjustment(const QImage &image, const QJsonObject &sett
                                     const QPointF &origin, double unitsPerPixel)
 {
     const QString kind = settings.value(QStringLiteral("kind")).toString();
+    if (kind == "Progressive Blur" || kind == "Bloom / Glow" || kind == "RGB Split")
+        return applyFilterLayer(image, settings, origin, unitsPerPixel);
     if (kind == QStringLiteral("Hue/Saturation")) {
         const QJsonObject hsv = settings.value(QStringLiteral("hsvSettings")).toObject();
         HueSaturationSettings value(hsv.value(QStringLiteral("hue")).toDouble(settings.value(QStringLiteral("hue")).toDouble()),

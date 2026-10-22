@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/DocumentLimits.h"
+#include "core/GifAnimation.h"
 
 #include <QImage>
 #include <QJsonObject>
@@ -641,6 +642,8 @@ struct LayerShapeStyle {
     double cornerRadius = 0.0;
     std::optional<bool> smoothing;
     std::optional<double> lineWidth;
+    std::optional<QString> lineStyle;
+    std::optional<QString> lineCap;
     std::optional<QPointF> start;
     std::optional<QPointF> end;
 
@@ -649,8 +652,11 @@ struct LayerShapeStyle {
         if (!std::isfinite(green) || green < 0.0 || green > 1.0) return false;
         if (!std::isfinite(blue) || blue < 0.0 || blue > 1.0) return false;
         if (!std::isfinite(cornerRadius) || cornerRadius < 0.0) return false;
+        if (lineStyle && !QStringList{"Solid", "Dotted", "Dashed", "Long Dash"}.contains(*lineStyle)) return false;
+        if (lineCap && *lineCap != "Square" && *lineCap != "Round") return false;
+        if (kind != ShapeKind::Line && (lineStyle || lineCap)) return false;
         if (kind == ShapeKind::Line) {
-            if (!lineWidth || !std::isfinite(*lineWidth) || *lineWidth < 0.0 || *lineWidth > 500.0) return false;
+            if (!lineWidth || !std::isfinite(*lineWidth) || *lineWidth < 0.0 || *lineWidth > 5000.0) return false;
             if (!start || !std::isfinite(start->x()) || !std::isfinite(start->y())) return false;
             if (!end || !std::isfinite(end->x()) || !std::isfinite(end->y())) return false;
         }
@@ -672,7 +678,10 @@ enum class AdjustmentKind {
     // Version 9 additions
     GaussianBlur,
     MotionBlur,
-    AddNoise
+    AddNoise,
+    ProgressiveBlur,
+    BloomGlow,
+    RgbSplit
 };
 
 struct LayerTransform {
@@ -707,6 +716,7 @@ struct Layer {
     QString name;
     bool visible = true;
     LayerTransform transform;
+    std::optional<GifAnimation> gif;
     QString imageFile;
     QImage image;
     std::optional<QUuid> parentId;
@@ -773,5 +783,6 @@ struct Document {
 [[nodiscard]] QString adjustmentKindToString(AdjustmentKind kind);
 [[nodiscard]] std::optional<AdjustmentKind> adjustmentKindFromString(const QString &value);
 [[nodiscard]] bool isVersion9Adjustment(AdjustmentKind kind);
+[[nodiscard]] bool isVersion16Adjustment(AdjustmentKind kind);
 
 } // namespace compositor

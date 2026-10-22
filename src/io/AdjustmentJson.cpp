@@ -98,6 +98,24 @@ QJsonObject completedAdjustmentJson(const QJsonObject &adjustment)
 
 QString adjustmentJsonError(const QJsonObject &adjustment)
 {
+    if (adjustment.contains("filterLayerSettings")) {
+        if (!adjustment.value("filterLayerSettings").isObject()) return QStringLiteral("Invalid filter layer settings");
+        const auto f = adjustment.value("filterLayerSettings").toObject();
+        struct Range { const char *key; double lo, hi; };
+        for (const auto &r : {Range{"progressiveFrom", 0, 250}, Range{"progressiveTo", 0, 250},
+            Range{"bloomAmount", 0, 100}, Range{"bloomRadius", 1, 150}, Range{"rgbSplitDistance", 0, 200},
+            Range{"rgbSplitBlur", 0, 400}, Range{"rgbSplitAngle", -180, 180}, Range{"rgbSplitReach", 1, 1000000}}) {
+            const auto v = f.value(QLatin1String(r.key));
+            if (!v.isUndefined() && (!finite(v) || v.toDouble() < r.lo || v.toDouble() > r.hi)) return QStringLiteral("Filter layer parameter out of range: %1").arg(QLatin1String(r.key));
+        }
+        for (const char *key : {"progressiveStart", "progressiveEnd", "rgbSplitCenter"}) if (f.contains(QLatin1String(key))) {
+            const auto p = f.value(QLatin1String(key)).toArray();
+            if (p.size() != 2 || !finite(p[0]) || !finite(p[1]) || std::abs(p[0].toDouble()) > 1000000 || std::abs(p[1].toDouble()) > 1000000)
+                return QStringLiteral("Invalid filter layer point");
+        }
+        for (const char *key : {"progressiveRadial", "progressiveInverted", "rgbSplitRadial"})
+            if (f.contains(QLatin1String(key)) && !f.value(QLatin1String(key)).isBool()) return QStringLiteral("Invalid filter layer toggle");
+    }
     const QJsonObject value = completedAdjustmentJson(adjustment);
     const auto number = [&](const QJsonObject &object, const char *key) { return object.value(QLatin1String(key)).toDouble(); };
     const auto inRange = [](double v, double lo, double hi) { return std::isfinite(v) && v >= lo && v <= hi; };

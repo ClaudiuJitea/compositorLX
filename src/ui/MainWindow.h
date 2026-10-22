@@ -34,6 +34,7 @@ class QMenu;
 
 namespace compositor {
 
+class GifTimeline;
 class CanvasWidget;
 class ColorPickerDialog;
 class CanvasRulerWidget;
@@ -215,6 +216,7 @@ private:
     void ditherDialog();
     void scanlinesDialog();
     void progressiveBlurDialog();
+    void filterLayerDialog(const QString &kind);
     void searchCommands();
     int runPortDialog(QDialog &dialog);
     ScanlinesSettings scanlinesSettings_;
@@ -252,6 +254,7 @@ private:
     bool copyLayersToTab(const QVector<QUuid> &ids, int targetIndex, bool newTab, const std::optional<QPointF> &point = std::nullopt,
                          const QString &historyName = QString());
 
+    GifTimeline *gifTimeline_ = nullptr;
     CanvasWidget *canvas_ = nullptr;
     CanvasRulerCornerWidget *rulerCorner_ = nullptr;
     CanvasRulerWidget *horizontalRuler_ = nullptr;

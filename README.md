@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.5.3-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.5.5-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -21,7 +21,24 @@
   <img src="docs/screenshots/editor.png" alt="CompositorLX editor with layered composition, tools, and layer stack" width="920">
 </p>
 
-CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v14), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
+CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v17), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
+
+## What's new in version 0.5.5
+
+Ports the feature additions through Compositor 1.5.5 and the subsequent GIF, layer-search, and adaptive-toolbar changes in upstream `bd76fc9`.
+
+- **Animated GIF layers**: a frame strip with playback, frame selection, painting, duplication, deletion, original or custom delays, and a shared-delay option. Save editable animations in `.comp` projects and export composited GIFs with looping and transparency.
+- **PDF import**: every page becomes a layer, at 300 DPI in a new document or fitted to the current canvas.
+- **RGB Split**: linear or radial spectral dispersion with blur streaks; Split to Layers produces Red, Green, Blue, and Alpha grayscale layers.
+- **Channel Pack** in Export As: select layers, groups, black, or white for each PNG channel. Color data survives even where alpha is zero.
+- **Filter layers**: Progressive Blur, Bloom / Glow, and RGB Split remain editable, with masks, opacity, undo, and project round trips.
+- **Lines**: solid, dotted, dashed, or long-dash patterns with square or round caps; styled lines survive project saves and scaling.
+- **Pen pressure**: independent brush size and opacity controls appear after a tablet pen is used.
+- **Workspace**: searchable font faces, layer name/type search, automatic two-column tools on short windows, and physical tool-key fallback for non-Latin layouts.
+- **PSD artboards** open in separate tabs. Image Size and Canvas Size preserve the current zoom; new imports initially fit at no more than 100%.
+- **Reliability**: corrected double-counting in the project-save pixel budget; GIF assets participate in history memory accounting and project validation.
+
+See [the port audit and verification notes](docs/UPSTREAM_SYNC_1.5.5.md) for implementation details and platform differences.
 
 ## What's new in version 0.5.3
 
@@ -147,24 +164,26 @@ Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Spa
 - **Image Trim**: trim transparent borders or sample edge colors
 - Multiple projects in tabs, with cross-tab layer copy and recovery
 - Crop with snapping and Alt symmetry, plus Canvas Size and Image Size
-- **Expanded format support**: native `.comp` (v1–v14 compatibility), Adobe Photoshop `.psd`, vector `.svg` / `.svgz`, Camera RAW, PNG, JPEG, TIFF, and HEIC/HEIF
+- **Expanded format support**: native `.comp` (v1–v17 compatibility), Adobe Photoshop `.psd`, vector `.svg` / `.svgz`, Camera RAW, PNG, JPEG, TIFF, and HEIC/HEIF
 - **Customizable keyboard shortcuts** dialog with searchable actions and desktop-conflict checks
 - Light, dark and follow-system themes using the system font and accent colour
 - External file change detection, conflict warning, and atomic crash-resilient saving
 
 ## Install
 
+The 0.5.5 binaries were built on Ubuntu 26.04 and require glibc 2.43 or newer. The Debian package uses system dependencies; the AppImage bundles its other runtime libraries. Build from source for older distributions.
+
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.5.3-x86_64.AppImage
-./CompositorLX-0.5.3-x86_64.AppImage
+chmod +x CompositorLX-0.5.5-x86_64.AppImage
+./CompositorLX-0.5.5-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.5.3_amd64.deb
+sudo apt install ./compositorlx_0.5.5_amd64.deb
 compositor-lx
 ```
 
@@ -184,7 +203,8 @@ The editable suite icon is `packaging/icons/compositor-lx.svg`. After changing i
 
 ```sh
 sudo apt install qt6-base-dev qt6-image-formats-plugins libheif-dev libraw-dev zlib1g-dev \
-    libopenexr-dev libimath-dev liblcms2-dev libjpeg-dev libtiff-dev liblensfun-dev liblensfun-data-v1 cmake ninja-build
+    libopenexr-dev libimath-dev liblcms2-dev libjpeg-dev libtiff-dev liblensfun-dev liblensfun-data-v1 \
+    libpoppler-qt6-dev libgif-dev cmake ninja-build
 ```
 
 ```sh
@@ -206,7 +226,7 @@ cmake --install build --prefix "$HOME/.local"
 | Path | What it is |
 | --- | --- |
 | `src/core` | Document, history, camera RAW, image trim, and editor commands |
-| `src/io` | `.comp` v1–v14 reader/writer, PSD, SVG, and RAW importers, export |
+| `src/io` | `.comp` v1–v17 reader/writer, PSD, SVG, and RAW importers, export |
 | `src/rendering` | Compositing, layer effects, caches, filters, local subject removal |
 | `src/ui` | Qt Widgets editor, canvas, rulers, layer effects, shortcuts, tools |
 | `tests/` | Automated test suites: project format, camera raw, SVG/PSD import, layers, selections, paint, filters, text, IO and UI |
@@ -217,6 +237,8 @@ cmake --install build --prefix "$HOME/.local"
 The original macOS app remains the behavior and file-format reference. Linux-specific UI and packaging live in this repository.
 
 ## Version history
+
+- **v0.5.5**: Editable GIF layers and export, PDF import, RGB Split and channel packing, new filter layers, styled lines, pen pressure, search, adaptive tools, PSD artboards, and project formats 15–17.
 
 - **v0.5.3**: Sync with macOS Compositor 1.5.3 (16-bit and HDR layers, CMYK proofing and export, Export As, Progressive Blur, Scanlines, Last Filter, Rotate Canvas, smooth corners, Camera Raw re-measured, RAW noise reduction and lens profiles, Search Commands, fullscreen canvas, navigator, formats v12–v14) and a commit-by-commit parity audit.
 - **v0.4.5**: Native Linux polish (light/dark/system themes, system fonts, native dialogs, Wayland and HiDPI fixes, Alt-gesture alternatives, recent projects, Help menu) and macOS behaviour-parity fixes with broad test coverage.
@@ -229,3 +251,5 @@ The original macOS app remains the behavior and file-format reference. Linux-spe
 ## License
 
 MIT. CompositorLX is a Linux port of [Compositor](https://github.com/robbietilton/Compositor) by Wonder Assembly LLC. Pixel kernels under `vendor/compositor-rendering/` come from that project. ONNX Runtime and U²-Net keep their own license files in packaged builds.
+
+PDF rendering uses Poppler (GPL-2.0-or-later); GIF encoding uses giflib (MIT). The application source retains its MIT license; binaries linked with Poppler are distributed under GPL-2.0-or-later. Dependency notices are included under `packaging/licenses/` and in installed packages.

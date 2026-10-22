@@ -911,6 +911,7 @@ class TestUpstream15 : public QObject
             auto *format = dialog->findChild<QComboBox *>("exportFormat");
             QCOMPARE(format->findText("OpenEXR"), -1);
             QCOMPARE(format->itemText(0), QStringLiteral("JPEG"));
+            QVERIFY(format->findText("GIF") > format->findText("PDF"));
             format->setCurrentIndex(format->findText("PNG"));
             QApplication::processEvents();
             QVERIFY(!dialog->findChild<QCheckBox *>("exportSixteenBit")->isVisibleTo(dialog));

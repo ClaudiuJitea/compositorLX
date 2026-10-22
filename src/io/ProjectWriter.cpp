@@ -1,4 +1,5 @@
 #include "io/ProjectWriter.h"
+#include "io/GifIO.h"
 #include "io/HdrImage.h"
 #include "io/ImageExporter.h"
 #include "rendering/DeepImage.h"
@@ -88,6 +89,8 @@ QJsonObject shapeObject(const LayerShapeStyle &style)
     obj.insert(QStringLiteral("blue"), style.blue);
     obj.insert(QStringLiteral("cornerRadius"), style.cornerRadius);
     if (style.smoothing) obj.insert(QStringLiteral("smoothing"), *style.smoothing);
+    if (style.lineStyle) obj.insert(QStringLiteral("lineStyle"), *style.lineStyle);
+    if (style.lineCap) obj.insert(QStringLiteral("lineCap"), *style.lineCap);
     if (style.lineWidth) obj.insert(QStringLiteral("lineWidth"), *style.lineWidth);
     if (style.start) obj.insert(QStringLiteral("start"), QJsonArray{style.start->x(), style.start->y()});
     if (style.end) obj.insert(QStringLiteral("end"), QJsonArray{style.end->x(), style.end->y()});
@@ -284,6 +287,8 @@ void validateAdjustmentSettings(const QJsonObject &adj, int version)
     const auto kind = adjustmentKindFromString(kindStr);
     if (!kind) fail(QStringLiteral("unknown adjustment kind: %1").arg(kindStr));
 
+    if ((isVersion16Adjustment(*kind) || adj.contains(QStringLiteral("filterLayerSettings"))) && version < 16)
+        fail(QStringLiteral("Filter layers require format version 16"));
     if (isVersion9Adjustment(*kind) && version < 9) {
         fail(QStringLiteral("%1 adjustment requires format version 9; version %2 cannot contain blurs or noise.").arg(kindStr).arg(version));
     }
@@ -354,6 +359,7 @@ int ProjectWriter::minimumRequiredVersion(const Document &document)
 {
     int minRequired = 1;
     for (const Layer &layer : document.layers) {
+        if (layer.gif) minRequired = std::max(minRequired, 17);
         if (layer.group || layer.parentId.has_value()) minRequired = std::max(minRequired, 2);
         if (layer.opacity != 1.0 || layer.blendMode != BlendMode::Normal) minRequired = std::max(minRequired, 3);
         if (!layer.mask.isNull() || !layer.maskFile.isEmpty()) {
@@ -367,6 +373,10 @@ int ProjectWriter::minimumRequiredVersion(const Document &document)
                 minRequired = std::max(minRequired, 9);
             }
         }
+        if (layer.adjustment.contains(QStringLiteral("filterLayerSettings")) ||
+            (adjustmentKindFromString(layer.adjustment.value("kind").toString()) &&
+             isVersion16Adjustment(*adjustmentKindFromString(layer.adjustment.value("kind").toString())))) minRequired = std::max(minRequired, 16);
+        if (layer.shapeStyle && (layer.shapeStyle->lineStyle || layer.shapeStyle->lineCap)) minRequired = std::max(minRequired, 15);
         if (layer.group && layer.opacity < 0.999999) minRequired = std::max(minRequired, 8);
         if (layer.shapeStyle && layer.shapeStyle->smoothing.value_or(false)) minRequired = std::max(minRequired, 14);
         if (DeepImage::isDeep(layer.image)) minRequired = std::max(minRequired, DeepImage::isHDR(layer.image) ? 13 : 12);
@@ -379,7 +389,7 @@ int ProjectWriter::minimumRequiredVersion(const Document &document)
 int ProjectWriter::computeTargetVersion(const Document &document)
 {
     const int minRequired = minimumRequiredVersion(document);
-    return (document.formatVersion >= 1 && document.formatVersion <= 14)
+    return (document.formatVersion >= 1 && document.formatVersion <= 17)
                ? document.formatVersion
                : std::max(minRequired, 9);
 }
@@ -524,6 +534,7 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
         }
     }
 
+    for (const auto &layer : document.layers) if (layer.gif) for (const auto &image : layer.gif->pixels) totalImagePixels += qint64(image.width()) * image.height();
     if (totalImagePixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the image pixel limit is exceeded"));
     if (totalMaskPixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the mask pixel limit is exceeded"));
 
@@ -571,6 +582,17 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
             value.insert(QStringLiteral("adjustment"), completedAdjustmentJson(layer.adjustment));
         }
 
+        if (layer.gif) {
+            const auto &a = *layer.gif;
+            if (targetVersion < 17 || !a.valid() || layer.group || !layer.adjustment.isEmpty() || layer.text || layer.shapeStyle || layer.image.isNull())
+                fail(QStringLiteral("Invalid GIF layer or format version"));
+            const QString id = uuid(layer.id);
+            QFile source(root.filePath("images/" + id + ".gif"));
+            if (!source.open(QIODevice::WriteOnly) || source.write(a.source->data) != a.source->data.size()) fail(QStringLiteral("Could not save GIF source"));
+            for (auto it = a.pixels.begin(); it != a.pixels.end(); ++it)
+                if (!DeepImage::canonical(it.value()).save(root.filePath("images/" + id + QStringLiteral(".frame-%1.png").arg(it.key())), "PNG")) fail(QStringLiteral("Could not save GIF frame"));
+            value.insert("gif", GifIO::metadata(a, id));
+        }
         if (layer.text.has_value()) {
             value.insert(QStringLiteral("text"), textObject(*layer.text));
         }
@@ -587,13 +609,13 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
 
         if(DeepImage::isDeep(layer.image)&&targetVersion<(DeepImage::isHDR(layer.image)?13:12))
             fail(QStringLiteral("The layer image requires a newer project format version."));
+        if (layer.shapeStyle && (layer.shapeStyle->lineStyle || layer.shapeStyle->lineCap) && targetVersion < 15)
+            fail(QStringLiteral("Line styles require format version 15"));
         if(layer.shapeStyle&&layer.shapeStyle->smoothing.value_or(false)&&targetVersion<14)
             fail(QStringLiteral("Smooth corners require project format version 14."));
 
         // Save image if present
         if (!layer.image.isNull() && !layer.group) {
-            totalImagePixels += qint64(layer.image.width()) * layer.image.height();
-            if (totalImagePixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the image pixel limit is exceeded"));
             const bool hdr=DeepImage::isHDR(layer.image);
             const QString fileName=uuid(layer.id)+(hdr?QStringLiteral(".exr"):QStringLiteral(".png"));
             const QString path=root.filePath(QStringLiteral("images/")+fileName);
@@ -607,7 +629,6 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
         // Save mask if present
         const bool canHaveMask = !layer.mask.isNull() && (targetVersion >= 6 || (targetVersion >= 4 && !layer.group));
         if (canHaveMask) {
-            totalMaskPixels += qint64(layer.mask.width()) * layer.mask.height();
             if (totalMaskPixels > DocumentLimits::documentPixelBudget()) fail(QStringLiteral("the mask pixel limit is exceeded"));
             const QString maskFileName = uuid(layer.id) + QStringLiteral(".mask.png");
             if (!layer.mask.save(root.filePath(QStringLiteral("images/") + maskFileName), "PNG")) {

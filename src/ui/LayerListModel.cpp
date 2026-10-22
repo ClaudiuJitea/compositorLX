@@ -77,6 +77,11 @@ void LayerListModel::setDocument(std::shared_ptr<Document> document, bool reset)
     endResetModel();
 }
 
+void LayerListModel::setFilter(const QString &name, const QString &type, const QSet<QUuid> &selected)
+{
+    beginResetModel(); filterName_ = name.trimmed(); filterType_ = type; filterSelected_ = selected; endResetModel();
+}
+
 QVector<LayerListModel::Item> LayerListModel::visibleItems() const
 {
     QVector<Item> result;
@@ -113,13 +118,36 @@ QVector<int> LayerListModel::visibleLayerIndexes() const
     if (!document_) return result;
     QHash<QUuid, const Layer *> byId;
     for (const Layer &layer : document_->layers) byId.insert(layer.id, &layer);
+    QSet<QUuid> matches, parentsOfMatches;
+    if (isFiltered()) {
+        for (const auto &layer : document_->layers) {
+            const bool type = filterType_ == "All" || (filterType_ == "Selected" && filterSelected_.contains(layer.id))
+                || (filterType_ == "Groups" && layer.group) || (filterType_ == "Text" && layer.text)
+                || (filterType_ == "Shapes" && layer.shapeStyle) || (filterType_ == "Adjustments" && !layer.adjustment.isEmpty())
+                || (filterType_ == "GIF" && layer.gif) || (filterType_ == "Images" && !layer.group && layer.adjustment.isEmpty() && !layer.text && !layer.shapeStyle);
+            if (type && layer.name.contains(filterName_, Qt::CaseInsensitive)) matches.insert(layer.id);
+        }
+        // Matching folders bring their contents; ancestors keep the result's hierarchy understandable.
+        for (const auto &layer : document_->layers) {
+            auto parent = layer.parentId; QSet<QUuid> visited;
+            while (parent && !visited.contains(*parent)) {
+                visited.insert(*parent); if (matches.contains(*parent)) { matches.insert(layer.id); break; }
+                const auto *owner = byId.value(*parent); parent = owner ? owner->parentId : std::nullopt;
+            }
+        }
+        for (const auto &id : matches) {
+            const auto *layer = byId.value(id); auto parent = layer ? layer->parentId : std::nullopt;
+            while (parent && !parentsOfMatches.contains(*parent)) { parentsOfMatches.insert(*parent); const auto *owner = byId.value(*parent); parent = owner ? owner->parentId : std::nullopt; }
+        }
+    }
     for (int i = document_->layers.size() - 1; i >= 0; --i) {
+        if (isFiltered() && !matches.contains(document_->layers[i].id) && !parentsOfMatches.contains(document_->layers[i].id)) continue;
         bool hidden = false;
         std::optional<QUuid> parent = document_->layers.at(i).parentId;
         QSet<QUuid> visited;
         while (parent && !visited.contains(*parent)) {
             visited.insert(*parent);
-            if (collapsed_.contains(*parent)) { hidden = true; break; }
+            if (!isFiltered() && collapsed_.contains(*parent)) { hidden = true; break; }
             const Layer *owner = byId.value(*parent, nullptr);
             parent = owner ? owner->parentId : std::nullopt;
         }
@@ -224,6 +252,7 @@ QVariant LayerListModel::data(const QModelIndex &index, int role) const
         if (!layer.adjustment.isEmpty()) return tr("Adjustment · %1").arg(layer.adjustment.value(QStringLiteral("kind")).toString());
         if (!layer.image.isNull()) {
             QString text = QStringLiteral("%1 × %2 px").arg(layer.image.width()).arg(layer.image.height());
+            if (layer.gif) text += QStringLiteral(" · GIF");
             if(DeepImage::isDeep(layer.image))text+=DeepImage::isHDR(layer.image)?QStringLiteral(" · HDR"):QStringLiteral(" · 16-Bit");
             // A layer keeps its full pixels however small it is scaled, so a scaled one says so: "100 × 100 px · 5%" rather
             // than looking as if it had been resampled (mac 67cc31e).
@@ -384,6 +413,7 @@ bool LayerListModel::canCopyEffect(LayerEffectKind kind, const QUuid &sourceId, 
 bool LayerListModel::canDropMimeData(const QMimeData *data, Qt::DropAction action, int row, int column,
                                      const QModelIndex &parent) const
 {
+    if (isFiltered()) return false;
     Q_UNUSED(column)
     if (!document_ || !data) return false;
 
