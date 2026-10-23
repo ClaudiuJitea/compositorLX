@@ -1,4 +1,5 @@
 #include "rendering/RasterOperations.h"
+#include "rendering/GpuOperations.h"
 #include "rendering/RgbSplit.h"
 #include "core/CameraRawTables.h"
 #include "rendering/DeepImage.h"
@@ -190,6 +191,7 @@ std::optional<QImage> RasterOperations::magicWandMask(const QImage &image, const
 QImage RasterOperations::inverted(const QImage &image)
 {
     if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return inverted(low); });
+    if (auto gpu = GpuOperations::simple(image.convertToFormat(QImage::Format_RGBA8888_Premultiplied),GpuOp::Invert); !gpu.isNull()) return gpu;
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     for (int y = 0; y < result.height(); ++y) {
         uchar *p = result.scanLine(y);
@@ -245,6 +247,7 @@ QImage RasterOperations::levels(const QImage &image, const LevelsSettings &setti
     std::array<float, 3 * 256> tables{};
     for (int channel = 0; channel < 3; ++channel) for (int value = 0; value < 256; ++value)
         tables[channel * 256 + value] = float(applyLevel(applyLevel(value / 255.0, settings.ranges[channel + 1]), settings.ranges[0]));
+    if (auto gpu = GpuOperations::lookup(result,tables.data()); !gpu.isNull()) return gpu;
     levels_apply(result.bits(), size_t(result.width()) * result.height(), tables.data());
     return result;
 }
@@ -296,6 +299,8 @@ QImage RasterOperations::exposure(const QImage &image, double stops, double offs
     if (!std::isfinite(stops) || !std::isfinite(offset) || !std::isfinite(gamma)) return image;
     stops = std::clamp(stops, -20.0, 20.0); offset = std::clamp(offset, -.5, .5); gamma = std::clamp(gamma, .01, 9.99);
     const double scale = std::pow(2, stops);
+    std::array<float,28> gpuParams{};gpuParams[0]=scale;gpuParams[1]=offset;gpuParams[2]=1/gamma;
+    if (auto gpu = GpuOperations::simple(image.convertToFormat(QImage::Format_RGBA8888_Premultiplied),GpuOp::Exposure,gpuParams); !gpu.isNull()) return gpu;
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     for (int y = 0; y < result.height(); ++y) { uchar *row = result.scanLine(y); for (int x = 0; x < result.width(); ++x) {
         uchar *pixel = row + x * 4; const int alpha = pixel[3]; if (!alpha) continue;
@@ -344,7 +349,11 @@ std::optional<std::array<quint8, 3>> RasterOperations::colorRangeSample(const QI
 
 QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationSettings &settings)
 {
-    if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return hueSaturation(low, settings); });
+    if (DeepImage::isDeep(image)) {
+        // Building the deep lookup cube requires QColor's exact HSL quantization.
+        GpuRenderer::CpuScope cpu;
+        return DeepImage::lookup(image, [&](const QImage &low) { return hueSaturation(low, settings); });
+    }
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (settings.isIdentity()) return result;
     struct Response { double hue = 0, saturation = 0, lightness = 0; };
@@ -354,6 +363,26 @@ QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationS
         responses[size_t(degree)].hue += adjustment.hue * weight;
         responses[size_t(degree)].saturation += adjustment.saturation * weight;
         responses[size_t(degree)].lightness += adjustment.lightness * weight;
+    }
+    if (GpuRenderer::shouldAttempt(result.size(), 16)) {
+        QImage table(361, 1, QImage::Format_RGBA32FPx4_Premultiplied);
+        auto *values = reinterpret_cast<float *>(table.bits());
+        for (int i = 0; i <= 360; ++i) {
+            values[i*4] = responses[i].hue;
+            values[i*4+1] = responses[i].saturation;
+            values[i*4+2] = responses[i].lightness;
+            values[i*4+3] = 1;
+        }
+        std::array<float,28> parameters{};
+        const auto &master = settings.adjustments[size_t(settings.range)];
+        parameters[0] = settings.colorize;
+        parameters[1] = wrapHue(master.hue)/360;
+        parameters[2] = std::clamp(master.saturation/100, 0., 1.);
+        parameters[3] = master.lightness/100;
+        GpuGraph graph;
+        const int input = graph.source(result), response = graph.source(table);
+        const auto gpu = graph.execute(graph.pass(GpuOp::HueSaturation,input,response,parameters,1),result.format());
+        if (!gpu.isNull()) return gpu;
     }
     for (int y = 0; y < result.height(); ++y) {
         uchar *row = result.scanLine(y);
@@ -390,6 +419,7 @@ QImage RasterOperations::curves(const QImage &image, const CurvesSettings &setti
     std::array<float, 3 * 256> tables{};
     for (int channel = 0; channel < 3; ++channel) for (int input = 0; input < 256; ++input)
         tables[size_t(channel * 256 + input)] = float(settings.value(settings.value(input, channel + 1), 0) / 255);
+    if (auto gpu = GpuOperations::lookup(result,tables.data()); !gpu.isNull()) return gpu;
     levels_apply(result.bits(), size_t(result.width()) * result.height(), tables.data());
     return result;
 }
@@ -503,6 +533,8 @@ QImage RasterOperations::blackWhite(const QImage &image, const float *weights, b
 {
     if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return blackWhite(low, weights, tint, tintHue, tintSaturation); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    std::array<float,28> p{};for(int i=0;i<6;++i)p[i]=weights[i];p[6]=tint?1:0;p[7]=tintHue/360;p[8]=tintSaturation;
+    if(auto gpu=GpuOperations::simple(result,GpuOp::BlackWhite,p);!gpu.isNull())return gpu;
     adjust_black_white(result.bits(), size_t(result.width()), size_t(result.height()),
                        size_t(result.bytesPerLine()), weights, tint ? 1 : 0, tintHue, tintSaturation);
     return result;
@@ -512,6 +544,8 @@ QImage RasterOperations::colorBalance(const QImage &image, const float *shadows,
 {
     if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return colorBalance(low, shadows, midtones, highlights, preserveLuminosity); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    std::array<float,28> p{};for(int i=0;i<3;++i){p[i]=shadows[i];p[3+i]=midtones[i];p[6+i]=highlights[i];}p[9]=preserveLuminosity?1:0;
+    if(auto gpu=GpuOperations::simple(result,GpuOp::ColorBalance,p);!gpu.isNull())return gpu;
     adjust_color_balance(result.bits(), size_t(result.width()), size_t(result.height()),
                          size_t(result.bytesPerLine()), shadows, midtones, highlights, preserveLuminosity ? 1 : 0);
     return result;
@@ -548,9 +582,10 @@ QImage RasterOperations::vignette(const QImage &image, double amount, const QCol
 
 QImage RasterOperations::bloomGlow(const QImage &image, double amount, double radius)
 {
+    if (auto gpu = GpuOperations::bloom(image,amount,radius,DeepImage::isDeep(image)); !gpu.isNull()) return gpu;
     if (DeepImage::isDeep(image)) {
         if (!std::isfinite(amount) || amount <= 0 || !std::isfinite(radius) || radius <= 0) return image;
-        const QImage source = image.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+        const QImage source = DeepImage::floating(image);
         const QImage soft = DeepImage::gaussianBlur(source,std::clamp(radius,1.0,150.0));
         QImage out = source;
         const float gain = float(std::clamp(amount,0.0,100.0)/50);
@@ -638,6 +673,14 @@ QImage RasterOperations::gradientMap(const QImage &image, const QColor &shadows,
         table[i * 3 + 1] = uint8_t(qRound(dark.green() + (light.green() - dark.green()) * t));
         table[i * 3 + 2] = uint8_t(qRound(dark.blue() + (light.blue() - dark.blue()) * t));
     }
+    if (GpuRenderer::shouldAttempt(result.size(), 1)) {
+        QImage ramp(256,1,QImage::Format_RGBA32FPx4_Premultiplied);
+        auto *values=reinterpret_cast<float *>(ramp.bits());
+        for(int i=0;i<256;++i){for(int c=0;c<3;++c)values[i*4+c]=table[i*3+c]/255.f;values[i*4+3]=1;}
+        GpuGraph graph;const int input=graph.source(result),lut=graph.source(ramp);
+        const auto gpu=graph.execute(graph.pass(GpuOp::GradientMap,input,lut,{},1),result.format());
+        if(!gpu.isNull())return gpu;
+    }
     adjust_gradient_map(result.bits(), size_t(result.width()), size_t(result.height()), size_t(result.bytesPerLine()), table.data());
     return result;
 }
@@ -657,6 +700,7 @@ QImage RasterOperations::grain(const QImage &image, double amount, double size, 
 QImage RasterOperations::gaussianBlur(const QImage &image, double radius)
 {
     if (DeepImage::isDeep(image)) return DeepImage::gaussianBlur(image, radius);
+    if (auto gpu = GpuOperations::gaussian(image.convertToFormat(QImage::Format_RGBA8888_Premultiplied),radius,true); !gpu.isNull()) return gpu;
     const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (!std::isfinite(radius) || radius <= 0) return source;
     radius = std::clamp(radius, .1, 250.0);
@@ -695,6 +739,7 @@ QImage RasterOperations::featherMask(const QImage &image, double amount)
     if (image.isNull() || !std::isfinite(amount) || amount <= 0) return image;
     const double radius = std::clamp(amount / 2.0, 0.1, 125.0);
     const QImage source = image.convertToFormat(QImage::Format_Grayscale8);
+    if (auto gpu = GpuOperations::gaussian(source.convertToFormat(QImage::Format_RGBA8888_Premultiplied),radius,true); !gpu.isNull()) return gpu.convertToFormat(QImage::Format_Grayscale8);
     constexpr int passes = 3;
     const double ideal = std::sqrt(12 * radius * radius / passes + 1);
     int lower = int(std::floor(ideal)); if (!(lower & 1)) --lower;
@@ -794,6 +839,7 @@ QImage RasterOperations::motionBlur(const QImage &image, double angleDegrees, do
     const QImage source = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     if (!std::isfinite(angleDegrees) || !std::isfinite(distance) || distance <= 0) return source;
     angleDegrees = std::clamp(angleDegrees, -90.0, 90.0); distance = std::clamp(distance, 1.0, 2000.0);
+    if(auto gpu=GpuOperations::motion(source,angleDegrees,distance);!gpu.isNull())return gpu;
     // Photoshop smears evenly along the whole distance, counterclockwise from horizontal (y runs down here).
     const double radians = angleDegrees * 3.14159265358979323846 / 180.0;
     const double dx = std::cos(radians), dy = -std::sin(radians);
@@ -978,7 +1024,11 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
         colorStages.insert(colorStages.end(), grading.begin(), grading.end());
         camera_raw_compose_onto(table.data(), grid, colorStages.data(), int(colorStages.size()), size);
     }
-    if (!table.empty() || mode != 0) adjust_camera_raw(pixels, width, height, stride, table.empty() ? nullptr : table.data(), grid, mode);
+    if (!table.empty() || mode != 0) {
+        const QImage gpu=GpuOperations::cube(result,table.empty()?nullptr:table.data(),grid,mode);
+        if (!gpu.isNull()) { result=gpu; pixels=result.bits(); }
+        else adjust_camera_raw(pixels,width,height,stride,table.empty()?nullptr:table.data(),grid,mode);
+    }
 
     // 3. Curve, Mixer, Grading
     if (paintColor) {

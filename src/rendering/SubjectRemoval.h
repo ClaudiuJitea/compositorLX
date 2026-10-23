@@ -34,6 +34,7 @@ public:
     static void setSegmentationProvider(SegmentationProvider provider);
     static void resetSegmentationProvider();
 
+    [[nodiscard]] static QString executionProviders();
     [[nodiscard]] static bool isModelAvailable();
     [[nodiscard]] static QString modelFilePath();
 };

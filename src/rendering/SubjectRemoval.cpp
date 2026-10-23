@@ -1,4 +1,5 @@
 #include "rendering/SubjectRemoval.h"
+#include "rendering/GpuRenderer.h"
 
 #include "rendering/RasterOperations.h"
 
@@ -43,19 +44,40 @@ QString modelPath()
 }
 
 struct Runtime {
-    Ort::Env environment{ORT_LOGGING_LEVEL_WARNING, "CompositorLX"};
+    Ort::Env environment{ORT_LOGGING_LEVEL_WARNING,"CompositorLX"};
     Ort::SessionOptions options;
     std::unique_ptr<Ort::Session> session;
     std::string error;
-
-    Runtime()
-    {
+    std::mutex mutex;
+    bool initialized=false,requestedGpu=false,gpu=false;
+    void cpuSession() {
+        options=Ort::SessionOptions{};
+        options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        options.SetIntraOpNumThreads(std::max(1u,std::thread::hardware_concurrency()/2));
+        const QByteArray path=QFile::encodeName(modelPath());
+        session=std::make_unique<Ort::Session>(environment,path.constData(),options);gpu=false;
+    }
+    void ensureSession() {
+        const QByteArray selected=qgetenv("COMPOSITOR_AI_BACKEND").toLower();
+        const bool wantGpu=GpuRenderer::backend()!=RenderBackend::Cpu&&selected!="cpu";
+        if(initialized&&requestedGpu==wantGpu)return;
+        initialized=true;requestedGpu=wantGpu;session.reset();error.clear();gpu=false;
         try {
-            options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-            options.SetIntraOpNumThreads(std::max(1u, std::thread::hardware_concurrency() / 2));
-            const QByteArray path = QFile::encodeName(modelPath());
-            session = std::make_unique<Ort::Session>(environment, path.constData(), options);
-        } catch (const Ort::Exception &exception) { error = exception.what(); }
+            if(wantGpu) {
+                const auto providers=Ort::GetAvailableProviders();
+                const auto available=[&](const char *name){return std::find(providers.begin(),providers.end(),name)!=providers.end();};
+                try {
+                    options=Ort::SessionOptions{};options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+                    if((selected.isEmpty()||selected=="auto"||selected=="openvino")&&available("OpenVINOExecutionProvider")) {
+                        options.AppendExecutionProvider_OpenVINO_V2({{"device_type","GPU"},{"precision","FP32"}});gpu=true;
+                    }else if((selected.isEmpty()||selected=="auto"||selected=="cuda")&&available("CUDAExecutionProvider")) {
+                        OrtCUDAProviderOptions cuda{};options.AppendExecutionProvider_CUDA(cuda);gpu=true;
+                    }
+                    if(gpu){const QByteArray path=QFile::encodeName(modelPath());session=std::make_unique<Ort::Session>(environment,path.constData(),options);return;}
+                }catch(const Ort::Exception &){session.reset();gpu=false;}
+            }
+            cpuSession();
+        }catch(const Ort::Exception &exception){error=exception.what();}
     }
 };
 
@@ -129,6 +151,12 @@ void SubjectRemoval::resetSegmentationProvider()
     s_customProvider = nullptr;
 }
 
+QString SubjectRemoval::executionProviders()
+{
+    QStringList names;for(const auto &name:Ort::GetAvailableProviders())names.append(QString::fromStdString(name));
+    return names.join(QStringLiteral(", "));
+}
+
 bool SubjectRemoval::isModelAvailable()
 {
     return QFileInfo::exists(modelPath());
@@ -164,6 +192,7 @@ QImage SubjectRemoval::rawMask(const QImage &source, QString *error, std::atomic
 
     if (cancelled && cancelled->load()) return {};
     Runtime &engine = runtime();
+    std::lock_guard engineLock(engine.mutex);engine.ensureSession();
     if (!engine.session) { if (error) *error = QString::fromStdString(engine.error); return {}; }
     try {
         constexpr int side = 320;
@@ -188,7 +217,13 @@ QImage SubjectRemoval::rawMask(const QImage &source, QString *error, std::atomic
         if (cancelled && cancelled->load()) return {};
         // Note: ONNX Runtime Session::Run executes synchronously as an atomic compute kernel on CPU.
         // In-flight cancellation currently takes effect immediately after Run() completes or at stage boundaries.
-        auto values = engine.session->Run(Ort::RunOptions{nullptr}, inputs, &tensor, 1, outputs, 1);
+        std::vector<Ort::Value> values;
+        try { values=engine.session->Run(Ort::RunOptions{nullptr},inputs,&tensor,1,outputs,1); }
+        catch(const Ort::Exception &) {
+            if(!engine.gpu)throw;
+            engine.cpuSession(); // A provider/driver failure must not remove the CPU option.
+            values=engine.session->Run(Ort::RunOptions{nullptr},inputs,&tensor,1,outputs,1);
+        }
         // Cancellation checkpoint: immediately after native inference (takes effect here if cancelled during Run)
         if (cancelled && cancelled->load()) return {};
         const float *prediction = values.front().GetTensorData<float>();

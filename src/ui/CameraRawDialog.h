@@ -20,6 +20,7 @@
 namespace compositor {
 
 class CanvasWidget;
+class AsyncImagePreview;
 
 class ScopeWidget final : public QWidget {
     Q_OBJECT
@@ -81,6 +82,7 @@ protected:
     void keyReleaseEvent(QKeyEvent *event) override;
 
 private:
+    AsyncImagePreview *previewJobs_ = nullptr;
     void setupUi();
     QWidget *createLightTab();
     QWidget *createColorTab();

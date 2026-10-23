@@ -1,3 +1,5 @@
+#include "rendering/GpuDocument.h"
+#include "rendering/GpuOperations.h"
 #include "rendering/LayerRenderer.h"
 #include "rendering/DeepImage.h"
 #include "rendering/LayerEffectsRenderer.h"
@@ -232,6 +234,7 @@ static std::array<double,3> blendColor(std::array<double,3> backdrop, std::array
 }
 static void customComposite(QImage &backdrop,const QImage &source,BlendMode mode)
 {
+    if(auto gpu=GpuOperations::composite(backdrop,source,int(mode),1,1);!gpu.isNull()){backdrop=gpu;return;}
     for(int y=0;y<backdrop.height();++y){uchar *out=backdrop.scanLine(y);const uchar *top=source.constScanLine(y);for(int x=0;x<backdrop.width();++x){uchar *b=out+x*4;const uchar *s=top+x*4;const double ab=b[3]/255.0,as=s[3]/255.0;if(as<=0)continue;std::array<double,3> cb{},cs{};for(int c=0;c<3;++c){cb[c]=ab?b[c]/255.0/ab:0;cs[c]=as?s[c]/255.0/as:0;}const auto mixed=blendColor(cb,cs,mode);const double ao=as+ab-as*ab;for(int c=0;c<3;++c){const double premult=(1-as)*b[c]/255.0+(1-ab)*s[c]/255.0+as*ab*mixed[c];b[c]=uchar(std::clamp(qRound(premult*255),0,255));}b[3]=uchar(std::clamp(qRound(ao*255),0,255));}}
 }
 
@@ -575,7 +578,8 @@ static void renderScope(const Document &document,
 // Deep documents composite in floating point, keeping highlights and precision until display quantization.
 static void deepComposite(QImage &backdrop,const QImage &source,BlendMode mode)
 {
-    const QImage top=source.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+    if(auto gpu=GpuOperations::composite(backdrop,source,int(mode));!gpu.isNull()){backdrop=gpu;return;}
+    const QImage top=DeepImage::floating(source);
     for(int y=0;y<backdrop.height();++y){auto *b=reinterpret_cast<float *>(backdrop.scanLine(y));const auto *s=reinterpret_cast<const float *>(top.constScanLine(y));
         for(int x=0;x<backdrop.width();++x){const float ab=b[x*4+3],as=s[x*4+3];if(as<=0)continue;
             std::array<double,3> cb{},cs{};for(int c=0;c<3;++c){cb[c]=ab>0?b[x*4+c]/ab:0;cs[c]=s[x*4+c]/as;}
@@ -654,6 +658,7 @@ void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
 
 QImage LayerRenderer::flattened(const Document &document)
 {
+    if (auto gpu=tryGpuDocument(document); !gpu.isNull()) return gpu;
     QImage output(document.canvasSize, hasDeepLayers(document)?QImage::Format_RGBA32FPx4_Premultiplied:QImage::Format_RGBA8888_Premultiplied);
     if(hasDeepLayers(document)&&std::none_of(document.layers.cbegin(),document.layers.cend(),[](const Layer &l){return DeepImage::isHDR(l.image);}))output.setText(QStringLiteral("compositorDepth"),QStringLiteral("16"));
     output.fill(Qt::transparent);

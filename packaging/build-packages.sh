@@ -60,6 +60,12 @@ QT_QPA_PLATFORM=offscreen "$output_dir/CompositorLX-${version}-${appimage_arch}.
     --appimage-extract-and-run --check-subject-model
 QT_QPA_PLATFORM=offscreen "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage" \
     --appimage-extract-and-run --version
+QT_QPA_PLATFORM=offscreen "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage" \
+    --appimage-extract-and-run --check-renderer
+QT_QPA_PLATFORM=offscreen VK_DRIVER_FILES=/nonexistent/compositor-icd.json \
+    VK_ICD_FILENAMES=/nonexistent/compositor-icd.json \
+    "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage" \
+    --appimage-extract-and-run --check-renderer
 dpkg-deb --info "$output_dir/compositorlx_${version}_${architecture}.deb" >/dev/null
 (
     cd "$output_dir"

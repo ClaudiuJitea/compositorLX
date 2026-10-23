@@ -1,4 +1,6 @@
+#include "rendering/DeepImage.h"
 #include "rendering/RgbSplit.h"
+#include "rendering/GpuRenderer.h"
 #include "rendering/RgbSplitVulkan.h"
 #include "rendering/ProgressiveBlur.h"
 #include "rendering/RasterOperations.h"
@@ -15,6 +17,8 @@ QImage RgbSplitSettings::apply(const QImage &image, unsigned sides, RgbSplitBack
         const auto choice = qgetenv("COMPOSITOR_RGB_SPLIT_BACKEND").toLower();
         if (choice == "cpu") backend = RgbSplitBackend::Cpu;
         else if (choice == "vulkan") backend = RgbSplitBackend::Vulkan;
+        else if (GpuRenderer::backend() == RenderBackend::Cpu) backend = RgbSplitBackend::Cpu;
+        else if (GpuRenderer::backend() == RenderBackend::Vulkan) backend = RgbSplitBackend::Vulkan;
         else {
             // Small images and cheap effects cost less than conversion/dispatch. These
             // conservative cutoffs include transfers in the measured GPU render time.
@@ -37,7 +41,7 @@ QImage RgbSplitSettings::applyCpu(const QImage &image, unsigned sides) const
     if (image.isNull() || (distance <= 0 && blur <= 0)) return image;
     for (double value : {distance, blur, angle, reach, center.x(), center.y()})
         if (!std::isfinite(value)) return image;
-    const QImage source = image.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+    const QImage source = DeepImage::floating(image);
     if (source.isNull()) return {};
     QImage result(source.size(), source.format());
     if (result.isNull()) return {};

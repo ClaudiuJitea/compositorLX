@@ -1,3 +1,4 @@
+#include "rendering/DeepImage.h"
 #include "rendering/RgbSplit.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -27,8 +28,8 @@ static QImage fixture(QSize size, QImage::Format format)
 static double difference(const QImage &a, const QImage &b)
 {
     if (a.size() != b.size() || a.isNull() || b.isNull()) return INFINITY;
-    const auto x = a.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
-    const auto y = b.convertToFormat(x.format());
+    const auto x = DeepImage::floating(a);
+    const auto y = DeepImage::floating(b);
     double worst = 0;
     for (int row = 0; row < x.height(); ++row) {
         const auto *p = reinterpret_cast<const float *>(x.constScanLine(row));

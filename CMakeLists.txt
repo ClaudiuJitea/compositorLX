@@ -13,7 +13,8 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Network)
 find_package(ZLIB REQUIRED)
-option(COMPOSITOR_ENABLE_VULKAN "Build optional Vulkan RGB Split acceleration" ON)
+find_package(Qt6 QUIET COMPONENTS OpenGLWidgets)
+option(COMPOSITOR_ENABLE_VULKAN "Build optional Vulkan rendering acceleration" ON)
 if(COMPOSITOR_ENABLE_VULKAN)
     find_path(COMPOSITOR_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
 endif()
@@ -147,6 +148,10 @@ add_library(compositor_core
     src/rendering/LayerRenderer.h
     src/rendering/LayerEffectsRenderer.cpp
     src/rendering/LayerEffectsRenderer.h
+    src/rendering/GpuDocument.cpp
+    src/rendering/GpuRenderer.cpp
+    src/rendering/GpuVulkan.cpp
+    src/rendering/GpuOperations.cpp
     src/rendering/RgbSplitVulkan.cpp
     src/rendering/RgbSplit.cpp
     src/rendering/ProgressiveBlur.cpp
@@ -185,9 +190,9 @@ target_link_libraries(compositor_core PUBLIC Qt6::Core Qt6::Gui Qt6::Concurrent 
 if(COMPOSITOR_ENABLE_VULKAN AND COMPOSITOR_VULKAN_INCLUDE_DIR)
     target_include_directories(compositor_core PRIVATE "${COMPOSITOR_VULKAN_INCLUDE_DIR}")
     target_compile_definitions(compositor_core PRIVATE COMPOSITOR_HAVE_VULKAN=1)
-    message(STATUS "Vulkan RGB Split: enabled (runtime loader, CPU fallback)")
+    message(STATUS "Vulkan renderer: enabled (runtime loader, CPU fallback)")
 else()
-    message(STATUS "Vulkan RGB Split: disabled (CPU fallback)")
+    message(STATUS "Vulkan renderer: disabled (CPU fallback)")
 endif()
 if(TARGET heif OR LIBHEIF_FOUND OR (LIBHEIF_INCLUDE_DIR AND LIBHEIF_LIBRARY))
     if(TARGET heif)
@@ -218,6 +223,9 @@ target_compile_options(compositor_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(compositor_ui STATIC
     src/resources.qrc
+    src/ui/GpuViewport.cpp
+    src/ui/AsyncImagePreview.cpp
+    src/ui/RenderingSettingsDialog.cpp
     src/ui/CameraRawDialog.cpp
     src/ui/CameraRawDialog.h
     src/ui/CanvasRulerWidget.cpp
@@ -252,6 +260,10 @@ add_library(compositor_ui STATIC
 target_include_directories(compositor_ui PUBLIC src vendor/compositor-rendering)
 target_link_libraries(compositor_ui PUBLIC compositor_core Qt6::Widgets Qt6::Concurrent Qt6::Network)
 target_compile_options(compositor_ui PRIVATE -Wall -Wextra -Wpedantic)
+if(TARGET Qt6::OpenGLWidgets)
+    target_link_libraries(compositor_ui PRIVATE Qt6::OpenGLWidgets)
+    target_compile_definitions(compositor_ui PRIVATE COMPOSITOR_GPU_CANVAS=1)
+endif()
 
 add_executable(compositor-lx
     src/main.cpp

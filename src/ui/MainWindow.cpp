@@ -1,3 +1,4 @@
+#include "ui/RenderingSettingsDialog.h"
 #include "ui/MainWindow.h"
 #include "ui/GifTimeline.h"
 #include "core/ToolDefaults.h"
@@ -3580,6 +3581,9 @@ void MainWindow::createActions()
     });
 
     auto *view = menuBar()->addMenu(tr("&View"));
+    auto *rendering = view->addAction(tr("Rendering…"));rendering->setObjectName(QStringLiteral("commandRenderingSettings"));
+    connect(rendering,&QAction::triggered,this,[this]{if(showRenderingSettings(this)){canvas_->invalidateDocument();canvas_->update();}});
+    view->addSeparator();
     // The editor's dark (default) or light scheme, or the desktop's own, followed as it changes. Remembered.
     auto *themeMenu = view->addMenu(tr("&Theme"));
     themeMenu->menuAction()->setObjectName(QStringLiteral("commandTheme"));

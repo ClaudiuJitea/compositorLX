@@ -1,6 +1,6 @@
 # Vulkan RGB Split
 
-RGB Split is the first Vulkan compute filter in CompositorLX. Both the destructive filter and editable RGB Split filter layers call the same backend. The UI still waits for each render; this change accelerates the computation and does not introduce asynchronous previews. Other filters retain their existing rendering paths. This development change follows the published 0.5.5 release.
+RGB Split now uses the shared renderer shipped in the refreshed 0.5.5 assets. Its destructive filter and editable filter layers share the same kernel; supported filter chains keep intermediates on the GPU. See [the current renderer coverage and validation](GPU_ROLLOUT.md). The measurements below record the initial standalone RGB Split implementation, before shared caching and graph execution.
 
 ## Choosing a backend
 
@@ -23,7 +23,7 @@ The shader uses the CPU algorithm's spectral weights, bilinear sampling, bounded
 
 Vulkan computes with 32-bit floats while the CPU uses double-precision accumulation, so output is not bit-identical. Regression comparisons allow at most one 8-bit channel step, or 0.0001 in premultiplied floating-point channels for the 16-bit/HDR fixtures. Tests include transparent pixels, HDR values above one, all 16 edge combinations, linear/radial settings, maximum sample counts, odd dimensions, one-pixel dimensions, large coordinates, and concurrent calls. These tolerances describe tested fixtures, not a universal error bound for every image or extreme parameter value.
 
-A shared queue and pipeline are protected by a mutex. Integrated GPUs can use host-visible device memory directly; GPUs without suitable shared memory use staging copies. Explicit barriers and a fence protect uploads and readback. The per-render Vulkan working buffer is capped at 1 GiB and allocations at one quarter of the selected memory heap; device dispatch/storage limits are also checked. The source/output image conversions consume additional host memory. Oversized images use CPU rendering. The discrete-GPU staging path is implemented but has not been exercised on physical discrete hardware here.
+A shared queue and pipeline are protected by a mutex. Integrated GPUs can use host-visible device memory directly; other devices use staging copies. The shared backend now pools allocations, caches source uploads, and applies the configurable working-memory budget described in [GPU_ROLLOUT.md](GPU_ROLLOUT.md). Its staging path was exercised on Iris Xe with forced staging; physical AMD/NVIDIA validation remains outstanding.
 
 ## Measurements
 
@@ -55,17 +55,19 @@ Tests skip GPU-specific parity cases when no GPU is available. `COMPOSITOR_REQUI
 
 Vulkan headers are detected automatically; install `libvulkan-dev` to compile the backend. Use `-DCOMPOSITOR_ENABLE_VULKAN=OFF` to compile only the fallback. The executable does not link against Vulkan, and distribution packages should use the host's Vulkan loader and graphics drivers.
 
-The Vulkan 1.0 SPIR-V shader is embedded in a checked-in header, so normal builds do not require development shader tools. After changing `src/rendering/shaders/rgb_split.comp`, install `glslang-tools` and `spirv-tools`, then run:
+The Vulkan 1.0 SPIR-V shader is embedded in a checked-in header, so normal builds do not require development shader tools. After changing `src/rendering/shaders/rendering.comp`, install `glslang-tools` and `spirv-tools`, then run:
 
 ```sh
-python3 scripts/compile-rgb-split-shader.py
-python3 scripts/compile-rgb-split-shader.py --check
+python3 scripts/compile-rendering-shader.py
+python3 scripts/compile-rendering-shader.py --check
 ```
 
 Generation runs `spirv-val` when available. The source-hash check is registered with CTest when Python is available. GPU tests were also run with Khronos Vulkan validation enabled; no validation errors were reported.
 
 ## Verification results
 
-The final Release application build succeeded on the machine above. All **22/22 CTest suites passed** in 92.29 seconds (`OMP_NUM_THREADS=4`), including the original 19 suites. The GPU test executable reported **151 passed, 0 failed, 0 skipped** with hardware required, and again with Khronos core and synchronization validation enabled. No validation errors were reported.
+The initial standalone Release application build succeeded on the machine above. All **22/22 CTest suites passed** in 92.29 seconds (`OMP_NUM_THREADS=4`), including the original 19 suites. The GPU test executable reported **151 passed, 0 failed, 0 skipped** with hardware required, and again with Khronos core and synchronization validation enabled. No validation errors were reported.
 
 A separate `COMPOSITOR_ENABLE_VULKAN=OFF` build compiled successfully; its executable passed all seven non-GPU checks and correctly skipped the 144 GPU parity cases. Missing-driver and software-only Vulkan runs returned exact CPU output. The application version and bundled subject-model smoke checks also succeeded. The final executable has no mandatory Vulkan shared-library dependency.
+
+The current shared-backend validation supersedes the initial suite counts above; see [GPU_ROLLOUT.md](GPU_ROLLOUT.md).

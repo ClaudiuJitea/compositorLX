@@ -18,7 +18,7 @@
   <requires><display_length compare="ge">768</display_length></requires>
   <supports><control>pointing</control><control>keyboard</control></supports>
   <releases>
-    <release version="0.5.5" date="2026-10-22"><description><p>Editable GIF layers, PDF import, RGB Split, channel packing, filter layers, pen pressure, styled lines, search, and PSD artboards.</p></description></release>
+    <release version="0.5.5" date="2026-10-23"><description><p>Editable GIF layers, PDF import, RGB Split, channel packing, filter layers, pen pressure, styled lines, search, and PSD artboards. Refreshed with shared Vulkan rendering, accelerated filters and compositing, hardware canvas presentation, and asynchronous Camera RAW previews.</p></description></release>
     <release version="0.5.3" date="2026-10-18" />
     <release version="0.4.5" date="2026-10-04" />
     <release version="0.4.0" date="2026-10-03" />

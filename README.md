@@ -23,11 +23,17 @@
 
 CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v17), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
 
-## GPU acceleration (development)
+## GPU acceleration — updated 0.5.5
 
-Current source builds can accelerate **RGB Split** with Vulkan, including RGB Split filter layers. Larger effects use the GPU automatically; small or inexpensive effects stay on the CPU. Missing Vulkan drivers, unsupported hardware, and GPU allocation failures fall back to CPU rendering. This is the first GPU filter; other filters still use their existing renderers.
+The **0.5.5 release and its AppImage/DEB assets have been refreshed** with a shared Vulkan renderer, GPU layer compositing, more accelerated filters, hardware canvas presentation, and asynchronous Camera RAW previews. The application version remains **0.5.5**.
 
-On the tested Intel Iris Xe, 1080p RGB Split was **2.5× faster**, or **8.5× faster with blur streaks**, including conversion and transfers. Results depend on hardware and settings. See [benchmarks, quality checks, and backend controls](docs/RGB_SPLIT_GPU.md). The published 0.5.5 packages predate this development change.
+Choose **View › Rendering…** for Automatic, CPU, or GPU with CPU fallback, a working-memory limit, and diagnostics. Automatic keeps small or inexpensive work on the CPU. Missing drivers, unsupported operations, or memory limits retain the CPU rendering path.
+
+GPU coverage now includes RGB Split, Gaussian/Motion/Progressive Blur, Bloom, exposure and several color adjustments, mask processing, layer-effect blur/morphology, and all 24 layer blend modes. Supported layer/filter chains keep their intermediate images on the GPU. The canvas uses Qt OpenGL where available; large Camera RAW previews run in the background and discard obsolete slider results.
+
+On the tested Intel Iris Xe, warm 1080p renders measured **36× faster for exposure**, **26× for Hue/Saturation**, **13× for Progressive Blur**, and roughly **2–5× for the tested blur/bloom cases**, including conversion and transfers. The Camera RAW lookup was slower on the GPU, so Automatic keeps that standalone step on the CPU. These are measurements on one machine, not universal speed guarantees.
+
+**This is a mixed CPU/GPU pipeline.** Some tools, deep-color adjustments, complex placements, codecs, and the bundled Remove Background model still use the CPU. See the [coverage matrix, benchmarks, controls, and validation notes](docs/GPU_ROLLOUT.md).
 
 ## What's new in version 0.5.5
 
@@ -219,7 +225,7 @@ cmake --build build
 ./build/compositor-lx [path/to/project.comp]
 ```
 
-Vulkan headers are optional; omit them or pass `-DCOMPOSITOR_ENABLE_VULKAN=OFF` for a CPU-only build. GPU rendering uses the system Vulkan loader and graphics driver at runtime. No shader compiler is needed for a normal build.
+Vulkan headers are optional; omit them or pass `-DCOMPOSITOR_ENABLE_VULKAN=OFF` to disable Vulkan compute. Qt OpenGLWidgets is detected separately for hardware canvas presentation. GPU rendering uses the system Vulkan loader and graphics driver at runtime. No shader compiler is needed for a normal build.
 
 The first configure downloads checksum-pinned ONNX Runtime and the U²-Net model. Remove Background always runs on the local machine.
 

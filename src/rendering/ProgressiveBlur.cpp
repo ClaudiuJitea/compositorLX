@@ -1,4 +1,5 @@
 #include "rendering/ProgressiveBlur.h"
+#include "rendering/GpuOperations.h"
 #include "rendering/RasterOperations.h"
 #include "rendering/DeepImage.h"
 #include <algorithm>
@@ -9,6 +10,7 @@ QImage ProgressiveBlurSettings::apply(const QImage &image) const
     if (image.isNull() || !std::isfinite(from) || !std::isfinite(to) || !std::isfinite(start.x()) ||
         !std::isfinite(start.y()) || !std::isfinite(end.x()) || !std::isfinite(end.y()))
         return {};
+    if (auto gpu = compositor::GpuOperations::progressive(image,*this); !gpu.isNull()) return gpu;
     double low = std::clamp(from, 0.0, 250.0), high = std::clamp(to, 0.0, 250.0);
     if (inverted)
         std::swap(low, high);
@@ -22,7 +24,7 @@ QImage ProgressiveBlurSettings::apply(const QImage &image) const
     // A pyramid of full-precision Gaussian surfaces, interpolated by the radius at each pixel.
     constexpr int levels = 12;
     QImage result(image.size(), QImage::Format_RGBA32FPx4_Premultiplied);
-    QImage previous = image.convertToFormat(result.format());
+    QImage previous = compositor::DeepImage::floating(image);
     std::vector<double> radii(size_t(image.width()) * image.height());
     for (int y = 0; y < image.height(); ++y)
         for (int x = 0; x < image.width(); ++x) {
@@ -33,8 +35,7 @@ QImage ProgressiveBlurSettings::apply(const QImage &image) const
             radii[size_t(y) * image.width() + x] = (low + (high - low) * t) / strongest * levels;
         }
     for (int level = 1; level <= levels; ++level) {
-        const QImage blurred = compositor::DeepImage::gaussianBlur(image, strongest * level / levels)
-                                   .convertToFormat(result.format());
+        const QImage blurred = compositor::DeepImage::floating(compositor::DeepImage::gaussianBlur(image, strongest * level / levels));
         for (int y = 0; y < image.height(); ++y) {
             auto *out = reinterpret_cast<float *>(result.scanLine(y));
             const auto *a = reinterpret_cast<const float *>(previous.constScanLine(y)),

@@ -7,6 +7,7 @@ namespace compositor::DeepImage
 bool isDeep(const QImage &image);
 bool isHDR(const QImage &image);
 QImage canonical(const QImage &image);
+QImage floating(const QImage &image);
 QImage dithered(const QImage &image);
 QImage through(const QImage &image, const std::function<QImage(const QImage &)> &operation,
                bool mixes = false);

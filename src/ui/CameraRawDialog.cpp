@@ -1,3 +1,4 @@
+#include "ui/AsyncImagePreview.h"
 #include "ui/CameraRawDialog.h"
 #include "ui/NumericScrub.h"
 #include "rendering/RasterOperations.h"
@@ -164,6 +165,7 @@ CameraRawDialog::CameraRawDialog(QWidget *parent, EditorSession &session, const 
     }
 
 
+    previewJobs_ = new AsyncImagePreview(this);
     settings_ = session_.lastCameraRaw.normalized();   // mac: the panel reopens with what the filter was last committed with
     setupUi();
     installEventFilter(this);
@@ -195,7 +197,7 @@ CameraRawDialog::CameraRawDialog(QWidget *parent, EditorSession &session, const 
     updatePreview();
 }
 
-CameraRawDialog::~CameraRawDialog() { releaseCanvas(); }
+CameraRawDialog::~CameraRawDialog() { previewJobs_->cancel(); releaseCanvas(); }
 
 void CameraRawDialog::releaseCanvas()
 {
@@ -1256,27 +1258,26 @@ void CameraRawDialog::setSettings(const CameraRawSettings &settings)
 void CameraRawDialog::updatePreview()
 {
     if (!previewBox_->isChecked()) {
-        session_.rollbackLayerImage(layerId_, originalLayer_.image);
-        lastGraded_ = QImage();
-    } else {
-        CameraRawClipping clip = activeClipping_;
-        if (!altHeld_) clip = CameraRawClipping::None;
-        const CameraRawSettings rendered = renderSettings();
-        int visualize = -1;
-        if (mixerPageCombo_ && mixerPageCombo_->currentIndex() == 2 && pointIndex_ >= 0 && pointIndex_ < rendered.mixer.points.size()
-            && rendered.mixer.points[pointIndex_].visualize) visualize = pointIndex_;
-
-        QImage graded = RasterOperations::cameraRaw(originalLayer_.image, rendered, clip, 1.0, 0, visualize, sharpenMaskPreview_);
-        lastGraded_ = graded;
-        if (showShadowClipping_ || showHighlightClipping_) {
-            graded = CameraRawScope::overlay(graded, showShadowClipping_, showHighlightClipping_);
-        }
-        session_.previewLayerImage(layerId_, graded);
-        auto scope = CameraRawScope::make(lastGraded_);
-        if (scope) scopeWidget_->setScope(*scope);
+        previewJobs_->cancel();session_.rollbackLayerImage(layerId_,originalLayer_.image);lastGraded_={};
+        if(onPreview_)onPreview_();
+        return;
     }
-
-    if (onPreview_) onPreview_();
+    const CameraRawClipping clip=altHeld_?activeClipping_:CameraRawClipping::None;
+    const CameraRawSettings rendered=renderSettings();
+    int visualize=-1;
+    if(mixerPageCombo_&&mixerPageCombo_->currentIndex()==2&&pointIndex_>=0&&pointIndex_<rendered.mixer.points.size()&&rendered.mixer.points[pointIndex_].visualize)visualize=pointIndex_;
+    const QImage original=originalLayer_.image;const bool sharpen=sharpenMaskPreview_;
+    const auto work=[original,rendered,clip,visualize,sharpen]{return RasterOperations::cameraRaw(original,rendered,clip,1.,0,visualize,sharpen);};
+    const auto completed=[this](QImage graded){
+        if(graded.isNull())return;
+        lastGraded_=graded;
+        if(showShadowClipping_||showHighlightClipping_)graded=CameraRawScope::overlay(graded,showShadowClipping_,showHighlightClipping_);
+        session_.previewLayerImage(layerId_,graded);
+        if(auto scope=CameraRawScope::make(lastGraded_))scopeWidget_->setScope(*scope);
+        if(onPreview_)onPreview_();
+    };
+    if(qint64(original.width())*original.height()>=262144)previewJobs_->request(work,completed);
+    else {previewJobs_->cancel();completed(work());}
 }
 
 void CameraRawDialog::sampleWhiteBalance(const QColor &color)
@@ -1332,6 +1333,7 @@ bool CameraRawDialog::eventFilter(QObject *watched, QEvent *event)
 
 void CameraRawDialog::accept()
 {
+    previewJobs_->cancel();
     // mac commitFilter: what was rendered (hidden groups dropped) is what the filter remembers and what OK applies.
     const CameraRawSettings rendered = renderSettings();
     session_.lastCameraRaw = rendered;
@@ -1346,6 +1348,7 @@ void CameraRawDialog::accept()
 
 void CameraRawDialog::reject()
 {
+    previewJobs_->cancel();
     session_.rollbackLayer(layerId_, originalLayer_);
     releaseCanvas();
     if (onPreview_) onPreview_();

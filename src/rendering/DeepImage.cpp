@@ -1,4 +1,5 @@
 #include "rendering/DeepImage.h"
+#include "rendering/GpuOperations.h"
 #include "DeepPixels.h"
 #include "DitherPixels.h"
 #include <QColorSpace>
@@ -25,6 +26,13 @@ QImage canonical(const QImage &i)
     return i.convertToFormat(isHDR(i)    ? QImage::Format_RGBA16FPx4_Premultiplied
                              : isDeep(i) ? QImage::Format_RGBA64_Premultiplied
                                          : QImage::Format_RGBA8888_Premultiplied);
+}
+QImage floating(const QImage &image)
+{
+    // Qt 6.10's direct 8-bit premultiplied -> float-premultiplied conversion
+    // can replace alpha with 1. The 16-bit bridge preserves both alpha and RGB.
+    return (image.depth() <= 32 ? image.convertToFormat(QImage::Format_RGBA64_Premultiplied) : image)
+        .convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
 }
 QImage dithered(const QImage &image)
 {
@@ -149,7 +157,8 @@ QImage takePainted(const QImage &deep, const QImage &painted, const QImage &base
 }
 QImage gaussianBlur(const QImage &image, double radius)
 {
-    QImage result = image.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+    if (auto gpu = GpuOperations::gaussian(image,radius,false); !gpu.isNull()) return gpu;
+    QImage result = floating(image);
     if (!std::isfinite(radius) || radius <= 0)
         return image;
     radius = std::clamp(radius, .1, 250.0);
@@ -221,8 +230,9 @@ QImage gaussianBlur(const QImage &image, double radius)
 }
 QImage motionBlur(const QImage &image, double angle, double distance)
 {
+    if (auto gpu = GpuOperations::motion(image,angle,distance); !gpu.isNull()) return gpu;
     if (image.isNull() || !std::isfinite(angle) || !std::isfinite(distance) || distance <= 0) return image;
-    const QImage input = image.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+    const QImage input = floating(image);
     const double radians = std::clamp(angle,-90.0,90.0)*3.14159265358979323846/180;
     const double dx = std::cos(radians), dy = -std::sin(radians);
     const bool horizontal = std::abs(dx) >= std::abs(dy);

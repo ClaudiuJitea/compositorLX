@@ -19,7 +19,7 @@ Reference: local Compositor `bd76fc9` (2026-10-22), compared with the previous L
 | View and input polish | Image/Canvas Size preserve zoom, initial fit capped at 100%, non-Latin physical tool keys, PDF/GIF desktop associations |
 | Existing behavior improvements | Save pixel totals counted once; GIF edited assets counted in document/history budgets |
 
-## Platform and implementation differences
+## Original port differences (before the GPU refresh)
 
 - Metal/Core Image, AppKit, Quick Look integration and Sparkle are macOS-specific. LX uses Qt, Poppler and CPU rendering. Existing 16-bit, HDR and CMYK support is retained.
 - RGB Split follows the spectral weighting and bilinear sampling in upstream MetalDispersion, but uses CPU arithmetic and a bounded sample count. It is not certified pixel-identical to Metal. Large filter previews and GIF exports can take time on the CPU.
@@ -29,7 +29,7 @@ Reference: local Compositor `bd76fc9` (2026-10-22), compared with the previous L
 - Pen-pressure behavior is tested with synthetic input/coverage. Physical tablet hardware and a live Wayland pointer session require separate verification.
 - Filters remain synchronous CPU operations in their preview panels. The existing asynchronous project save path is retained.
 
-## Verification
+## Original port verification
 
 On Linux, 2026-10-22, the Release build succeeds and **19/19 CTest suites pass** (76.37 seconds in the clean packaging build). The new suite contains 24 regression cases covering GIF editing, undo, persistence, short and merged export clocks, frame growth, filter-layer rendering and dialog cancellation, channel packing, line styles, PDF pages, PSD artboards, pressure coverage and Qt tablet-event delivery, font search and new-text faces, layer search, adaptive tools, and non-Latin shortcuts. Existing painting, text, deep-color, project-format, PSD, selection, and filter suites also pass.
 
@@ -43,4 +43,4 @@ The AppImage passes its version and bundled subject-model checks with `LD_LIBRAR
 
 ## Subsequent GPU work
 
-The CPU-rendering statements above describe the released 0.5.5 build. Current development adds optional Vulkan RGB Split acceleration with automatic CPU fallback. See [the GPU implementation and validation notes](RGB_SPLIT_GPU.md) for scope, quality tolerances, and measurements.
+The CPU-rendering and 19-suite statements above describe the initial 0.5.5 assets. The same release has since been refreshed with shared Vulkan rendering, accelerated filters and compositing, OpenGL canvas presentation, and asynchronous Camera RAW previews. See [the current coverage and validation notes](GPU_ROLLOUT.md). The version and release asset names remain 0.5.5.

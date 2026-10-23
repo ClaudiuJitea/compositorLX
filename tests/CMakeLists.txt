@@ -166,3 +166,17 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME rgb_split_shader_source_check
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/compile-rgb-split-shader.py" --check)
 endif()
+
+add_executable(gpu_renderer_tests TestGpuRenderer.cpp)
+target_link_libraries(gpu_renderer_tests PRIVATE compositor_core Qt6::Test)
+add_test(NAME gpu_renderer_tests COMMAND gpu_renderer_tests)
+add_test(NAME gpu_renderer_no_driver_tests COMMAND gpu_renderer_tests --fallback)
+set_tests_properties(gpu_renderer_no_driver_tests PROPERTIES ENVIRONMENT
+    "VK_DRIVER_FILES=/nonexistent/compositor-vulkan-icd.json;VK_ICD_FILENAMES=/nonexistent/compositor-vulkan-icd.json")
+if(Python3_Interpreter_FOUND)
+    add_test(NAME rendering_shader_source_check COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/compile-rendering-shader.py" --check)
+endif()
+
+add_executable(gpu_ui_tests TestGpuUi.cpp)
+target_link_libraries(gpu_ui_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME gpu_ui_tests COMMAND gpu_ui_tests -platform offscreen)

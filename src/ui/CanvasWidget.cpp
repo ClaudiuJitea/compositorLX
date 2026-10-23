@@ -1,3 +1,5 @@
+#include "ui/GpuViewport.h"
+#include "rendering/GpuRenderer.h"
 #include "ui/CanvasWidget.h"
 #include "rendering/ShapeLine.h"
 #include <QTabletEvent>
@@ -199,6 +201,7 @@ CanvasWidget::CanvasWidget(QWidget *parent)
     setMouseTracking(true);
     setAutoFillBackground(false);
     connect(&renderWatcher_, &QFutureWatcher<QImage>::finished, this, [this] {
+        renderActive_ = false;
         const quint64 completed = renderWatcher_.property("generation").toULongLong();
         const QImage image = renderWatcher_.result();
         if (completed == renderGeneration_ && !image.isNull()) {
@@ -224,14 +227,23 @@ CanvasWidget::CanvasWidget(QWidget *parent)
     auto *ants = new QTimer(this); ants->setInterval(120);
     connect(ants, &QTimer::timeout, this, [this] { if (document_ && document_->selection) update(); });
     ants->start();
+    configurePresentation();
+}
+
+void CanvasWidget::configurePresentation()
+{
+    if(GpuRenderer::backend()==RenderBackend::Cpu){if(gpuViewport_)gpuViewport_->hide();return;}
+    if(!gpuViewport_&&!gpuViewportAttempted_){gpuViewportAttempted_=true;gpuViewport_=createGpuViewport(this,[this](QPainter &painter){paintCanvas(painter);});}
+    if(gpuViewport_&&!gpuViewport_->property("failed").toBool())gpuViewport_->show();
 }
 
 void CanvasWidget::invalidateDocument()
 {
+    configurePresentation();
     renderDirty_ = true;
     ++renderGeneration_;
     if (!renderedDocument_.isNull()) {
-        if (renderWatcher_.isRunning()) renderAgain_ = true;
+        if (renderActive_) renderAgain_ = true;
         else startBackgroundRender();
     }
     update();
@@ -277,10 +289,11 @@ QRectF CanvasWidget::maskAloneBadgeRect() const
 void CanvasWidget::startBackgroundRender()
 {
     if (!document_ || renderedDocument_.isNull()) return;
-    if (renderWatcher_.isRunning()) return;
+    if (renderActive_) return;
     Document snapshot = *document_;
     applyPreviewState(snapshot);
     renderWatcher_.setProperty("generation", QVariant::fromValue(renderGeneration_));
+    renderActive_ = true;
     renderWatcher_.setFuture(QtConcurrent::run([snapshot] { return LayerRenderer::flattened(snapshot); }));
 }
 
@@ -581,7 +594,13 @@ void CanvasWidget::drawCheckerboard(QPainter &painter, const QRectF &area) const
 void CanvasWidget::paintEvent(QPaintEvent *event)
 {
     Q_UNUSED(event)
+    if(gpuViewport_&&!gpuViewport_->isHidden()){gpuViewport_->update();return;}
     QPainter painter(this);
+    paintCanvas(painter);
+}
+
+void CanvasWidget::paintCanvas(QPainter &painter)
+{
     // The surround follows the theme: a quiet near-black on a dark scheme, a neutral gray on a light one, so the picture
     // is judged against the same tones as the rest of the window.
     const QColor window = palette().color(QPalette::Window), text = palette().color(QPalette::WindowText);
@@ -609,7 +628,9 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
     const double deviceScale = zoom_ * devicePixelRatioF();
     QImage displaySource=renderedDocument_;
     if(proofProfile_){if(proofCache_.isNull()||proofSourceKey_!=renderedDocument_.cacheKey()){proofCache_=CMYK::proof(renderedDocument_,*proofProfile_,gamutWarning_,proofEnabled_);proofSourceKey_=renderedDocument_.cacheKey();}displaySource=proofCache_;}
-    const QImage displayImage = DeepImage::dithered(DownsampleCache::shared().image(displaySource, deviceScale));
+    const QImage reduced=DownsampleCache::shared().image(displaySource,deviceScale);
+    if(displayImageKey_!=reduced.cacheKey()) {displayImageCache_=DeepImage::dithered(reduced);displayImageKey_=reduced.cacheKey();}
+    const QImage &displayImage=displayImageCache_;
     painter.save();
     painter.setClipRect(target);
     painter.translate(target.topLeft());
@@ -932,6 +953,7 @@ void CanvasWidget::paintEvent(QPaintEvent *event)
 void CanvasWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    if(gpuViewport_)gpuViewport_->setGeometry(rect());
     if (fitPending_) fitCanvas();
     else emit viewportChanged();
 }

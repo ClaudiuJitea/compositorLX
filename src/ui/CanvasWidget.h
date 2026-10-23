@@ -248,6 +248,12 @@ protected:
     bool focusNextPrevChild(bool next) override { Q_UNUSED(next); return false; }
 
 private:
+    QWidget *gpuViewport_ = nullptr;
+    bool gpuViewportAttempted_ = false;
+    QImage displayImageCache_;
+    qint64 displayImageKey_ = 0;
+    void configurePresentation();
+    void paintCanvas(QPainter &painter);
     [[nodiscard]] QRectF selectedLayersBounds() const;
     [[nodiscard]] QSet<QUuid> transformLayerIds() const;
     [[nodiscard]] bool transformsAsGroup() const;
@@ -295,6 +301,7 @@ private:
     bool renderAgain_ = false;
     quint64 renderGeneration_ = 0;
     QFutureWatcher<QImage> renderWatcher_;
+    bool renderActive_ = false;
     std::optional<QPair<QUuid, BlendMode>> blendModePreview_;
     std::optional<QUuid> textEditingLayer_;
     double zoom_ = 1.0;
