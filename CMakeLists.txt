@@ -13,6 +13,10 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Network)
 find_package(ZLIB REQUIRED)
+option(COMPOSITOR_ENABLE_VULKAN "Build optional Vulkan RGB Split acceleration" ON)
+if(COMPOSITOR_ENABLE_VULKAN)
+    find_path(COMPOSITOR_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
+endif()
 find_path(POPPLER_QT6_INCLUDE_DIR poppler-qt6.h PATH_SUFFIXES poppler/qt6 REQUIRED)
 find_library(POPPLER_QT6_LIBRARY NAMES poppler-qt6 REQUIRED)
 find_path(GIF_INCLUDE_DIR gif_lib.h REQUIRED)
@@ -143,6 +147,7 @@ add_library(compositor_core
     src/rendering/LayerRenderer.h
     src/rendering/LayerEffectsRenderer.cpp
     src/rendering/LayerEffectsRenderer.h
+    src/rendering/RgbSplitVulkan.cpp
     src/rendering/RgbSplit.cpp
     src/rendering/ProgressiveBlur.cpp
     src/rendering/DeepImage.cpp
@@ -177,6 +182,13 @@ if(OpenMP_C_FOUND)
     target_link_libraries(compositor_core PRIVATE OpenMP::OpenMP_C OpenMP::OpenMP_CXX)
 endif()
 target_link_libraries(compositor_core PUBLIC Qt6::Core Qt6::Gui Qt6::Concurrent ZLIB::ZLIB)
+if(COMPOSITOR_ENABLE_VULKAN AND COMPOSITOR_VULKAN_INCLUDE_DIR)
+    target_include_directories(compositor_core PRIVATE "${COMPOSITOR_VULKAN_INCLUDE_DIR}")
+    target_compile_definitions(compositor_core PRIVATE COMPOSITOR_HAVE_VULKAN=1)
+    message(STATUS "Vulkan RGB Split: enabled (runtime loader, CPU fallback)")
+else()
+    message(STATUS "Vulkan RGB Split: disabled (CPU fallback)")
+endif()
 if(TARGET heif OR LIBHEIF_FOUND OR (LIBHEIF_INCLUDE_DIR AND LIBHEIF_LIBRARY))
     if(TARGET heif)
         target_link_libraries(compositor_core PRIVATE heif)

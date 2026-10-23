@@ -1,4 +1,5 @@
 #include "rendering/RgbSplit.h"
+#include "rendering/RgbSplitVulkan.h"
 #include "rendering/ProgressiveBlur.h"
 #include "rendering/RasterOperations.h"
 #include <QJsonArray>
@@ -7,10 +8,37 @@
 #include <cmath>
 
 namespace compositor {
-QImage RgbSplitSettings::apply(const QImage &image, unsigned sides) const
+QImage RgbSplitSettings::apply(const QImage &image, unsigned sides, RgbSplitBackend backend, RgbSplitExecution *execution) const
+{
+    RgbSplitExecution report;
+    if (backend == RgbSplitBackend::Auto) {
+        const auto choice = qgetenv("COMPOSITOR_RGB_SPLIT_BACKEND").toLower();
+        if (choice == "cpu") backend = RgbSplitBackend::Cpu;
+        else if (choice == "vulkan") backend = RgbSplitBackend::Vulkan;
+        else {
+            // Small images and cheap effects cost less than conversion/dispatch. These
+            // conservative cutoffs include transfers in the measured GPU render time.
+            const double samples = std::clamp(std::ceil(distance * 2) + 1, 1., 48.)
+                * (blur > 0 ? std::clamp(std::ceil(blur / 3), 2., 24.) : 1.);
+            backend = qint64(image.width()) * image.height() >= 262144 && samples >= 16
+                ? RgbSplitBackend::Vulkan : RgbSplitBackend::Cpu;
+        }
+    }
+    if (!image.isNull() && (distance > 0 || blur > 0) && backend == RgbSplitBackend::Vulkan) {
+        QImage accelerated = tryRgbSplitVulkan(image, *this, sides, report);
+        if (!accelerated.isNull()) { if (execution) *execution = report; return accelerated; }
+    }
+    if (execution) *execution = report;
+    return applyCpu(image, sides);
+}
+
+QImage RgbSplitSettings::applyCpu(const QImage &image, unsigned sides) const
 {
     if (image.isNull() || (distance <= 0 && blur <= 0)) return image;
+    for (double value : {distance, blur, angle, reach, center.x(), center.y()})
+        if (!std::isfinite(value)) return image;
     const QImage source = image.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+    if (source.isNull()) return {};
     QImage result(source.size(), source.format());
     if (result.isNull()) return {};
     const int width = source.width(), height = source.height();
@@ -20,8 +48,8 @@ QImage RgbSplitSettings::apply(const QImage &image, unsigned sides) const
     const qsizetype outStride = result.bytesPerLine() / sizeof(float);
     const double radians = angle * M_PI / 180;
     const QPointF direction(std::cos(radians), std::sin(radians));
-    const int spectral = std::clamp(int(std::ceil(distance * 2)) + 1, 1, 48);
-    const int smear = blur > 0 ? std::clamp(int(std::ceil(blur / 3)), 2, 24) : 1;
+    const int spectral = std::clamp(int(std::clamp(std::ceil(distance * 2), 0.0, 47.0)) + 1, 1, 48);
+    const int smear = blur > 0 ? std::clamp(int(std::clamp(std::ceil(blur / 3), 2.0, 24.0)), 2, 24) : 1;
     const auto smooth = [](double a, double b, double x) {
         const double t = std::clamp((x - a) / (b - a), 0.0, 1.0);
         return t * t * (3 - 2 * t);

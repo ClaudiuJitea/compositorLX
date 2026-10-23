@@ -23,6 +23,12 @@
 
 CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v17), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
 
+## GPU acceleration (development)
+
+Current source builds can accelerate **RGB Split** with Vulkan, including RGB Split filter layers. Larger effects use the GPU automatically; small or inexpensive effects stay on the CPU. Missing Vulkan drivers, unsupported hardware, and GPU allocation failures fall back to CPU rendering. This is the first GPU filter; other filters still use their existing renderers.
+
+On the tested Intel Iris Xe, 1080p RGB Split was **2.5× faster**, or **8.5× faster with blur streaks**, including conversion and transfers. Results depend on hardware and settings. See [benchmarks, quality checks, and backend controls](docs/RGB_SPLIT_GPU.md). The published 0.5.5 packages predate this development change.
+
 ## What's new in version 0.5.5
 
 Ports the feature additions through Compositor 1.5.5 and the subsequent GIF, layer-search, and adaptive-toolbar changes in upstream `bd76fc9`.
@@ -204,7 +210,7 @@ The editable suite icon is `packaging/icons/compositor-lx.svg`. After changing i
 ```sh
 sudo apt install qt6-base-dev qt6-image-formats-plugins libheif-dev libraw-dev zlib1g-dev \
     libopenexr-dev libimath-dev liblcms2-dev libjpeg-dev libtiff-dev liblensfun-dev liblensfun-data-v1 \
-    libpoppler-qt6-dev libgif-dev cmake ninja-build
+    libpoppler-qt6-dev libgif-dev libvulkan-dev cmake ninja-build
 ```
 
 ```sh
@@ -212,6 +218,8 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/compositor-lx [path/to/project.comp]
 ```
+
+Vulkan headers are optional; omit them or pass `-DCOMPOSITOR_ENABLE_VULKAN=OFF` for a CPU-only build. GPU rendering uses the system Vulkan loader and graphics driver at runtime. No shader compiler is needed for a normal build.
 
 The first configure downloads checksum-pinned ONNX Runtime and the U²-Net model. Remove Background always runs on the local machine.
 

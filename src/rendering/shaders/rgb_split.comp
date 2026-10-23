@@ -1,0 +1,46 @@
+#version 450
+// Keep the equations in sync with RgbSplitSettings::applyCpu. CPU-generated jitter avoids
+// implementation-dependent sin() precision changing the sample pattern between devices.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0) readonly buffer Source { vec4 pixels[]; } source;
+layout(std430, binding = 1) readonly buffer Jitter { float values[]; } jitter;
+layout(std430, binding = 2) writeonly buffer Output { vec4 pixels[]; } target;
+layout(push_constant) uniform Parameters {
+    uint width, height, spectral, smear;
+    float distance, blur, directionX, directionY;
+    float centerX, centerY, reach;
+    uint radial, edges;
+} p;
+
+vec4 sampleAt(vec2 q) {
+    if ((q.x < 0 && (p.edges & 1u) == 0) || (q.x > p.width && (p.edges & 2u) == 0)
+        || (q.y < 0 && (p.edges & 4u) == 0) || (q.y > p.height && (p.edges & 8u) == 0)) return vec4(0);
+    vec2 pos = clamp(q - .5, vec2(0), vec2(p.width - 1, p.height - 1));
+    uvec2 a = uvec2(pos), b = min(a + 1u, uvec2(p.width - 1, p.height - 1));
+    vec2 f = pos - vec2(a);
+    return mix(mix(source.pixels[a.y * p.width + a.x], source.pixels[a.y * p.width + b.x], f.x),
+               mix(source.pixels[b.y * p.width + a.x], source.pixels[b.y * p.width + b.x], f.x), f.y);
+}
+void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (pixel.x >= p.width || pixel.y >= p.height) return;
+    uint index = pixel.y * p.width + pixel.x;
+    vec2 at = vec2(pixel) + .5;
+    vec2 axis = p.radial != 0 ? (at - vec2(p.centerX, p.centerY)) / max(1., p.reach)
+                             : vec2(p.directionX, p.directionY);
+    float noise = jitter.values[index];
+    vec3 color = vec3(0), alpha = vec3(0), total = vec3(0);
+    for (uint i = 0; i < p.spectral; ++i) {
+        float t = p.spectral == 1 ? 0 : (float(i) + noise) / float(p.spectral) * 2 - 1;
+        vec3 weight = vec3(smoothstep(-.3, 1., t), 1 - smoothstep(0., 1., abs(t)) + .05, smoothstep(-.3, 1., -t));
+        for (uint j = 0; j < p.smear; ++j) {
+            float u = p.smear == 1 ? 0 : (float(j) + noise) / float(p.smear);
+            vec4 value = sampleAt(at - axis * (p.distance * t + p.blur * u));
+            color += weight * value.rgb;
+            alpha += weight * value.a;
+            total += weight;
+        }
+    }
+    alpha /= total;
+    target.pixels[index] = vec4(color / total, max(max(alpha.r, alpha.g), alpha.b));
+}

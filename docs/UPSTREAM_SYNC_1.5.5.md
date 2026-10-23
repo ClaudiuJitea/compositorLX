@@ -40,3 +40,7 @@ The build environment is Ubuntu 26.04, Qt 6.10.2, and GCC 15.2.0. Poppler Qt6 an
 Build and validation logs are `/tmp/055-packaging-final.log` and `/tmp/055-workspace-build.log`. Passing Linux tests does not establish a macOS runtime or pixel-for-pixel comparison.
 
 The AppImage passes its version and bundled subject-model checks with `LD_LIBRARY_PATH` and `QT_PLUGIN_PATH` removed. Extracted binary inspection finds no missing libraries or temporary development-prefix dependency. AppImage and Debian checksums verify; packaged dependency notices and model assets are present. Both binaries require glibc 2.43 or newer. Release assets are `CompositorLX-0.5.5-x86_64.AppImage`, `compositorlx_0.5.5_amd64.deb`, and `SHA256SUMS`.
+
+## Subsequent GPU work
+
+The CPU-rendering statements above describe the released 0.5.5 build. Current development adds optional Vulkan RGB Split acceleration with automatic CPU fallback. See [the GPU implementation and validation notes](RGB_SPLIT_GPU.md) for scope, quality tolerances, and measurements.

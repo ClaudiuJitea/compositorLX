@@ -154,3 +154,15 @@ add_test(NAME upstream15_tests COMMAND upstream15_tests -platform offscreen -noc
 add_executable(upstream155_tests TestUpstream155.cpp)
 target_link_libraries(upstream155_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME upstream155_tests COMMAND upstream155_tests -platform offscreen -nocrashhandler)
+
+add_executable(rgb_split_gpu_tests TestRgbSplitGpu.cpp)
+target_link_libraries(rgb_split_gpu_tests PRIVATE compositor_core Qt6::Test)
+add_test(NAME rgb_split_gpu_tests COMMAND rgb_split_gpu_tests)
+add_test(NAME rgb_split_no_driver_tests COMMAND rgb_split_gpu_tests --fallback)
+set_tests_properties(rgb_split_no_driver_tests PROPERTIES ENVIRONMENT
+    "VK_DRIVER_FILES=/nonexistent/compositor-vulkan-icd.json;VK_ICD_FILENAMES=/nonexistent/compositor-vulkan-icd.json")
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME rgb_split_shader_source_check
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/compile-rgb-split-shader.py" --check)
+endif()
