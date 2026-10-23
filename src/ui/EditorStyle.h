@@ -426,6 +426,22 @@ inline QString editorStyleTemplate()
         QWidget#layerFooter QToolButton:focus { border-color: @focus@; }
         QWidget#layerFooter QToolButton::menu-indicator { image: none; }
         QWidget#layerFooter QToolButton#deleteLayerButton:hover { background: @dangerSoft@; border-color: @dangerBorder@; }
+        QWidget#inspectorHeading QToolButton { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0; min-height: 0; }
+        QWidget#inspectorHeading QToolButton:hover { background: @controlHover@; }
+        QWidget#inspectorHeading QToolButton:checked { background: transparent; }
+        QWidget#inspectorHeading QToolButton::menu-indicator { image: none; width: 0; }
+        QWidget#inspectorHeading QLineEdit#layerSearch { border: 1px solid @focus@; border-radius: 6px; }
+        QWidget#gifTimeline { border-top: 1px solid @separator@; }
+        QFrame#gifDivider { color: @separator@; background: @separator@; border: none; max-width: 1px; }
+        QToolButton#gifPlay { border: none; border-radius: 19px; background: @control@; min-width: 70px; max-width: 70px; min-height: 40px; max-height: 40px; padding: 0; }
+        QToolButton#gifPlay:hover { background: @controlHover@; }
+        QToolButton#gifPlay:pressed { background: @controlPressed@; }
+        QToolButton#gifDelay { border: none; background: transparent; color: @textMuted@; min-height: 0; padding: 2px 6px; }
+        QToolButton#gifDelay:hover { color: @text@; }
+        QToolButton#gifDelay::menu-indicator { image: none; width: 0; }
+        QListWidget#gifFrames { background: transparent; border: none; }
+        QListWidget#gifFrames::item { color: @textMuted@; background: transparent; border: none; }
+        QListWidget#gifFrames::item:selected { color: @text@; background: transparent; }
         QTextEdit#inlineTextEditor { background: transparent; border: 0; border-radius: 0; padding: 0; selection-background-color: @accent@; }
         QTextEdit#inlineTextEditor QWidget { background: transparent; }
         QLabel#inlineTextGrip { color: @accentText@; background: transparent; border: 0; font-size: 13px; }

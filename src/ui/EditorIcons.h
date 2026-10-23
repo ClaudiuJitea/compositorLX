@@ -192,6 +192,18 @@ public:
             p.drawText(QRectF(2, 3, 20, 18), Qt::AlignCenter, QStringLiteral("fx"));
             break;
         }
+        case 32: // Close (the layer search's x)
+            p.drawLine(QPointF(7, 7), QPointF(17, 17)); p.drawLine(QPointF(17, 7), QPointF(7, 17)); break;
+        case 33: // Filter (three lines, each shorter than the one above)
+            p.drawLine(QPointF(5, 7.5), QPointF(19, 7.5));
+            p.drawLine(QPointF(7.5, 12), QPointF(16.5, 12));
+            p.drawLine(QPointF(10, 16.5), QPointF(14, 16.5)); break;
+        case 34: // Play
+            p.setBrush(ink); p.setPen(Qt::NoPen);
+            p.drawPolygon(QPolygonF{QPointF(8, 5.5), QPointF(18.5, 12), QPointF(8, 18.5)}); break;
+        case 35: // Pause
+            p.setBrush(ink); p.setPen(Qt::NoPen);
+            p.drawRoundedRect(QRectF(7, 5.5, 3.5, 13), 1, 1); p.drawRoundedRect(QRectF(13.5, 5.5, 3.5, 13), 1, 1); break;
         default: break;
         }
 
@@ -200,4 +212,6 @@ public:
 private:
     int kind_;
 };
+
+inline QIcon editorIcon(int kind) { return QIcon(new EditorIconEngine(kind)); }
 } // namespace compositor

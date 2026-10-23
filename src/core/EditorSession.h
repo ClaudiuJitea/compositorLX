@@ -67,8 +67,10 @@ public:
     bool insertImage(const QImage &image, const QString &name, const std::optional<QPointF> &center = std::nullopt);
     bool insertGif(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
     bool selectGifFrame(int index);
-    bool duplicateGifFrame();
-    bool deleteGifFrame();
+    // The selected frame, or the given one, which is selected first.
+    bool duplicateGifFrame(std::optional<int> index = std::nullopt);
+    bool deleteGifFrame(std::optional<int> index = std::nullopt);
+    bool setGifTiming(std::optional<int> uniformMilliseconds);
     bool setGifDelay(int milliseconds, bool sameForAll = false, bool original = false);
     bool insertPdf(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
     bool insertSvg(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);

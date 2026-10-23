@@ -25,8 +25,9 @@ bool EditorSession::selectGifFrame(int index)
     layer->gif->selected = index; layer->image = image;
     advanceRevision(); return true;
 }
-bool EditorSession::duplicateGifFrame()
+bool EditorSession::duplicateGifFrame(std::optional<int> index)
 {
+    if (index && !selectGifFrame(*index)) return false;
     Layer *layer = activeLayer(); if (!layer || !layer->gif || layer->gif->frames.size() >= 4096) return false;
     const auto before = *layer->gif;
     const auto &a = before;
@@ -37,11 +38,14 @@ bool EditorSession::duplicateGifFrame()
     layer = activeLayer();
     auto &edited = *layer->gif;
     edited.frames.insert(position + 1, {identity, a.frames[position].sourceIndex});
-    edited.pixels.insert(identity, layer->image); edited.delays.insert(identity, a.delay(a.selected)); edited.selected = identity;
+    // The copy keeps the frame's own delay override, if it has one, as on macOS; "Same for all" still covers it.
+    edited.pixels.insert(identity, layer->image); if (a.delays.contains(a.selected)) edited.delays.insert(identity, a.delays.value(a.selected));
+    edited.selected = identity;
     endEdit(); return true;
 }
-bool EditorSession::deleteGifFrame()
+bool EditorSession::deleteGifFrame(std::optional<int> index)
 {
+    if (index && !selectGifFrame(*index)) return false;
     Layer *layer = activeLayer(); if (!layer || !layer->gif || layer->gif->frames.size() <= 1) return false;
     auto &a = *layer->gif;
     const auto it = std::find_if(a.frames.begin(), a.frames.end(), [&](const auto &f) { return f.index == a.selected; });
@@ -67,6 +71,19 @@ bool EditorSession::setGifDelay(int milliseconds, bool sameForAll, bool original
     if (sameForAll) a.uniformDelay = milliseconds;
     else if (original) a.delays.remove(a.selected);
     else a.delays.insert(a.selected, milliseconds);
+    endEdit(); return true;
+}
+// The timeline's delay menu: every frame for the same time, or (nullopt) each for its own, the GIF's original.
+bool EditorSession::setGifTiming(std::optional<int> uniformMilliseconds)
+{
+    Layer *layer = activeLayer();
+    if (!layer || !layer->gif || (uniformMilliseconds && (*uniformMilliseconds < 20 || *uniformMilliseconds > 655350))) return false;
+    const auto &a = *layer->gif;
+    if (uniformMilliseconds ? a.sameDelay && a.uniformDelay == *uniformMilliseconds : !a.sameDelay) return true;
+    beginEdit(QStringLiteral("Change GIF Delays"));
+    layer = activeLayer();
+    layer->gif->sameDelay = bool(uniformMilliseconds);
+    if (uniformMilliseconds) layer->gif->uniformDelay = *uniformMilliseconds;
     endEdit(); return true;
 }
 void EditorSession::captureGifEdits()

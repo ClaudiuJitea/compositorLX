@@ -8,6 +8,9 @@
 #include <QAction>
 #include <QDialog>
 #include <QDir>
+#include <QFile>
+#include <QLineEdit>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QAbstractItemView>
 #include <QPainter>
@@ -87,6 +90,18 @@ int main(int argc, char **argv)
     window.syncDocumentViews();
     if (0 < buttons.size()) buttons.at(0)->click();
     grab(QStringLiteral("layers-effects-text"));
+    // The Layers panel's search, open on a name, and its kind menu.
+    if (auto *search = window.findChild<QToolButton *>(QStringLiteral("layerSearchButton"))) search->click();
+    if (auto *field = window.findChild<QLineEdit *>(QStringLiteral("layerSearch"))) field->setText(QStringLiteral("s"));
+    grab(QStringLiteral("layers-search"));
+    if (auto *field = window.findChild<QLineEdit *>(QStringLiteral("layerSearch"))) field->clear();
+    if (auto *search = window.findChild<QToolButton *>(QStringLiteral("layerSearchButton"))) search->click();
+    // A GIF layer and its timeline under the canvas: three 8 × 8 frames, red, green and blue.
+    {
+        QTemporaryDir dir; const QString path = dir.filePath(QStringLiteral("Colors.gif")); QFile file(path);
+        if (file.open(QIODevice::WriteOnly)) { file.write(QByteArray::fromBase64("R0lGODlhCAAIAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQIBAAAACwAAAAACAAIAAAIDwABCBxIsKDBgwgTKkwYEAAh+QQICAAAACwAAAAACAAIAIEAgAAAAAAAAAAAAAAIDwABCBxIsKDBgwgTKkwYEAAh+QQIDAAAACwAAAAACAAIAIEAAP8AAAAAAAAAAAAIDwABCBxIsKDBgwgTKkwYEAA7")); file.close(); }
+        if (s.insertGif(path, QPointF(800, 450))) { s.duplicateGifFrame(); window.syncDocumentViews(); grab(QStringLiteral("gif-timeline")); s.undo(); s.undo(); window.syncDocumentViews(); }
+    }
     // Dialogs: open each through its menu action, grab it while it runs, close it.
     for (const Layer &layer : s.document()->layers) if (layer.name == QLatin1String("Sky")) { s.selectLayer(layer.id); s.selectMaskTarget(false); break; }
     s.deselect();

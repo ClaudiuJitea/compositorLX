@@ -9,6 +9,7 @@
 #include <QPointer>
 #include <QVector>
 #include <QMap>
+#include <QSet>
 #include <QFuture>
 #include <QFutureWatcher>
 #include <QMessageBox>
@@ -19,6 +20,7 @@
 
 class QDialog;
 class QListView;
+class QLineEdit;
 class QLabel;
 class QComboBox;
 class QCheckBox;
@@ -84,6 +86,10 @@ public:
     // The Layers panel's right-click menu for the active layer (mac NativeLayerList.contextMenu), and the row selection a
     // right-click makes first. Both are used by the panel and by tests.
     void populateLayerContextMenu(QMenu &menu);
+    // The Layers panel's search text and kind toggles applied to the list (macOS LayersHeader).
+    void applyLayerFilter();
+    void setLayerSearchOpen(bool open);
+    void updateLayerFilterState();
     void selectRowForContextMenu(const QModelIndex &index);
     void updateRulerVisibility();
     void toggleCanvasOnly();
@@ -213,6 +219,7 @@ private:
     void setupCMYK(QMenu *view);
     void resizeImageDialog();
     void resizeCanvasDialog();
+    void keepZoomRecentered();
     void cropDialog();
     void trimDialog();
     void levelsDialog();
@@ -303,6 +310,12 @@ private:
     Qt::WindowStates stateBeforeCanvasOnly_;
     QDoubleSpinBox *zoomField_ = nullptr;
     QLabel *layerCount_ = nullptr;
+    QWidget *layersTitle_ = nullptr;
+    QLineEdit *layerSearch_ = nullptr;
+    QToolButton *layerSearchButton_ = nullptr;
+    QToolButton *layerFilterButton_ = nullptr;
+    QWidget *layerNoMatch_ = nullptr;
+    QSet<QString> layerFilterTypes_;
     QLabel *statusDimensions_ = nullptr;
     QLabel *statusHint_ = nullptr;
     QLabel *foregroundSwatch_ = nullptr;

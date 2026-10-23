@@ -29,8 +29,11 @@ public:
     };
 
     void setDocument(std::shared_ptr<Document> document, bool reset = true);
-    void setFilter(const QString &name, const QString &type, const QSet<QUuid> &selected = {});
-    bool isFiltered() const { return !filterName_.isEmpty() || filterType_ != "All"; }
+    // The Layers panel's search: a name, and the kinds of layer shown ("Images", "Shapes", "Text", "Folders",
+    // "Adjustments", "Selected"), none meaning every kind, as macOS LayerType.
+    void setFilter(const QString &name, const QSet<QString> &types = {}, const QSet<QUuid> &selected = {});
+    bool isFiltered() const { return !filterName_.isEmpty() || !filterTypes_.isEmpty(); }
+    [[nodiscard]] static QString layerType(const Layer &layer);
     // The layer whose mask is shown alone on the canvas; its mask thumbnail is outlined in white.
     void setMaskAlone(const std::optional<QUuid> &id);
     [[nodiscard]] std::optional<QUuid> layerId(const QModelIndex &index) const;
@@ -72,7 +75,8 @@ private:
     [[nodiscard]] QVector<Item> visibleItems() const;
     [[nodiscard]] int depthFor(const Layer &layer) const;
     std::shared_ptr<Document> document_;
-    QString filterName_, filterType_ = "All";
+    QString filterName_;
+    QSet<QString> filterTypes_;
     QSet<QUuid> filterSelected_;
     QSet<QUuid> collapsed_;
     QSet<QUuid> effectsCollapsed_;

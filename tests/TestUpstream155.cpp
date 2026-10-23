@@ -31,6 +31,7 @@
 #include <QListWidget>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QToolButton>
 #include <QCheckBox>
 #include <QTimer>
 
@@ -168,14 +169,15 @@ private slots:
     void layerSearchPreservesHierarchyAndFindsHiddenChildren() {
         EditorSession s;s.createDocument(50,50);s.insertImage(solid(Qt::red),"Needle");s.groupSelectedLayers();
         LayerListModel model;model.setDocument(s.document());const auto folder=s.activeLayer()->id;model.toggleExpanded(folder);
-        model.setFilter("Needle","All");QCOMPARE(model.rowCount(),2);
-        model.setFilter("no match","All");QCOMPARE(model.rowCount(),0);
-        model.setFilter("","Groups");QCOMPARE(model.rowCount(),2);
+        // As macOS: a match is listed without its folder, and a matching folder brings its contents along.
+        model.setFilter("Needle");QCOMPARE(model.rowCount(),1);
+        model.setFilter("no match");QCOMPARE(model.rowCount(),0);
+        model.setFilter("",{"Folders"});QCOMPARE(model.rowCount(),2);
     }
     void selectedFilterFollowsTheCurrentSelection() {
         MainWindow w; w.session().insertImage(solid(Qt::red), "First"); const auto first=w.session().activeLayer()->id;
         w.session().insertImage(solid(Qt::blue), "Second"); const auto second=w.session().activeLayer()->id; w.syncDocumentViews();
-        w.findChild<QComboBox *>("layerTypeFilter")->setCurrentText("Selected");
+        w.findChild<QAction *>("layerFilterSelected")->setChecked(true);
         QCOMPARE(w.layerModel()->rowCount(),1); QCOMPARE(*w.layerModel()->layerId(w.layerModel()->index(0,0)), second);
         w.session().selectLayer(first); w.syncDocumentViews(false); QCOMPARE(w.layerModel()->rowCount(),1);
         QCOMPARE(*w.layerModel()->layerId(w.layerModel()->index(0,0)), first); w.session().markSaved();
@@ -230,8 +232,8 @@ private slots:
     void timelineAndSearchControlsWorkInWindow() {
         QTemporaryDir dir; MainWindow w;w.resize(1100,700);w.show();QVERIFY(w.openProject(fixture(dir)));QCoreApplication::processEvents();
         auto *frames=w.findChild<QListWidget *>("gifFrames");QVERIFY(frames);QCOMPARE(frames->count(),3);frames->setCurrentRow(2);QCOMPARE(w.session().activeLayer()->gif->selected,2);
-        auto *duplicate=w.findChild<QPushButton *>("gifDuplicate");QVERIFY(duplicate);duplicate->click();QCOMPARE(w.session().activeLayer()->gif->frames.size(),4);
-        auto *search=w.findChild<QLineEdit *>("layerSearch");QVERIFY(search);search->setText("not here");QCOMPARE(w.layerModel()->rowCount(),0);search->clear();QVERIFY(w.layerModel()->rowCount()>0);
+        auto *duplicate=w.findChild<QAction *>("gifDuplicate");QVERIFY(duplicate);duplicate->trigger();QCOMPARE(w.session().activeLayer()->gif->frames.size(),4);
+        auto *search=w.findChild<QLineEdit *>("layerSearch");QVERIFY(search);w.findChild<QToolButton *>("layerSearchButton")->click();QVERIFY(search->isVisible());search->setText("not here");QCOMPARE(w.layerModel()->rowCount(),0);search->clear();QVERIFY(w.layerModel()->rowCount()>0);
         w.session().markSaved();
     }
 };

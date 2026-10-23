@@ -77,6 +77,9 @@ std::optional<GifAnimation> GifIO::read(const QByteArray &data, QString *error)
         return fail(QStringLiteral("GIF dimensions exceed the image limit."));
     auto source = std::make_shared<GifSource>(); source->data = data; source->size = size;
     GifAnimation animation; animation.source = source;
+    // Timeline thumbnails up to 96 px, smaller for long GIFs so they stay within 16 MP together (macOS GIFDecoder).
+    const int count = std::max(1, reader.imageCount());
+    const int thumbnailSide = std::clamp(int(std::sqrt(16'000'000.0 / count)), 1, 96);
     while (reader.canRead()) {
         if (animation.frames.size() >= 4096) return fail(QStringLiteral("A GIF may contain at most 4096 frames."));
         const QImage image = reader.read();
@@ -84,7 +87,7 @@ std::optional<GifAnimation> GifIO::read(const QByteArray &data, QString *error)
         const int index = animation.frames.size();
         animation.frames.append({index, index});
         source->delays.append(std::clamp(reader.nextImageDelay(), 20, 655350));
-        source->thumbnails.append(image.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        source->thumbnails.append(image.scaled(thumbnailSide, thumbnailSide, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
     if (animation.frames.isEmpty()) return fail(QStringLiteral("The GIF has no readable frames."));
     return animation;

@@ -786,11 +786,6 @@ private:
     int dragging_ = -1;
 };
 
-QIcon editorIcon(int kind)
-{
-    return QIcon(new EditorIconEngine(kind));
-}
-
 // The tab's close cross, drawn when it is painted, in the theme's tones (so a theme switch carries it along).
 class TabCloseIconEngine final : public QIconEngine {
 public:
@@ -1956,22 +1951,56 @@ MainWindow::MainWindow(QWidget *parent)
     auto *layerHeading = new QWidget(inspector); layerHeading->setObjectName(QStringLiteral("inspectorHeading")); layerHeading->setFixedHeight(47);
     auto *headingLayout = new QHBoxLayout(layerHeading); headingLayout->setContentsMargins(14, 0, 12, 0);
     auto *layersTitle = new QLabel(tr("Layers"), layerHeading); layersTitle->setObjectName(QStringLiteral("sectionTitle"));
+    layersTitle_ = layersTitle;
     layerCount_ = new QLabel(QStringLiteral("0"), layerHeading); layerCount_->setObjectName(QStringLiteral("mutedLabel"));
-    headingLayout->addWidget(layersTitle); headingLayout->addStretch(); headingLayout->addWidget(layerCount_);
-    inspectorLayout->addWidget(layerHeading);
-    auto *layerSearch = new QLineEdit(inspector); layerSearch->setObjectName("layerSearch"); layerSearch->setPlaceholderText(tr("Search layers")); layerSearch->setClearButtonEnabled(true); layerSearch->setMinimumHeight(30);
-    auto *layerType = new QComboBox(layerHeading); layerType->setObjectName("layerTypeFilter"); layerType->addItems({"All", "Selected", "Images", "Text", "Shapes", "Adjustments", "Groups", "GIF"}); layerType->setMaximumWidth(105); headingLayout->insertWidget(1, layerType);
-    inspectorLayout->addWidget(layerSearch);
-    const auto filterLayers = [this, layerSearch, layerType] {
-        const auto selected = session_.selectedLayerIds();
-        const QSignalBlocker block(layerView_->selectionModel());
-        layerModel_->setFilter(layerSearch->text(), layerType->currentText(), selected);
-        for (int row = 0; row < layerModel_->rowCount(); ++row) {
-            const auto index = layerModel_->index(row, 0); const auto id = layerModel_->layerId(index);
-            if (id && selected.contains(*id)) layerView_->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
-        }
+    // A magnifier turns the title into a search field for layer names (and itself into a close button); the funnel
+    // opens the kinds of layer to show, tinted while one is on (macOS LayersHeader).
+    layerSearch_ = new QLineEdit(layerHeading); layerSearch_->setObjectName(QStringLiteral("layerSearch"));
+    layerSearch_->setPlaceholderText(tr("Search Layers")); layerSearch_->setMinimumHeight(30); layerSearch_->hide();
+    layerSearch_->addAction(editorIcon(23), QLineEdit::LeadingPosition);
+    const auto headerButton = [layerHeading](int icon, const QString &name, const QString &tip) {
+        auto *button = new QToolButton(layerHeading);
+        button->setObjectName(name); button->setIcon(editorIcon(icon)); button->setIconSize(QSize(16, 16));
+        button->setToolTip(tip); button->setAccessibleName(tip); button->setFixedSize(26, 26); button->setAutoRaise(true);
+        return button;
     };
-    connect(layerSearch, &QLineEdit::textChanged, this, filterLayers); connect(layerType, &QComboBox::currentTextChanged, this, filterLayers);
+    layerSearchButton_ = headerButton(23, QStringLiteral("layerSearchButton"), tr("Search layers by name"));
+    layerFilterButton_ = headerButton(33, QStringLiteral("layerFilterButton"), tr("Show only some kinds of layer"));
+    layerFilterButton_->setAccessibleName(tr("Filter the layer list"));
+    layerFilterButton_->setCheckable(true); layerFilterButton_->setPopupMode(QToolButton::InstantPopup);
+    auto *filterMenu = new QMenu(layerFilterButton_); filterMenu->setObjectName(QStringLiteral("layerFilterMenu"));
+    auto *allLayers = filterMenu->addAction(tr("All Layers")); allLayers->setObjectName(QStringLiteral("layerFilterAll")); allLayers->setCheckable(true);
+    filterMenu->addSeparator();
+    const QList<std::pair<QString, QString>> kinds{{"Images", tr("Images")}, {"Shapes", tr("Shapes")}, {"Text", tr("Text")},
+                                                   {"Folders", tr("Folders")}, {"Adjustments", tr("Adjustments")}, {"Selected", tr("Selected")}};
+    QList<QAction *> kindActions;
+    for (const auto &[kind, title] : kinds) {
+        if (kind == "Selected") filterMenu->addSeparator();
+        auto *action = filterMenu->addAction(title); action->setCheckable(true); action->setData(kind);
+        action->setObjectName(QStringLiteral("layerFilter") + kind);
+        connect(action, &QAction::toggled, this, [this, kind](bool on) {
+            if (on == layerFilterTypes_.contains(kind)) return;
+            if (on) layerFilterTypes_.insert(kind); else layerFilterTypes_.remove(kind);
+            applyLayerFilter();
+        });
+        kindActions << action;
+    }
+    // All Layers reads as on while no kind is, and turning it on clears them.
+    connect(allLayers, &QAction::triggered, this, [this] { layerFilterTypes_.clear(); applyLayerFilter(); });
+    connect(filterMenu, &QMenu::aboutToShow, this, [this, allLayers, kindActions] {
+        allLayers->setChecked(layerFilterTypes_.isEmpty());
+        for (auto *action : kindActions) { const QSignalBlocker block(action); action->setChecked(layerFilterTypes_.contains(action->data().toString())); }
+    });
+    layerFilterButton_->setMenu(filterMenu);
+    headingLayout->setSpacing(2);
+    headingLayout->addWidget(layersTitle); headingLayout->addWidget(layerSearch_, 1); headingLayout->addStretch();
+    headingLayout->addWidget(layerCount_); headingLayout->addSpacing(4);
+    headingLayout->addWidget(layerSearchButton_); headingLayout->addWidget(layerFilterButton_);
+    inspectorLayout->addWidget(layerHeading);
+    connect(layerSearchButton_, &QToolButton::clicked, this, [this] { setLayerSearchOpen(!layerSearch_->isVisible()); });
+    connect(layerSearch_, &QLineEdit::textChanged, this, [this] { applyLayerFilter(); });
+    connect(layerSearch_, &QLineEdit::editingFinished, this, [this] { if (layerSearch_->text().isEmpty()) setLayerSearchOpen(false); });
+    layerSearch_->installEventFilter(this);
     auto *appearance = new QWidget(inspector); appearance->setObjectName(QStringLiteral("appearancePanel")); appearance->setFixedHeight(83);
     auto *appearanceLayout = new QVBoxLayout(appearance); appearanceLayout->setContentsMargins(12, 8, 12, 8); appearanceLayout->setSpacing(6);
     auto *blendRow = new QHBoxLayout; auto *blendLabel = new QLabel(tr("Blend"), appearance);
@@ -2007,6 +2036,15 @@ MainWindow::MainWindow(QWidget *parent)
     layerView_->installEventFilter(this);
     layerView_->viewport()->installEventFilter(this);
     inspectorLayout->addWidget(layerView_, 1);
+    layerNoMatch_ = new QWidget(inspector); layerNoMatch_->setObjectName(QStringLiteral("layerNoMatch")); layerNoMatch_->hide();
+    {
+        auto *noMatchLayout = new QVBoxLayout(layerNoMatch_); noMatchLayout->setAlignment(Qt::AlignCenter); noMatchLayout->setSpacing(10);
+        auto *message = new QLabel(tr("No layers match the filter."), layerNoMatch_); message->setObjectName(QStringLiteral("mutedLabel")); message->setAlignment(Qt::AlignCenter);
+        auto *clearAll = new QPushButton(tr("Clear All"), layerNoMatch_); clearAll->setObjectName(QStringLiteral("layerFilterClearAll"));
+        connect(clearAll, &QPushButton::clicked, this, [this] { layerFilterTypes_.clear(); setLayerSearchOpen(false); applyLayerFilter(); });
+        noMatchLayout->addWidget(message); noMatchLayout->addWidget(clearAll, 0, Qt::AlignCenter);
+    }
+    inspectorLayout->addWidget(layerNoMatch_, 1);
     auto *layerFooter = new QWidget(inspector); layerFooter->setObjectName(QStringLiteral("layerFooter")); layerFooter->setFixedHeight(36);
     auto *footerLayout = new QHBoxLayout(layerFooter); footerLayout->setContentsMargins(8, 4, 6, 4); footerLayout->setSpacing(4);
     const auto layerButton = [layerFooter, footerLayout](int icon, const QString &name, const QString &tip) {
@@ -5712,7 +5750,53 @@ void MainWindow::resizeImageDialog()
     if (dialog.exec() != QDialog::Accepted) return;
     const Sampling modes[] = {Sampling::HighQuality, Sampling::Smooth, Sampling::Nearest};
     const QSize resultSize = draft->resample ? QSize(qRound(draft->width), qRound(draft->height)) : originalSize;
-    if (session_.resizeImage(resultSize, draft->resolution, modes[sampling->currentIndex()])) { const auto view = canvas_->viewState(); syncDocumentViews(); canvas_->restoreViewState(view); }
+    if (session_.resizeImage(resultSize, draft->resolution, modes[sampling->currentIndex()])) keepZoomRecentered();
+}
+
+void MainWindow::setLayerSearchOpen(bool open)
+{
+    if (!layerSearch_) return;
+    if (!open && !layerSearch_->text().isEmpty()) layerSearch_->clear();
+    layersTitle_->setVisible(!open); layerCount_->setVisible(!open); layerSearch_->setVisible(open);
+    layerSearchButton_->setIcon(editorIcon(open ? 32 : 23));
+    layerSearchButton_->setToolTip(open ? tr("Close the search") : tr("Search layers by name"));
+    layerSearchButton_->setAccessibleName(open ? tr("Close search") : tr("Search layers"));
+    if (open) layerSearch_->setFocus();
+}
+
+void MainWindow::applyLayerFilter()
+{
+    if (!layerModel_ || !layerView_) return;
+    const auto selected = session_.selectedLayerIds();
+    {
+        const QSignalBlocker block(layerView_->selectionModel());
+        layerModel_->setFilter(layerSearch_->text(), layerFilterTypes_, selected);
+        for (int row = 0; row < layerModel_->rowCount(); ++row) {
+            const auto index = layerModel_->index(row, 0); const auto id = layerModel_->layerId(index);
+            if (id && selected.contains(*id)) layerView_->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+        }
+    }
+    updateLayerFilterState();
+}
+
+// The funnel is tinted while a kind is on; the list gives way to "No layers match" and Clear All when nothing does.
+void MainWindow::updateLayerFilterState()
+{
+    if (!layerFilterButton_) return;
+    layerFilterButton_->setChecked(!layerFilterTypes_.isEmpty());
+    const bool hasLayers = document_ && !document_->layers.isEmpty();
+    layerSearchButton_->setEnabled(hasLayers || layerSearch_->isVisible());
+    layerFilterButton_->setEnabled(hasLayers || !layerFilterTypes_.isEmpty());
+    const bool noMatch = hasLayers && layerModel_->isFiltered() && layerModel_->rowCount() == 0;
+    layerView_->setVisible(!noMatch); layerNoMatch_->setVisible(noMatch);
+}
+
+// Image Size and Canvas Size keep the zoom, so the change shows on screen, and centre the canvas again
+// (macOS applyDocumentSize keepingZoom); fitting the window again made a smaller canvas look unchanged.
+void MainWindow::keepZoomRecentered()
+{
+    auto view = canvas_->viewState(); view.pan = {};
+    syncDocumentViews(); canvas_->restoreViewState(view);
 }
 
 void MainWindow::resizeCanvasDialog()
@@ -5720,7 +5804,7 @@ void MainWindow::resizeCanvasDialog()
     if (!document_) return;
     finishPendingCanvasEdits();
     if (!document_) return;
-    QDialog dialog(this); dialog.setWindowTitle(tr("Canvas Size"));
+    QDialog dialog(this); dialog.setWindowTitle(tr("Canvas Size")); dialog.setObjectName(QStringLiteral("canvasSizeDialog"));
     auto *layout = new QVBoxLayout(&dialog); auto *form = new QFormLayout;
     const int originalWidth = document_->canvasSize.width(), originalHeight = document_->canvasSize.height();
     const double resolution = document_->resolution;
@@ -5803,7 +5887,7 @@ void MainWindow::resizeCanvasDialog()
     case 5: background = extension; break;
     default: break;
     }
-    if (session_.resizeCanvas(QSize(qRound(draft->width), qRound(draft->height)), anchor->currentIndex(), background)) { const auto view = canvas_->viewState(); syncDocumentViews(); canvas_->restoreViewState(view); }
+    if (session_.resizeCanvas(QSize(qRound(draft->width), qRound(draft->height)), anchor->currentIndex(), background)) keepZoomRecentered();
 }
 
 void MainWindow::cropDialog()
@@ -7627,8 +7711,8 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
     }
     {
         const QSignalBlocker blocker(layerView_->selectionModel());
-        if (auto *type = findChild<QComboBox *>("layerTypeFilter"); type && type->currentText() == "Selected")
-            layerModel_->setFilter(findChild<QLineEdit *>("layerSearch")->text(), "Selected", session_.selectedLayerIds());
+        if (layerFilterTypes_.contains(QStringLiteral("Selected")))
+            layerModel_->setFilter(layerSearch_->text(), layerFilterTypes_, session_.selectedLayerIds());
         layerView_->selectionModel()->clearSelection();
         QModelIndex primaryIndex;
         if (document_) {
@@ -7653,6 +7737,7 @@ void MainWindow::syncDocumentViews(bool compositeChanged)
         if(active!=revealedLayer_){revealedLayer_=active;if(primaryIndex.isValid())layerView_->scrollTo(primaryIndex,QAbstractItemView::EnsureVisible);}
     }
     layerCount_->setText(document_ ? QString::number(document_->layers.size()) : QStringLiteral("0"));
+    updateLayerFilterState();
     if (document_) {
         statusDimensions_->setText(QStringLiteral("%1 × %2 px").arg(document_->canvasSize.width()).arg(document_->canvasSize.height()));
         updateToolHint();
@@ -7887,6 +7972,16 @@ void MainWindow::syncHeldModifiers()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // Escape in the layer search clears it, then on an empty one closes it and gives the canvas back the keyboard;
+    // it is taken before any window shortcut can be.
+    if (watched == layerSearch_ && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)
+        && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
+        if (event->type() == QEvent::KeyPress) {
+            if (!layerSearch_->text().isEmpty()) layerSearch_->clear();
+            else { setLayerSearchOpen(false); if (canvas_) canvas_->setFocus(); }
+        }
+        event->accept(); return true;
+    }
     if (watched->objectName() == "toolRailViewport" && event->type() == QEvent::Resize) {
         auto *host = findChild<QWidget *>("toolRailTools"); auto *rail = findChild<QWidget *>("toolRail");
         auto *grid = host ? qobject_cast<QGridLayout *>(host->layout()) : nullptr;

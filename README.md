@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.5.5-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.5.6-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -23,9 +23,9 @@
 
 CompositorLX is a full-featured raster editor for Linux: layered `.comp` projects (v1–v17), Camera RAW development, vector shapes, layer effects, non-destructive transforms, painting and retouching, live adjustment layers, and a local Remove Background model. No account, no cloud round-trip for subject cutouts.
 
-## GPU acceleration — updated 0.5.5
+## GPU acceleration
 
-The **0.5.5 release and its AppImage/DEB assets have been refreshed** with a shared Vulkan renderer and a follow-up audit of it. The application version remains **0.5.5**. The CPU renderer stays the reference and the fallback for everything; the GPU is used where it measurably helps.
+CompositorLX has a shared Vulkan renderer, introduced in the refreshed 0.5.5 release. The CPU renderer stays the reference and the fallback for everything; the GPU is used where it measurably helps.
 
 - **The canvas** renders the whole document on the GPU (in canvas tiles for large documents): all 24 blend modes, masks, folders, transformed layers, layer effects and the common filter layers. After an edit, only the edited layer and the ones above it are re-rendered.
 - **Exports are identical everywhere.** In Automatic mode, export, merge, flatten, GIF frames and project previews always use the CPU reference, so a file renders byte-identically on any machine. Choose GPU explicitly to accelerate them too.
@@ -45,6 +45,15 @@ Measured on Intel Iris Xe at 1920 × 1080, including uploads (cold) or with the 
 | Exposure | 9.3 ms | 8.6 ms | 2.9 ms |
 
 A 4000 × 3000 document with five layers, a rotated and a masked one, and two filter layers renders on the canvas in 238 ms instead of 1254 ms; a 6000 × 4000 document with ten layers and effects in 838 ms instead of 3120 ms. The CPU paths got faster too: Exposure (37×) and Hue/Saturation (5.5×). These numbers come from one machine; AMD and NVIDIA GPUs have not been tested on hardware. Remove Background runs on the CPU in the released builds. See [GPU rendering notes](docs/GPU_ROLLOUT.md) for coverage, accuracy, controls and the full benchmark.
+
+## What's new in version 0.5.6
+
+Synced with macOS Compositor 1.5.6. Most of its release notes (animated GIFs, layer search, the two-column tool bar, Canvas Size keeping the zoom) already shipped in 0.5.5. This release matches the Linux versions to the final macOS designs:
+
+- **GIF timeline**: a large play/pause button, a delay menu offering *Original* (each frame's own delay) or one delay for every frame from 20 ms to 1 s with its frame rate, and numbered thumbnails up to 96 px (smaller for long GIFs). Right-clicking a thumbnail shows **Duplicate Frame** and **Delete Frame** for that frame.
+- **Layers panel search**: the magnifier turns the title into a *Search Layers* field. Escape clears it, and a second Escape closes it. The funnel menu shows Images, Shapes, Text, Folders, Adjustments or Selected layers, and several can be on at once. A matching folder brings its contents along. When nothing matches, **Clear All** restores the list.
+- **Canvas Size and Image Size** keep the zoom and recenter the canvas, so added or trimmed canvas is visible.
+- The tool bar's automatic two-column layout for short windows is unchanged from 0.5.5.
 
 ## What's new in version 0.5.5
 
@@ -194,19 +203,19 @@ Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Spa
 
 ## Install
 
-The 0.5.5 binaries were built on Ubuntu 26.04 and require glibc 2.43 or newer. The Debian package uses system dependencies; the AppImage bundles its other runtime libraries. Build from source for older distributions.
+The 0.5.6 binaries were built on Ubuntu 26.04 and require glibc 2.43 or newer. The Debian package uses system dependencies; the AppImage bundles its other runtime libraries. Build from source for older distributions.
 
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.5.5-x86_64.AppImage
-./CompositorLX-0.5.5-x86_64.AppImage
+chmod +x CompositorLX-0.5.6-x86_64.AppImage
+./CompositorLX-0.5.6-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.5.5_amd64.deb
+sudo apt install ./compositorlx_0.5.6_amd64.deb
 compositor-lx
 ```
 
@@ -263,6 +272,7 @@ The original macOS app remains the behavior and file-format reference. Linux-spe
 
 ## Version history
 
+- **v0.5.6**: Sync with macOS Compositor 1.5.6: GIF timeline with play button, delay presets and per-frame menu; Layers search field and multi-kind filter menu; Canvas/Image Size keep the zoom and recenter.
 - **v0.5.5**: Editable GIF layers and export, PDF import, RGB Split and channel packing, new filter layers, styled lines, pen pressure, search, adaptive tools, PSD artboards, and project formats 15–17.
 
 - **v0.5.3**: Sync with macOS Compositor 1.5.3 (16-bit and HDR layers, CMYK proofing and export, Export As, Progressive Blur, Scanlines, Last Filter, Rotate Canvas, smooth corners, Camera Raw re-measured, RAW noise reduction and lens profiles, Search Commands, fullscreen canvas, navigator, formats v12–v14) and a commit-by-commit parity audit.

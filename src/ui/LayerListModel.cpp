@@ -77,9 +77,19 @@ void LayerListModel::setDocument(std::shared_ptr<Document> document, bool reset)
     endResetModel();
 }
 
-void LayerListModel::setFilter(const QString &name, const QString &type, const QSet<QUuid> &selected)
+void LayerListModel::setFilter(const QString &name, const QSet<QString> &types, const QSet<QUuid> &selected)
 {
-    beginResetModel(); filterName_ = name.trimmed(); filterType_ = type; filterSelected_ = selected; endResetModel();
+    beginResetModel(); filterName_ = name.trimmed(); filterTypes_ = types; filterSelected_ = selected; endResetModel();
+}
+
+// Rasterized text counts as an image, as it does everywhere else.
+QString LayerListModel::layerType(const Layer &layer)
+{
+    if (layer.group) return QStringLiteral("Folders");
+    if (!layer.adjustment.isEmpty()) return QStringLiteral("Adjustments");
+    if (layer.text) return QStringLiteral("Text");
+    if (layer.shapeStyle) return QStringLiteral("Shapes");
+    return QStringLiteral("Images");
 }
 
 QVector<LayerListModel::Item> LayerListModel::visibleItems() const
@@ -118,16 +128,14 @@ QVector<int> LayerListModel::visibleLayerIndexes() const
     if (!document_) return result;
     QHash<QUuid, const Layer *> byId;
     for (const Layer &layer : document_->layers) byId.insert(layer.id, &layer);
-    QSet<QUuid> matches, parentsOfMatches;
+    QSet<QUuid> matches;
     if (isFiltered()) {
         for (const auto &layer : document_->layers) {
-            const bool type = filterType_ == "All" || (filterType_ == "Selected" && filterSelected_.contains(layer.id))
-                || (filterType_ == "Groups" && layer.group) || (filterType_ == "Text" && layer.text)
-                || (filterType_ == "Shapes" && layer.shapeStyle) || (filterType_ == "Adjustments" && !layer.adjustment.isEmpty())
-                || (filterType_ == "GIF" && layer.gif) || (filterType_ == "Images" && !layer.group && layer.adjustment.isEmpty() && !layer.text && !layer.shapeStyle);
+            const bool type = filterTypes_.isEmpty() || filterTypes_.contains(layerType(layer))
+                || (filterTypes_.contains(QStringLiteral("Selected")) && filterSelected_.contains(layer.id));
             if (type && layer.name.contains(filterName_, Qt::CaseInsensitive)) matches.insert(layer.id);
         }
-        // Matching folders bring their contents; ancestors keep the result's hierarchy understandable.
+        // A folder that matches brings everything inside it along, so its contents can be seen and worked on.
         for (const auto &layer : document_->layers) {
             auto parent = layer.parentId; QSet<QUuid> visited;
             while (parent && !visited.contains(*parent)) {
@@ -135,13 +143,9 @@ QVector<int> LayerListModel::visibleLayerIndexes() const
                 const auto *owner = byId.value(*parent); parent = owner ? owner->parentId : std::nullopt;
             }
         }
-        for (const auto &id : matches) {
-            const auto *layer = byId.value(id); auto parent = layer ? layer->parentId : std::nullopt;
-            while (parent && !parentsOfMatches.contains(*parent)) { parentsOfMatches.insert(*parent); const auto *owner = byId.value(*parent); parent = owner ? owner->parentId : std::nullopt; }
-        }
     }
     for (int i = document_->layers.size() - 1; i >= 0; --i) {
-        if (isFiltered() && !matches.contains(document_->layers[i].id) && !parentsOfMatches.contains(document_->layers[i].id)) continue;
+        if (isFiltered() && !matches.contains(document_->layers[i].id)) continue;
         bool hidden = false;
         std::optional<QUuid> parent = document_->layers.at(i).parentId;
         QSet<QUuid> visited;
