@@ -239,6 +239,9 @@ private:
     CanvasWidget *canvas_ = nullptr;
     Probe probe_ = Probe::None;
     QImage lastGraded_;
+    // The settings lastGraded_ was rendered with, when it is a plain full-resolution render (no clipping, mask or
+    // point visualization): OK then commits it without rendering again.
+    std::optional<CameraRawSettings> lastGradedSettings_;
     bool sharpenMaskPreview_ = false;
     std::array<bool, 10> shows_{true, true, true, true, true, true, true, true, true, true};
     std::array<QCheckBox *, 10> showBoxes_{};

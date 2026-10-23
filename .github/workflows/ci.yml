@@ -1,0 +1,28 @@
+# Build and test on a machine without a GPU: the full suite, then the GPU renderer suites on software Vulkan
+# (lavapipe), with the Khronos validation layer and with forced staging (scripts/ci-gpu-tests.sh).
+# Manual for now: run it from the Actions tab.
+name: CI
+on:
+  workflow_dispatch:
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build curl ca-certificates python3 qt6-base-dev qt6-image-formats-plugins \
+            libheif-dev libraw-dev zlib1g-dev libopenexr-dev libimath-dev liblcms2-dev libjpeg-dev libtiff-dev \
+            liblensfun-dev liblensfun-data-v1 libpoppler-qt6-dev libgif-dev libvulkan-dev mesa-vulkan-drivers \
+            vulkan-validationlayers
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Test
+        run: QT_QPA_PLATFORM=offscreen OMP_NUM_THREADS=4 ctest --test-dir build --output-on-failure
+      - name: GPU suites on software Vulkan
+        run: scripts/ci-gpu-tests.sh build

@@ -109,7 +109,7 @@ int main(int argc, char **argv)
     }
     // Panels opened from the menus: the About windows and a number prompt (Feather needs a selection).
     s.selectAll(); window.syncDocumentViews();
-    const std::pair<const char *, const char *> panels[] = {{"&About CompositorLX", "about"}, {"About &Qt", "aboutQt"}, {"Feather…", "feather"}};
+    const std::pair<const char *, const char *> panels[] = {{"&About CompositorLX", "about"}, {"About &Qt", "aboutQt"}, {"Feather…", "feather"}, {"Rendering…", "rendering"}};
     for (const auto &[text, name] : panels) {
         QAction *action = nullptr;
         for (QAction *candidate : window.findChildren<QAction *>()) if (candidate->text() == QString::fromUtf8(text)) { action = candidate; break; }

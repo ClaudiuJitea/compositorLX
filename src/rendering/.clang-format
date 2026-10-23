@@ -1,0 +1,8 @@
+# Style for the GPU renderer files (Gpu*, RendererSelfCheck) and new code in this directory (D4).
+# Older files here keep their existing formatting; do not reformat them wholesale.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+AccessModifierOffset: -2
+AllowShortFunctionsOnASingleLine: Inline
+SortIncludes: CaseSensitive

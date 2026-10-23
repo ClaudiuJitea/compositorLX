@@ -43,7 +43,7 @@ std::optional<QColor> EditorSession::sampleCompositeColor(const QPointF &documen
 {
     if (!document_ || documentPoint.x() < 0 || documentPoint.y() < 0
         || documentPoint.x() >= document_->canvasSize.width() || documentPoint.y() >= document_->canvasSize.height()) return std::nullopt;
-    const QImage flat = LayerRenderer::flattened(*document_);
+    const QImage flat = LayerRenderer::flattened(*document_, RenderPurpose::Display); // A readout of what the canvas shows.
     const QPoint pixel(qFloor(documentPoint.x()), qFloor(documentPoint.y()));
     if (!QRect(QPoint(), flat.size()).contains(pixel)) return std::nullopt;
     const QColor color = flat.pixelColor(pixel);

@@ -232,8 +232,12 @@ CanvasWidget::CanvasWidget(QWidget *parent)
 
 void CanvasWidget::configurePresentation()
 {
-    if(GpuRenderer::backend()==RenderBackend::Cpu){if(gpuViewport_)gpuViewport_->hide();return;}
-    if(!gpuViewport_&&!gpuViewportAttempted_){gpuViewportAttempted_=true;gpuViewport_=createGpuViewport(this,[this](QPainter &painter){paintCanvas(painter);});}
+    // The presentation preference is separate from the renderer: Automatic follows it (raster in CPU mode).
+    const CanvasPresentation mode=canvasPresentation();
+    const bool wanted=mode==CanvasPresentation::OpenGL||(mode==CanvasPresentation::Auto&&GpuRenderer::backend()!=RenderBackend::Cpu);
+    if(!wanted){if(gpuViewport_)gpuViewport_->hide();return;}
+    if(gpuViewport_&&gpuViewportMode_!=int(mode)){delete gpuViewport_;gpuViewport_=nullptr;gpuViewportAttempted_=false;}
+    if(!gpuViewport_&&(!gpuViewportAttempted_||gpuViewportMode_!=int(mode))){gpuViewportAttempted_=true;gpuViewportMode_=int(mode);gpuViewport_=createGpuViewport(this,[this](QPainter &painter){paintCanvas(painter);},mode);}
     if(gpuViewport_&&!gpuViewport_->property("failed").toBool())gpuViewport_->show();
 }
 
@@ -294,7 +298,7 @@ void CanvasWidget::startBackgroundRender()
     applyPreviewState(snapshot);
     renderWatcher_.setProperty("generation", QVariant::fromValue(renderGeneration_));
     renderActive_ = true;
-    renderWatcher_.setFuture(QtConcurrent::run([snapshot] { return LayerRenderer::flattened(snapshot); }));
+    renderWatcher_.setFuture(QtConcurrent::run([snapshot] { GpuRenderer::PriorityScope canvas(GpuPriority::Canvas); return LayerRenderer::flattened(snapshot, RenderPurpose::Display); }));
 }
 
 void CanvasWidget::setTool(Tool tool)
@@ -619,7 +623,7 @@ void CanvasWidget::paintCanvas(QPainter &painter)
         if (renderedDocument_.isNull() || renderedDocument_.size() != document_->canvasSize) {
             Document snapshot = *document_;
             applyPreviewState(snapshot);
-            renderedDocument_ = LayerRenderer::flattened(snapshot);
+            renderedDocument_ = LayerRenderer::flattened(snapshot, RenderPurpose::Display);
             renderDirty_ = false;
         } else startBackgroundRender();
     }

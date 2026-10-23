@@ -1,105 +1,447 @@
 #version 450
-layout(local_size_x=8,local_size_y=8) in;
-layout(std430,binding=0) readonly buffer Input { vec4 pixels[]; } source;
-layout(std430,binding=1) readonly buffer Auxiliary { vec4 pixels[]; } aux;
-layout(std430,binding=2) writeonly buffer Output { vec4 pixels[]; } target;
-layout(push_constant) uniform Params { uint width,height,operation,quantization; float v[28]; } p;
-vec4 fetch(ivec2 q) { q=clamp(q,ivec2(0),ivec2(p.width-1,p.height-1)); return source.pixels[q.y*p.width+q.x]; }
-vec4 bilinear(vec2 q,ivec2 size,bool outside) {
-    if(outside && (q.x<0 || q.y<0 || q.x>size.x || q.y>size.y))return vec4(0);
-    vec2 pos=clamp(q-.5,vec2(0),vec2(size-1));ivec2 a=ivec2(pos),b=min(a+1,size-1);vec2 f=pos-vec2(a);
-    return mix(mix(source.pixels[a.y*size.x+a.x],source.pixels[a.y*size.x+b.x],f.x),
-        mix(source.pixels[b.y*size.x+a.x],source.pixels[b.y*size.x+b.x],f.x),f.y);
+#extension GL_GOOGLE_include_directive : require
+// CompositorLX shared compute shader. One pipeline per operation: the host sets the
+// OPERATION specialization constant, so each pipeline compiles only its own branch.
+// IDs, storage formats and parameter slots come from contract.glsl, generated with
+// GpuContract.h by scripts/compile-rendering-shader.py.
+#include "contract.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(constant_id = 0) const uint OPERATION = 0xffffffffu;
+
+layout(std430, binding = 0) readonly buffer Input { uint words[]; } source;
+layout(std430, binding = 1) readonly buffer Auxiliary { uint words[]; } aux;
+layout(std430, binding = 2) writeonly buffer Output { uint words[]; } target;
+
+// flags: bits 0-3 quantization, 4-7 input format, 8-11 auxiliary format, 12-15 output format.
+layout(push_constant) uniform Params {
+    uint width, height, operation, flags;
+    float v[PARAMETER_SLOTS];
+} p;
+
+uint op() { return OPERATION != 0xffffffffu ? OPERATION : p.operation; }
+uint quantization() { return p.flags & 15u; }
+uint formatOf(uint shift) { return (p.flags >> shift) & 15u; }
+
+// ---- Storage -----------------------------------------------------------------------
+#define DEFINE_LOAD(NAME, BUFFER, SHIFT)                                                    \
+    vec4 NAME(uint i) {                                                                     \
+        uint format = formatOf(SHIFT);                                                      \
+        if (format == FORMAT_UNORM8) return unpackUnorm4x8(BUFFER.words[i]);                \
+        if (format == FORMAT_UNORM16)                                                       \
+            return vec4(unpackUnorm2x16(BUFFER.words[2u * i]),                              \
+                        unpackUnorm2x16(BUFFER.words[2u * i + 1u]));                        \
+        if (format == FORMAT_HALF)                                                          \
+            return vec4(unpackHalf2x16(BUFFER.words[2u * i]),                               \
+                        unpackHalf2x16(BUFFER.words[2u * i + 1u]));                         \
+        if (format == FORMAT_GRAY8) {                                                       \
+            float g = float((BUFFER.words[i >> 2u] >> ((i & 3u) * 8u)) & 255u) / 255.0;     \
+            return vec4(g, g, g, 1);                                                        \
+        }                                                                                   \
+        if (format == FORMAT_RED32) return vec4(uintBitsToFloat(BUFFER.words[i]), 0, 0, 1); \
+        return uintBitsToFloat(uvec4(BUFFER.words[4u * i], BUFFER.words[4u * i + 1u],       \
+                                     BUFFER.words[4u * i + 2u], BUFFER.words[4u * i + 3u]));  \
+    }
+DEFINE_LOAD(loadSource, source, 4u)
+DEFINE_LOAD(loadAux, aux, 8u)
+
+void store(uint i, vec4 value) {
+    uint format = formatOf(12u);
+    if (format == FORMAT_UNORM8) {
+        target.words[i] = packUnorm4x8(value);
+    } else if (format == FORMAT_UNORM16) {
+        target.words[2u * i] = packUnorm2x16(value.rg);
+        target.words[2u * i + 1u] = packUnorm2x16(value.ba);
+    } else if (format == FORMAT_HALF) {
+        target.words[2u * i] = packHalf2x16(value.rg);
+        target.words[2u * i + 1u] = packHalf2x16(value.ba);
+    } else if (format == FORMAT_RED32) {
+        target.words[i] = floatBitsToUint(value.r);
+    } else {
+        uvec4 bits = floatBitsToUint(value);
+        target.words[4u * i] = bits.x;
+        target.words[4u * i + 1u] = bits.y;
+        target.words[4u * i + 2u] = bits.z;
+        target.words[4u * i + 3u] = bits.w;
+    }
 }
-vec3 straight(vec4 c){vec3 result=c.a>0?c.rgb/c.a:vec3(0);for(int i=0;i<3;++i)if(c[i]==c.a&&c.a>0)result[i]=1;return result;}
-float lum(vec3 c){return dot(c,vec3(.3,.59,.11));}
-float sat(vec3 c){return max(max(c.r,c.g),c.b)-min(min(c.r,c.g),c.b);}
-vec3 setLum(vec3 c,float l){c+=l-lum(c);float lo=min(min(c.r,c.g),c.b),hi=max(max(c.r,c.g),c.b);float y=lum(c);if(lo<0)c=y+(c-y)*y/(y-lo);if(hi>1)c=y+(c-y)*(1-y)/(hi-y);return clamp(c,0,1);}
-vec3 setSat(vec3 c,float s){int lo=0,hi=0;for(int i=1;i<3;++i){if(c[i]<c[lo])lo=i;if(c[i]>c[hi])hi=i;}if(lo==hi)return vec3(0);int mid=3-lo-hi;float range=c[hi]-c[lo];c[mid]=(c[mid]-c[lo])*s/range;c[hi]=s;c[lo]=0;return c;}
-vec3 blend(vec3 b,vec3 s,int mode){
-    if(mode==20)return setLum(setSat(s,sat(b)),lum(b));
-    if(mode==21)return setLum(setSat(b,sat(s)),lum(b));
-    if(mode==22)return setLum(s,lum(b));
-    if(mode==23)return setLum(b,lum(s));
-    for(int c=0;c<3;++c){float x=b[c],y=s[c];
-        if(mode==1)y=min(x,y);else if(mode==2)y*=x;
-        else if(mode==3)y=x>=1?1:y<=0?0:max(0,1-min(1,(1-x)/y));
-        else if(mode==4)y=max(0,x+y-1);else if(mode==5)y=max(x,y);
-        else if(mode==6)y=1-(1-x)*(1-y);else if(mode==7)y=x<=0?0:y>=1?1:min(1,x/(1-y));
-        else if(mode==8)y=min(1,x+y);else if(mode==9)y=x<=.5?2*x*y:1-2*(1-x)*(1-y);
-        else if(mode==10)y=y<=.5?x-(1-2*y)*x*(1-x):x+(2*y-1)*((x<=.25?((16*x-12)*x+4)*x:sqrt(x))-x);
-        else if(mode==11)y=y<=.5?2*x*y:1-2*(1-x)*(1-y);
-        else if(mode==12)y=y<=.5?(y<=0?0:max(0,1-min(1,(1-x)/(2*y)))):(y>=1?1:min(1,x/(2-2*y)));
-        else if(mode==13)y=clamp(x+2*y-1,0,1);else if(mode==14)y=y>.5?max(x,2*(y-.5)):min(x,2*y);
-        else if(mode==15)y=x+y>=1?1:0;else if(mode==16)y=abs(x-y);else if(mode==17)y=x+y-2*x*y;
-        else if(mode==18)y=max(0,x-y);else if(mode==19)y=y<=0?(x>0?1:0):min(1,x/y);
-        s[c]=y;
-    }return s;
+
+vec4 fetch(ivec2 q) {
+    q = clamp(q, ivec2(0), ivec2(p.width - 1, p.height - 1));
+    return loadSource(uint(q.y) * p.width + uint(q.x));
 }
-vec3 cube(vec3 c,int n){vec3 pos=clamp(c,0,1)*float(n-1);ivec3 a=min(ivec3(pos),ivec3(n-2));vec3 f=pos-vec3(a);vec3 outColor=vec3(0);
-    for(int r=0;r<2;++r)for(int g=0;g<2;++g)for(int b=0;b<2;++b){float w=(r==0?1-f.r:f.r)*(g==0?1-f.g:f.g)*(b==0?1-f.b:f.b);outColor+=aux.pixels[((a.r+r)*n+a.g+g)*n+a.b+b].rgb*w;}return outColor;}
-vec3 hsl(vec3 c){float hi=max(max(c.r,c.g),c.b),lo=min(min(c.r,c.g),c.b),d=hi-lo,l=(hi+lo)*.5,h=0,s=0;
-    if(d>0){s=d/(1-abs(2*l-1));if(hi==c.r)h=mod((c.g-c.b)/d,6);else if(hi==c.g)h=(c.b-c.r)/d+2;else h=(c.r-c.g)/d+4;h=mod(h/6+1,1);}return vec3(h,s,l);}
-vec3 fromHsl(vec3 h){vec3 rgb=clamp(abs(mod(h.x*6+vec3(0,4,2),6)-3)-1,0,1);return h.z+(rgb-.5)*(1-abs(2*h.z-1))*h.y;}
-void main(){
-    ivec2 xy=ivec2(gl_GlobalInvocationID.xy);if(xy.x>=p.width||xy.y>=p.height)return;
-    // Sliding-window box pass: one invocation owns a 128-pixel span. This
-    // bounds work per pixel at large radii and avoids overlapping output writes.
-    if(p.operation==6){
-        bool horizontal=p.v[1]==0;int radius=int(p.v[0]);int start=(horizontal?xy.x:xy.y)*128;
-        int line=horizontal?xy.y:xy.x;int length=horizontal?int(p.width):int(p.height);
-        if(start>=length)return;
-        vec4 sum=vec4(0);bool bytes=p.quantization==1;
-        for(int i=-radius;i<=radius;++i){vec4 v=fetch(horizontal?ivec2(start+i,line):ivec2(line,start+i));sum+=bytes?floor(v*255+.5):v;}
-        float divisor=float(2*radius+1);
-        for(int pos=start;pos<min(start+128,length);++pos){vec4 value=bytes?floor((sum+floor(divisor/2))/divisor)/255:sum/divisor;
-            uint at=horizontal?uint(line)*p.width+uint(pos):uint(pos)*p.width+uint(line);target.pixels[at]=value;
-            vec4 add=fetch(horizontal?ivec2(pos+radius+1,line):ivec2(line,pos+radius+1));vec4 remove=fetch(horizontal?ivec2(pos-radius,line):ivec2(line,pos-radius));
-            sum+=bytes?floor(add*255+.5)-floor(remove*255+.5):add-remove;
-        }return;
+vec4 bilinear(vec2 q, ivec2 size) {
+    vec2 pos = clamp(q - .5, vec2(0), vec2(size - 1));
+    ivec2 a = ivec2(pos), b = min(a + 1, size - 1);
+    vec2 f = pos - vec2(a);
+    return mix(mix(loadSource(uint(a.y * size.x + a.x)), loadSource(uint(a.y * size.x + b.x)), f.x),
+               mix(loadSource(uint(b.y * size.x + a.x)), loadSource(uint(b.y * size.x + b.x)), f.x), f.y);
+}
+// The CPU's 8-bit integer value of a [0, 1] channel.
+uvec4 bytesOf(vec4 value) { return uvec4(floor(clamp(value, 0, 1) * 255 + .5)); }
+
+// ---- Color helpers -------------------------------------------------------------------
+vec3 straight(vec4 c) {
+    vec3 result = c.a > 0 ? c.rgb / c.a : vec3(0);
+    for (int i = 0; i < 3; ++i)
+        if (c[i] == c.a && c.a > 0) result[i] = 1;
+    return result;
+}
+float lum(vec3 c) { return dot(c, vec3(.3, .59, .11)); }
+float sat(vec3 c) { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
+// W3C SetLum/ClipColor (OD3): a degenerate clip (gray HDR colors, 0/0) is skipped instead of
+// producing NaN; the clamp then gives white, so the function stays continuous.
+vec3 setLum(vec3 c, float l) {
+    c += l - lum(c);
+    float y = lum(c), lo = min(min(c.r, c.g), c.b), hi = max(max(c.r, c.g), c.b);
+    if (lo < 0 && y - lo > 0) c = y + (c - y) * y / (y - lo);
+    if (hi > 1 && hi - y > 0) c = y + (c - y) * (1 - y) / (hi - y);
+    return clamp(c, 0, 1);
+}
+vec3 setSat(vec3 c, float s) {
+    int lo = 0, hi = 0;
+    for (int i = 1; i < 3; ++i) {
+        if (c[i] < c[lo]) lo = i;
+        if (c[i] > c[hi]) hi = i;
     }
-    uint index=uint(xy.y)*p.width+uint(xy.x);uint op=p.operation;vec4 a=op==13?vec4(0):source.pixels[index],o=a;
-    if(op==2)o.rgb=vec3(a.a)-a.rgb;
-    else if(op==3){vec3 c=straight(a);for(int i=0;i<3;++i){float z=c[i];if(p.v[3]==0)z=z<=.04045?z/12.92:pow((z+.055)/1.055,2.4);z=pow(max(0,z*p.v[0]+p.v[1]),p.v[2]);if(p.v[3]==0)z=z<=.0031308?z*12.92:1.055*pow(z,1/2.4)-.055;c[i]=p.v[3]==0?clamp(z,0,1):z;}o.rgb=c*a.a;}
-    else if(op==4){vec3 pos=clamp(straight(a),0,1)*255;for(int c=0;c<3;++c){int lo=int(pos[c]),hi=min(lo+1,255);o[c]=mix(aux.pixels[lo][c],aux.pixels[hi][c],pos[c]-lo)*a.a;}}
-    else if(op==5){vec3 c=cube(straight(a),int(p.v[0]));if(p.v[1]==1)c=step(vec3(254.5/255),c);else if(p.v[1]==2)c=vec3(1)-step(c,vec3(.5/255));o.rgb=clamp(c,0,1)*a.a;}
-    else if(op==6 || op==7 || op==15){int radius=int(p.v[0]);ivec2 axis=p.v[1]==0?ivec2(1,0):ivec2(0,1);o=op==15?(p.v[2]!=0?vec4(1e30):vec4(-1e30)):vec4(0);
-        for(int i=-radius;i<=radius;++i){vec4 value=fetch(xy+axis*i);if(op==15)o=p.v[2]!=0?min(o,value):max(o,value);else o+=value*(op==7?aux.pixels[i+radius].r:1);}
-        if(op==6)o/=float(2*radius+1);
-        if(op==15&&p.v[2]!=0){int pos=p.v[1]==0?xy.x:xy.y;int size=p.v[1]==0?int(p.width):int(p.height);if(pos<radius||pos+radius>=size)o=vec4(0);}
+    if (lo == hi) return vec3(0);
+    int mid = 3 - lo - hi;
+    float range = c[hi] - c[lo];
+    c[mid] = (c[mid] - c[lo]) * s / range;
+    c[hi] = s;
+    c[lo] = 0;
+    return c;
+}
+vec3 blend(vec3 b, vec3 s, int mode) {
+    if (mode == BLEND_HUE) return setLum(setSat(s, sat(b)), lum(b));
+    if (mode == BLEND_SATURATION) return setLum(setSat(b, sat(s)), lum(b));
+    if (mode == BLEND_COLOR) return setLum(s, lum(b));
+    if (mode == BLEND_LUMINOSITY) return setLum(b, lum(s));
+    for (int c = 0; c < 3; ++c) {
+        float x = b[c], y = s[c];
+        if (mode == BLEND_DARKEN) y = min(x, y);
+        else if (mode == BLEND_MULTIPLY) y *= x;
+        else if (mode == BLEND_COLOR_BURN) y = x >= 1 ? 1 : y <= 0 ? 0 : max(0, 1 - min(1, (1 - x) / y));
+        else if (mode == BLEND_LINEAR_BURN) y = max(0, x + y - 1);
+        else if (mode == BLEND_LIGHTEN) y = max(x, y);
+        else if (mode == BLEND_SCREEN) y = 1 - (1 - x) * (1 - y);
+        else if (mode == BLEND_COLOR_DODGE) y = x <= 0 ? 0 : y >= 1 ? 1 : min(1, x / (1 - y));
+        else if (mode == BLEND_LINEAR_DODGE) y = min(1, x + y);
+        else if (mode == BLEND_OVERLAY) y = x <= .5 ? 2 * x * y : 1 - 2 * (1 - x) * (1 - y);
+        else if (mode == BLEND_SOFT_LIGHT)
+            y = y <= .5 ? x - (1 - 2 * y) * x * (1 - x)
+                        : x + (2 * y - 1) * ((x <= .25 ? ((16 * x - 12) * x + 4) * x : sqrt(x)) - x);
+        else if (mode == BLEND_HARD_LIGHT) y = y <= .5 ? 2 * x * y : 1 - 2 * (1 - x) * (1 - y);
+        else if (mode == BLEND_VIVID_LIGHT)
+            y = y <= .5 ? (y <= 0 ? 0 : max(0, 1 - min(1, (1 - x) / (2 * y)))) : (y >= 1 ? 1 : min(1, x / (2 - 2 * y)));
+        else if (mode == BLEND_LINEAR_LIGHT) y = clamp(x + 2 * y - 1, 0, 1);
+        else if (mode == BLEND_PIN_LIGHT) y = y > .5 ? max(x, 2 * (y - .5)) : min(x, 2 * y);
+        else if (mode == BLEND_HARD_MIX) y = x + y >= 1 ? 1 : 0;
+        else if (mode == BLEND_DIFFERENCE) y = abs(x - y);
+        else if (mode == BLEND_EXCLUSION) y = x + y - 2 * x * y;
+        else if (mode == BLEND_SUBTRACT) y = max(0, x - y);
+        else if (mode == BLEND_DIVIDE) y = y <= 0 ? (x > 0 ? 1 : 0) : min(1, x / y);
+        s[c] = y;
     }
-    else if(op==8){vec4 b=aux.pixels[index];o=a*(p.v[0]==0?b.r:b.a)*p.v[1];}
-    else if(op==9){vec4 b=aux.pixels[index]*p.v[0];if(p.v[1]==0){b=min(b,vec4(1));o=a+b*(1-a);}else{o.a=a.a+clamp(b.a,0,1)*(1-a.a);o.rgb=a.rgb+max(b.rgb,vec3(0))*(1-clamp(a.rgb,0,1));}}
-    else if(op==10){bool horizontal=p.v[0]!=0;int x=horizontal?xy.x:xy.y,y=horizontal?xy.y:xy.x;int r=int(p.v[2]);float slope=p.v[1];int base=int(round(slope*x));o=vec4(0);
-        for(int i=-r;i<=r;++i){int sx=x+i,sy=y+int(round(slope*sx))-base;ivec2 q=horizontal?ivec2(sx,sy):ivec2(sy,sx);if(all(greaterThanEqual(q,ivec2(0)))&&q.x<p.width&&q.y<p.height)o+=source.pixels[q.y*p.width+q.x];}o/=float(2*r+1);
+    return s;
+}
+// QPainter's 8-bit raster formulas (qcompositionfunctions.cpp, Qt 6), which the CPU renderer
+// uses for Normal and the eight modes QPainter implements. Mirroring them in integers makes
+// those composites bit-identical to the CPU (Exclusion, for one, is an approximation there).
+int div255(int x) { return (x + (x >> 8) + 0x80) >> 8; }
+bool qpainterMode(int mode) {
+    return mode == BLEND_NORMAL || mode == BLEND_MULTIPLY || mode == BLEND_SCREEN || mode == BLEND_OVERLAY ||
+           mode == BLEND_DARKEN || mode == BLEND_LIGHTEN || mode == BLEND_HARD_LIGHT || mode == BLEND_DIFFERENCE ||
+           mode == BLEND_EXCLUSION;
+}
+vec4 qpainterComposite(ivec4 d, ivec4 s, int mode) {
+    int da = d.a, sa = s.a;
+    ivec4 r;
+    for (int c = 0; c < 3; ++c) {
+        int x = d[c], y = s[c], temp = y * (255 - da) + x * (255 - sa);
+        if (mode == BLEND_NORMAL) r[c] = y + div255(x * (255 - sa));
+        else if (mode == BLEND_MULTIPLY) r[c] = div255(y * x + temp);
+        else if (mode == BLEND_SCREEN) r[c] = 255 - div255((255 - x) * (255 - y));
+        else if (mode == BLEND_OVERLAY)
+            r[c] = 2 * x < da ? div255(2 * y * x + temp) : div255(sa * da - 2 * (da - x) * (sa - y) + temp);
+        else if (mode == BLEND_DARKEN) r[c] = div255(min(y * da, x * sa) + temp);
+        else if (mode == BLEND_LIGHTEN) r[c] = div255(max(y * da, x * sa) + temp);
+        else if (mode == BLEND_HARD_LIGHT)
+            r[c] = 2 * y < sa ? div255(2 * y * x + temp) : div255(sa * da - 2 * (da - x) * (sa - y) + temp);
+        else if (mode == BLEND_DIFFERENCE) r[c] = y + x - div255(2 * min(y * da, x * sa));
+        else r[c] = x + y - ((x * y) >> 7); // Exclusion
     }
-    else if(op==11){vec2 q=vec2(xy)+.5-vec2(p.v[0],p.v[1]),delta=vec2(p.v[2],p.v[3]);float t=clamp(p.v[4]!=0?length(q)/length(delta):dot(q,delta)/dot(delta,delta),0,1);float radius=mix(p.v[5],p.v[6],t)*12/p.v[7];float level=p.v[8];o=radius>=level-1&&(radius<level||level==12)?mix(a,aux.pixels[index],clamp(radius-level+1,0,1)):vec4(0);}
-    else if(op==12){vec4 b=aux.pixels[index]*p.v[1];vec3 mixed=blend(straight(a),straight(b),int(p.v[0]));if(int(p.v[0])==15&&p.quantization==1){vec4 ai=floor(a*255+.5),bi=floor(b*255+.5);mixed=step(vec3(ai.a*bi.a),ai.rgb*bi.a+bi.rgb*ai.a);}o=vec4((1-b.a)*a.rgb+(1-a.a)*b.rgb+a.a*b.a*mixed,b.a+a.a-b.a*a.a);}
-    else if(op==13){vec2 at=vec2(xy)+.5;vec2 q=vec2(dot(vec3(at,1),vec3(p.v[0],p.v[1],p.v[2])),dot(vec3(at,1),vec3(p.v[3],p.v[4],p.v[5])));ivec2 size=ivec2(p.v[6],p.v[7]);
-        if(q.x<0||q.y<0||q.x>=size.x||q.y>=size.y)o=vec4(0);else if(p.v[8]==0){ivec2 i=ivec2(q);o=source.pixels[i.y*size.x+i.x];}else o=bilinear(q,size,false);o*=p.v[9];}
-    else if(op==14){vec3 c=straight(a);c=floor(clamp(c,0,1)*255+.5);int l=int(clamp(floor((dot(c,vec3(2126,7152,722))+5000)/10000),0,255));o.rgb=aux.pixels[l].rgb*a.a;}
-    else if(op==16){vec2 at=vec2(xy)+.5;vec2 axis=p.v[7]!=0?(at-vec2(p.v[4],p.v[5]))/max(1,p.v[6]):vec2(p.v[2],p.v[3]);int spectral=int(p.v[8]),smear=int(p.v[9]),edges=int(p.v[10]);float noise=aux.pixels[index].r;vec3 color=vec3(0),alpha=vec3(0),total=vec3(0);
-        for(int i=0;i<spectral;++i){float t=spectral==1?0:(float(i)+noise)/spectral*2-1;vec3 weight=vec3(smoothstep(-.3,1,t),1-smoothstep(0,1,abs(t))+.05,smoothstep(-.3,1,-t));
-            for(int j=0;j<smear;++j){float u=smear==1?0:(float(j)+noise)/smear;vec2 q=at-axis*(p.v[0]*t+p.v[1]*u);vec4 value=vec4(0);
-                if(!((q.x<0&&(edges&1)==0)||(q.x>p.width&&(edges&2)==0)||(q.y<0&&(edges&4)==0)||(q.y>p.height&&(edges&8)==0)))value=bilinear(q,ivec2(p.width,p.height),false);
-                color+=weight*value.rgb;alpha+=weight*value.a;total+=weight;}}
-        alpha/=total;o=vec4(color/total,max(max(alpha.r,alpha.g),alpha.b));
+    r.a = mode == BLEND_NORMAL ? sa + div255(da * (255 - sa)) : 255 - div255((255 - sa) * (255 - da));
+    return vec4(r & 255) / 255.0;
+}
+vec3 cube(vec3 c, int n) {
+    vec3 pos = clamp(c, 0, 1) * float(n - 1);
+    ivec3 a = min(ivec3(pos), ivec3(n - 2));
+    vec3 f = pos - vec3(a);
+    vec3 result = vec3(0);
+    for (int r = 0; r < 2; ++r)
+        for (int g = 0; g < 2; ++g)
+            for (int b = 0; b < 2; ++b) {
+                float w = (r == 0 ? 1 - f.r : f.r) * (g == 0 ? 1 - f.g : f.g) * (b == 0 ? 1 - f.b : f.b);
+                result += loadAux(uint(((a.r + r) * n + a.g + g) * n + a.b + b)).rgb * w;
+            }
+    return result;
+}
+vec3 hsl(vec3 c) {
+    float hi = max(max(c.r, c.g), c.b), lo = min(min(c.r, c.g), c.b), d = hi - lo, l = (hi + lo) * .5, h = 0, s = 0;
+    if (d > 0) {
+        s = d / (1 - abs(2 * l - 1));
+        if (hi == c.r) h = mod((c.g - c.b) / d, 6);
+        else if (hi == c.g) h = (c.b - c.r) / d + 2;
+        else h = (c.r - c.g) / d + 4;
+        h = mod(h / 6 + 1, 1);
     }
-    else if(op==17)o=p.v[0]<0?a+aux.pixels[index]:mix(a,aux.pixels[index],p.v[0]);
-    else if(op==18){vec3 h=hsl(clamp(straight(a),0,1));float light;
-        if(p.v[0]!=0){h.x=p.v[1];h.y=p.v[2];light=p.v[3];}else{vec3 r=aux.pixels[int(clamp(round(h.x*360),0,360))].rgb;h.x=mod(h.x+r.x/360+1,1);h.y=r.y<=0?max(0,h.y*(1+clamp(r.y/100,-1,1))):r.y>=100?(h.y>0?1:0):min(1,h.y/(1-r.y/100));light=r.z/100;}
-        light=clamp(light,-1,1);h.z=light>=0?h.z+(1-h.z)*light:h.z*(1+light);o.rgb=fromHsl(vec3(h.xy,clamp(h.z,0,1)))*a.a;
+    return vec3(h, s, l);
+}
+vec3 fromHsl(vec3 h) {
+    vec3 rgb = clamp(abs(mod(h.x * 6 + vec3(0, 4, 2), 6) - 3) - 1, 0, 1);
+    return h.z + (rgb - .5) * (1 - abs(2 * h.z - 1)) * h.y;
+}
+
+// ---- Line operations (one invocation per span of a row or column) ----------------------
+// Sliding-window box blur. The 8-bit path sums the CPU's integer values and divides in
+// integers, so the result is exact rather than subject to float-division rounding.
+void boxBlur(ivec2 xy) {
+    bool horizontal = p.v[BOX_BLUR_AXIS] == 0;
+    int radius = int(p.v[BOX_BLUR_RADIUS]), span = max(1, int(p.v[BOX_BLUR_SPAN]));
+    int start = (horizontal ? xy.x : xy.y) * span, line = horizontal ? xy.y : xy.x;
+    int length = horizontal ? int(p.width) : int(p.height), lines = horizontal ? int(p.height) : int(p.width);
+    if (start >= length || line >= lines) return;
+    ivec2 step = horizontal ? ivec2(1, 0) : ivec2(0, 1), base = horizontal ? ivec2(0, line) : ivec2(line, 0);
+    int end = min(start + span, length);
+    if (quantization() == QUANTIZE_UNORM8) {
+        uvec4 sum = uvec4(0);
+        for (int i = -radius; i <= radius; ++i) sum += bytesOf(fetch(base + step * (start + i)));
+        uint divisor = uint(2 * radius + 1);
+        for (int pos = start; pos < end; ++pos) {
+            store(uint((base + step * pos).y) * p.width + uint((base + step * pos).x),
+                  vec4((sum + divisor / 2u) / divisor) / 255.0);
+            sum += bytesOf(fetch(base + step * (pos + radius + 1)));
+            sum -= bytesOf(fetch(base + step * (pos - radius)));
+        }
+    } else {
+        vec4 sum = vec4(0);
+        for (int i = -radius; i <= radius; ++i) sum += fetch(base + step * (start + i));
+        float divisor = float(2 * radius + 1);
+        for (int pos = start; pos < end; ++pos) {
+            store(uint((base + step * pos).y) * p.width + uint((base + step * pos).x), sum / divisor);
+            sum += fetch(base + step * (pos + radius + 1)) - fetch(base + step * (pos - radius));
+        }
     }
-    else if(op==19){vec3 c=clamp(straight(a),0,1);float hi=max(max(c.r,c.g),c.b),lo=min(min(c.r,c.g),c.b),mid=c.r+c.g+c.b-hi-lo;int primary,secondary;
-        if(hi==c.r){primary=0;secondary=c.g>=c.b?1:5;}else if(hi==c.g){primary=2;secondary=c.r>=c.b?1:3;}else{primary=4;secondary=c.g>=c.r?3:5;}
-        float gray=clamp(lo+(mid-lo)*p.v[secondary]+(hi-mid)*p.v[primary],0,1);o.rgb=(p.v[6]!=0?fromHsl(vec3(p.v[7],p.v[8],gray)):vec3(gray))*a.a;
+}
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    uint operation = op();
+    if (operation == OP_BOX_BLUR) { boxBlur(xy); return; }
+    if (xy.x >= p.width || xy.y >= p.height) return;
+    uint index = uint(xy.y) * p.width + uint(xy.x);
+    vec4 a = (operation == OP_TRANSFORM || operation == OP_CLEAR) ? vec4(0) : loadSource(index);
+    vec4 o = a;
+
+    if (operation == OP_CLEAR) {
+        o = vec4(0);
+    } else if (operation == OP_INVERT) {
+        o.rgb = vec3(a.a) - a.rgb;
+    } else if (operation == OP_EXPOSURE) {
+        bool linear = p.v[EXPOSURE_LINEAR] != 0;
+        vec3 c = straight(a);
+        for (int i = 0; i < 3; ++i) {
+            float z = c[i];
+            if (!linear) z = z <= .04045 ? z / 12.92 : pow((z + .055) / 1.055, 2.4);
+            z = pow(max(0, z * p.v[EXPOSURE_MULTIPLIER] + p.v[EXPOSURE_OFFSET]), p.v[EXPOSURE_INVERSE_GAMMA]);
+            if (!linear) z = z <= .0031308 ? z * 12.92 : 1.055 * pow(z, 1 / 2.4) - .055;
+            c[i] = linear ? z : clamp(z, 0, 1);
+        }
+        o.rgb = c * a.a;
+    } else if (operation == OP_LOOKUP) {
+        vec3 pos = clamp(straight(a), 0, 1) * 255;
+        for (int c = 0; c < 3; ++c) {
+            int lo = int(pos[c]), hi = min(lo + 1, 255);
+            o[c] = mix(loadAux(uint(lo))[c], loadAux(uint(hi))[c], pos[c] - lo) * a.a;
+        }
+    } else if (operation == OP_CUBE) {
+        vec3 c = cube(straight(a), int(p.v[CUBE_GRID]));
+        if (p.v[CUBE_CLIPPING] == 1) c = step(vec3(254.5 / 255), c);
+        else if (p.v[CUBE_CLIPPING] == 2) c = vec3(1) - step(c, vec3(.5 / 255));
+        o.rgb = clamp(c, 0, 1) * a.a;
+    } else if (operation == OP_GAUSSIAN) {
+        int reach = int(p.v[GAUSSIAN_REACH]);
+        ivec2 axis = p.v[GAUSSIAN_AXIS] == 0 ? ivec2(1, 0) : ivec2(0, 1);
+        o = vec4(0);
+        for (int i = -reach; i <= reach; ++i) o += fetch(xy + axis * i) * loadAux(uint(i + reach)).r;
+    } else if (operation == OP_MORPHOLOGY) {
+        // Direct min/max for small radii; erosion treats samples beyond the edge as empty.
+        int radius = int(p.v[MORPHOLOGY_RADIUS]);
+        bool erode = p.v[MORPHOLOGY_ERODE] != 0, horizontal = p.v[MORPHOLOGY_AXIS] == 0;
+        ivec2 axis = horizontal ? ivec2(1, 0) : ivec2(0, 1);
+        o = erode ? vec4(1e30) : vec4(-1e30);
+        for (int i = -radius; i <= radius; ++i) o = erode ? min(o, fetch(xy + axis * i)) : max(o, fetch(xy + axis * i));
+        int pos = horizontal ? xy.x : xy.y, size = horizontal ? int(p.width) : int(p.height);
+        if (erode && (pos < radius || pos + radius >= size)) o = vec4(0);
+    } else if (operation == OP_MORPHOLOGY_STEP) {
+        // Extreme over [x, x + count·step): `count` runs of the previous pass.
+        ivec2 axis = p.v[MORPHOLOGY_STEP_AXIS] == 0 ? ivec2(1, 0) : ivec2(0, 1);
+        int step = int(p.v[MORPHOLOGY_STEP_STEP]), count = int(p.v[MORPHOLOGY_STEP_COUNT]);
+        bool erode = p.v[MORPHOLOGY_STEP_ERODE] != 0;
+        for (int i = 1; i < count; ++i) {
+            vec4 next = fetch(xy + axis * (step * i));
+            o = erode ? min(o, next) : max(o, next);
+        }
+    } else if (operation == OP_MORPHOLOGY_COMBINE) {
+        // Input holds the extreme over runs of `run` <= r + 1 samples, which never exceeds the
+        // window [x - r, x + r] clipped to the line; a few runs inside it cover it exactly.
+        int radius = int(p.v[MORPHOLOGY_COMBINE_RADIUS]), run = int(p.v[MORPHOLOGY_COMBINE_RUN]);
+        bool erode = p.v[MORPHOLOGY_COMBINE_ERODE] != 0, horizontal = p.v[MORPHOLOGY_COMBINE_AXIS] == 0;
+        ivec2 axis = horizontal ? ivec2(1, 0) : ivec2(0, 1);
+        int pos = horizontal ? xy.x : xy.y, size = horizontal ? int(p.width) : int(p.height);
+        int first = max(0, pos - radius), last = min(size - 1, pos + radius);
+        ivec2 line = xy - axis * pos;
+        o = fetch(line + axis * (last - run + 1));
+        for (int start = first; start <= last - run; start += run) {
+            vec4 value = fetch(line + axis * start);
+            o = erode ? min(o, value) : max(o, value);
+        }
+        if (erode && (pos < radius || pos + radius >= size)) o = vec4(0);
+    } else if (operation == OP_MASK) {
+        vec4 b = loadAux(index);
+        o = a * (p.v[MASK_USE_ALPHA] == 0 ? b.r : b.a) * p.v[MASK_FACTOR];
+    } else if (operation == OP_BLOOM) {
+        vec4 b = loadAux(index) * p.v[BLOOM_AMOUNT];
+        if (p.v[BLOOM_DEEP] == 0) {
+            b = min(b, vec4(1));
+            o = a + b * (1 - a);
+        } else {
+            o.a = a.a + clamp(b.a, 0, 1) * (1 - a.a);
+            o.rgb = a.rgb + max(b.rgb, vec3(0)) * (1 - clamp(a.rgb, 0, 1));
+        }
+    } else if (operation == OP_MOTION_BLUR) {
+        bool horizontal = p.v[MOTION_BLUR_HORIZONTAL] != 0;
+        int x = horizontal ? xy.x : xy.y, y = horizontal ? xy.y : xy.x, reach = int(p.v[MOTION_BLUR_REACH]);
+        float slope = p.v[MOTION_BLUR_SLOPE];
+        int base = int(round(slope * x));
+        o = vec4(0);
+        for (int i = -reach; i <= reach; ++i) {
+            int sx = x + i, sy = y + int(round(slope * sx)) - base;
+            ivec2 q = horizontal ? ivec2(sx, sy) : ivec2(sy, sx);
+            if (all(greaterThanEqual(q, ivec2(0))) && q.x < p.width && q.y < p.height)
+                o += loadSource(uint(q.y) * p.width + uint(q.x));
+        }
+        o /= float(2 * reach + 1);
+    } else if (operation == OP_PROGRESSIVE_MIX) {
+        vec2 q = vec2(xy) + .5 - vec2(p.v[PROGRESSIVE_MIX_START_X], p.v[PROGRESSIVE_MIX_START_Y]);
+        vec2 delta = vec2(p.v[PROGRESSIVE_MIX_DELTA_X], p.v[PROGRESSIVE_MIX_DELTA_Y]);
+        float t = clamp(p.v[PROGRESSIVE_MIX_RADIAL] != 0 ? length(q) / length(delta) : dot(q, delta) / dot(delta, delta), 0, 1);
+        float radius = mix(p.v[PROGRESSIVE_MIX_LOW], p.v[PROGRESSIVE_MIX_HIGH], t) * 12 / p.v[PROGRESSIVE_MIX_STRONGEST];
+        float level = p.v[PROGRESSIVE_MIX_LEVEL];
+        o = radius >= level - 1 && (radius < level || level == 12) ? mix(a, loadAux(index), clamp(radius - level + 1, 0, 1))
+                                                                   : vec4(0);
+    } else if (operation == OP_COMPOSITE) {
+        vec4 b = loadAux(index) * p.v[COMPOSITE_OPACITY];
+        int mode = int(p.v[COMPOSITE_MODE]);
+        if (quantization() == QUANTIZE_UNORM8 && p.v[COMPOSITE_OPACITY] == 1 && qpainterMode(mode)) {
+            store(index, qpainterComposite(ivec4(bytesOf(a)), ivec4(bytesOf(b)), mode));
+            return;
+        }
+        vec3 mixed = blend(straight(a), straight(b), mode);
+        if (mode == BLEND_HARD_MIX && quantization() == QUANTIZE_UNORM8) {
+            // Exact integer form of the CPU's 8-bit Hard Mix threshold.
+            uvec4 ai = bytesOf(a), bi = bytesOf(b);
+            uvec3 lhs = ai.rgb * bi.a + bi.rgb * ai.a;
+            mixed = vec3(greaterThanEqual(lhs, uvec3(ai.a * bi.a)));
+        }
+        o = vec4((1 - b.a) * a.rgb + (1 - a.a) * b.rgb + a.a * b.a * mixed, b.a + a.a - b.a * a.a);
+    } else if (operation == OP_TRANSFORM) {
+        vec2 at = vec2(xy) + .5;
+        vec2 q = vec2(dot(vec3(at, 1), vec3(p.v[TRANSFORM_M11], p.v[TRANSFORM_M21], p.v[TRANSFORM_DX])),
+                      dot(vec3(at, 1), vec3(p.v[TRANSFORM_M12], p.v[TRANSFORM_M22], p.v[TRANSFORM_DY])));
+        ivec2 size = ivec2(p.v[TRANSFORM_SOURCE_WIDTH], p.v[TRANSFORM_SOURCE_HEIGHT]);
+        if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) o = vec4(0);
+        else if (p.v[TRANSFORM_SMOOTH] == 0) { ivec2 i = ivec2(q); o = loadSource(uint(i.y * size.x + i.x)); }
+        else o = bilinear(q, size);
+        o *= p.v[TRANSFORM_OPACITY];
+    } else if (operation == OP_GRADIENT_MAP) {
+        // Integer Rec. 709 luma of the 8-bit color, as the CPU kernel computes it.
+        uvec3 c = bytesOf(vec4(straight(a), 0)).rgb;
+        uint l = min((c.r * 2126u + c.g * 7152u + c.b * 722u + 5000u) / 10000u, 255u);
+        o.rgb = loadAux(l).rgb * a.a;
+    } else if (operation == OP_RGB_SPLIT) {
+        vec2 at = vec2(xy) + .5;
+        vec2 axis = p.v[RGB_SPLIT_RADIAL] != 0
+                        ? (at - vec2(p.v[RGB_SPLIT_CENTER_X], p.v[RGB_SPLIT_CENTER_Y])) / max(1, p.v[RGB_SPLIT_REACH])
+                        : vec2(p.v[RGB_SPLIT_DIRECTION_X], p.v[RGB_SPLIT_DIRECTION_Y]);
+        int spectral = int(p.v[RGB_SPLIT_SPECTRAL_SAMPLES]), smear = int(p.v[RGB_SPLIT_SMEAR_SAMPLES]);
+        int edges = int(p.v[RGB_SPLIT_EDGES]);
+        float noise = loadAux(index).r;
+        vec3 color = vec3(0), alpha = vec3(0), total = vec3(0);
+        for (int i = 0; i < spectral; ++i) {
+            float t = spectral == 1 ? 0 : (float(i) + noise) / spectral * 2 - 1;
+            vec3 weight = vec3(smoothstep(-.3, 1, t), 1 - smoothstep(0, 1, abs(t)) + .05, smoothstep(-.3, 1, -t));
+            for (int j = 0; j < smear; ++j) {
+                float u = smear == 1 ? 0 : (float(j) + noise) / smear;
+                vec2 q = at - axis * (p.v[RGB_SPLIT_DISTANCE] * t + p.v[RGB_SPLIT_BLUR] * u);
+                vec4 value = vec4(0);
+                if (!((q.x < 0 && (edges & 1) == 0) || (q.x > p.width && (edges & 2) == 0) ||
+                      (q.y < 0 && (edges & 4) == 0) || (q.y > p.height && (edges & 8) == 0)))
+                    value = bilinear(q, ivec2(p.width, p.height));
+                color += weight * value.rgb;
+                alpha += weight * value.a;
+                total += weight;
+            }
+        }
+        alpha /= total;
+        o = vec4(color / total, max(max(alpha.r, alpha.g), alpha.b));
+    } else if (operation == OP_MIX) {
+        float amount = p.v[MIX_AMOUNT];
+        o = amount < 0 ? a + loadAux(index) : mix(a, loadAux(index), amount);
+    } else if (operation == OP_HUE_SATURATION) {
+        vec3 h = hsl(clamp(straight(a), 0, 1));
+        float light;
+        if (p.v[HUE_SATURATION_COLORIZE] != 0) {
+            h.x = p.v[HUE_SATURATION_HUE];
+            h.y = p.v[HUE_SATURATION_SATURATION];
+            light = p.v[HUE_SATURATION_LIGHTNESS];
+        } else {
+            vec3 r = loadAux(uint(clamp(round(h.x * 360), 0, 360))).rgb;
+            h.x = mod(h.x + r.x / 360 + 1, 1);
+            h.y = r.y <= 0 ? max(0, h.y * (1 + clamp(r.y / 100, -1, 1))) : r.y >= 100 ? (h.y > 0 ? 1 : 0) : min(1, h.y / (1 - r.y / 100));
+            light = r.z / 100;
+        }
+        light = clamp(light, -1, 1);
+        h.z = light >= 0 ? h.z + (1 - h.z) * light : h.z * (1 + light);
+        o.rgb = fromHsl(vec3(h.xy, clamp(h.z, 0, 1))) * a.a;
+    } else if (operation == OP_BLACK_WHITE) {
+        vec3 c = clamp(straight(a), 0, 1);
+        float hi = max(max(c.r, c.g), c.b), lo = min(min(c.r, c.g), c.b), mid = c.r + c.g + c.b - hi - lo;
+        int primary, secondary;
+        if (hi == c.r) { primary = 0; secondary = c.g >= c.b ? 1 : 5; }
+        else if (hi == c.g) { primary = 2; secondary = c.r >= c.b ? 1 : 3; }
+        else { primary = 4; secondary = c.g >= c.r ? 3 : 5; }
+        float gray = clamp(lo + (mid - lo) * p.v[BLACK_WHITE_RED + secondary] + (hi - mid) * p.v[BLACK_WHITE_RED + primary], 0, 1);
+        o.rgb = (p.v[BLACK_WHITE_TINT] != 0 ? fromHsl(vec3(p.v[BLACK_WHITE_TINT_HUE], p.v[BLACK_WHITE_TINT_SATURATION], gray))
+                                            : vec3(gray)) * a.a;
+    } else if (operation == OP_COLOR_BALANCE) {
+        vec3 c = clamp(straight(a), 0, 1);
+        float before = dot(c, vec3(.299, .587, .114));
+        for (int i = 0; i < 3; ++i) {
+            float v = c[i];
+            float shadow = clamp((v - .333) / -.25 + .5, 0, 1) * .7, highlight = clamp((v + .333 - 1) / .25 + .5, 0, 1) * .7;
+            float mid = clamp((v - .333) / .25 + .5, 0, 1) * clamp((v + .333 - 1) / -.25 + .5, 0, 1) * .7;
+            c[i] = clamp(v + p.v[COLOR_BALANCE_SHADOW_RED + i] * shadow + p.v[COLOR_BALANCE_MID_RED + i] * mid +
+                         p.v[COLOR_BALANCE_HIGHLIGHT_RED + i] * highlight, 0, 1);
+        }
+        float after = dot(c, vec3(.299, .587, .114));
+        if (p.v[COLOR_BALANCE_PRESERVE_LUMINOSITY] != 0 && after > .0001) c = clamp(c * before / after, 0, 1);
+        o.rgb = c * a.a;
     }
-    else if(op==20){vec3 c=clamp(straight(a),0,1);float before=dot(c,vec3(.299,.587,.114));for(int i=0;i<3;++i){float v=c[i];float shadow=clamp((v-.333)/-.25+.5,0,1)*.7,highlight=clamp((v+.333-1)/.25+.5,0,1)*.7;
-        float mid=clamp((v-.333)/.25+.5,0,1)*clamp((v+.333-1)/-.25+.5,0,1)*.7;c[i]=clamp(v+p.v[i]*shadow+p.v[3+i]*mid+p.v[6+i]*highlight,0,1);}
-        float after=dot(c,vec3(.299,.587,.114));if(p.v[9]!=0&&after>.0001)c=clamp(c*before/after,0,1);o.rgb=c*a.a;
-    }
-    if(p.quantization==1)o=floor(clamp(o,0,1)*255+.5)/255;
-    else if(p.quantization==2)o=floor(clamp(o,0,1)*65535+.5)/65535;
-    else if(p.quantization==3)o=vec4(unpackHalf2x16(packHalf2x16(o.rg)),unpackHalf2x16(packHalf2x16(o.ba)));
-    target.pixels[index]=o;
+
+    uint q = quantization();
+    if (q == QUANTIZE_UNORM8) o = floor(clamp(o, 0, 1) * 255 + .5) / 255;
+    else if (q == QUANTIZE_UNORM16) o = floor(clamp(o, 0, 1) * 65535 + .5) / 65535;
+    else if (q == QUANTIZE_HALF) o = vec4(unpackHalf2x16(packHalf2x16(o.rg)), unpackHalf2x16(packHalf2x16(o.ba)));
+    store(index, o);
 }

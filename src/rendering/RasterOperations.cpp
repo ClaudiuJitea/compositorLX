@@ -21,10 +21,23 @@ extern "C" {
 
 #include <algorithm>
 #include <QJsonArray>
+#include <QtConcurrent/QtConcurrentMap>
 #include <vector>
+#include <functional>
 #include <cmath>
 
 namespace compositor {
+
+// Runs `rows(first, end)` over bands of rows on the global thread pool (the calling thread works too). Every pixel is
+// computed exactly as in a serial loop, so results are identical.
+static void parallelRows(int height, const std::function<void(int, int)> &rows)
+{
+    constexpr int band = 32;
+    if (height <= band) { rows(0, height); return; }
+    std::vector<int> starts;
+    for (int y = 0; y < height; y += band) starts.push_back(y);
+    QtConcurrent::blockingMap(starts, [&](int y) { rows(y, std::min(height, y + band)); });
+}
 
 namespace {
 // Photoshop's Saturation (mac fe7a83d): below 0 it scales toward gray (-100 is gray); above 0 it divides by what is
@@ -223,30 +236,59 @@ QImage RasterOperations::lensDistorted(const QImage &image, double amount)
     return result;
 }
 
-static LevelRange normalized(LevelRange value)
+static double applyLevel(double input, const LevelRange &raw)
 {
-    value.black = std::isfinite(value.black) ? std::clamp(value.black, 0.0, 254.0) : 0;
-    value.white = std::isfinite(value.white) ? std::clamp(value.white, value.black + 1, 255.0) : 255;
-    value.gamma = std::isfinite(value.gamma) ? std::clamp(value.gamma, .1, 9.99) : 1;
-    value.outputBlack = std::isfinite(value.outputBlack) ? std::clamp(value.outputBlack, 0.0, 255.0) : 0;
-    value.outputWhite = std::isfinite(value.outputWhite) ? std::clamp(value.outputWhite, 0.0, 255.0) : 255;
+    const LevelRange value = raw.normalized();
+    const double clipped = std::clamp((input * 255 - value.black) / (value.white - value.black), 0.0, 1.0);
+    return (value.outputBlack + std::pow(clipped, 1 / value.gamma) * (value.outputWhite - value.outputBlack)) / 255;
+}
+
+std::array<float, 768> RasterOperations::levelsTables(const LevelsSettings &settings)
+{
+    std::array<float, 3 * 256> tables{};
+    for (int channel = 0; channel < 3; ++channel) for (int value = 0; value < 256; ++value)
+        tables[channel * 256 + value] = float(applyLevel(applyLevel(value / 255.0, settings.ranges[channel + 1]), settings.ranges[0]));
+    return tables;
+}
+
+std::array<float, 768> RasterOperations::curvesTables(const CurvesSettings &settings)
+{
+    std::array<float, 3 * 256> tables{};
+    for (int channel = 0; channel < 3; ++channel) for (int input = 0; input < 256; ++input)
+        tables[size_t(channel * 256 + input)] = float(settings.value(settings.value(input, channel + 1), 0) / 255);
+    return tables;
+}
+
+LevelsSettings RasterOperations::levelsFromJson(const QJsonObject &settings)
+{
+    LevelsSettings value; const QJsonArray ranges = settings.value(QStringLiteral("levels")).toObject().value(QStringLiteral("ranges")).toArray();
+    for (int i = 0; i < std::min(4, int(ranges.size())); ++i) { const QJsonObject r = ranges[i].toObject(); value.ranges[size_t(i)] = {
+        r.value(QStringLiteral("black")).toDouble(), r.value(QStringLiteral("gamma")).toDouble(1), r.value(QStringLiteral("white")).toDouble(255),
+        r.value(QStringLiteral("outputBlack")).toDouble(), r.value(QStringLiteral("outputWhite")).toDouble(255)}; }
     return value;
 }
 
-static double applyLevel(double input, const LevelRange &raw)
+CurvesSettings RasterOperations::curvesFromJson(const QJsonObject &settings)
 {
-    const LevelRange value = normalized(raw);
-    const double clipped = std::clamp((input * 255 - value.black) / (value.white - value.black), 0.0, 1.0);
-    return (value.outputBlack + std::pow(clipped, 1 / value.gamma) * (value.outputWhite - value.outputBlack)) / 255;
+    CurvesSettings value; const QJsonArray channels = settings.value(QStringLiteral("curves")).toObject().value(QStringLiteral("channels")).toArray();
+    for (int c = 0; c < std::min(4, int(channels.size())); ++c) { QVector<CurvePoint> points; for (const QJsonValue &entry : channels[c].toArray()) {
+        const QJsonObject point = entry.toObject(); points.push_back({point.value(QStringLiteral("x")).toDouble(), point.value(QStringLiteral("y")).toDouble()}); }
+        if (!points.isEmpty()) value.channels[size_t(c)] = points;
+    }
+    return value;
+}
+
+RasterOperations::ExposureSettings RasterOperations::exposureFromJson(const QJsonObject &settings)
+{
+    QJsonObject value = settings.value(QStringLiteral("exposureSettings")).toObject(); if (value.isEmpty()) value = settings.value(QStringLiteral("exposure")).toObject();
+    return {value.value(QStringLiteral("exposure")).toDouble(), value.value(QStringLiteral("offset")).toDouble(), value.value(QStringLiteral("gamma")).toDouble(1)};
 }
 
 QImage RasterOperations::levels(const QImage &image, const LevelsSettings &settings)
 {
     if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return levels(low, settings); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
-    std::array<float, 3 * 256> tables{};
-    for (int channel = 0; channel < 3; ++channel) for (int value = 0; value < 256; ++value)
-        tables[channel * 256 + value] = float(applyLevel(applyLevel(value / 255.0, settings.ranges[channel + 1]), settings.ranges[0]));
+    const auto tables = levelsTables(settings);
     if (auto gpu = GpuOperations::lookup(result,tables.data()); !gpu.isNull()) return gpu;
     levels_apply(result.bits(), size_t(result.width()) * result.height(), tables.data());
     return result;
@@ -285,7 +327,7 @@ LevelsSettings RasterOperations::sampledLevels(const LevelsSettings &settings, c
             if (fraction > 0 && fraction < 1) range.gamma = std::log(fraction) / std::log(.5);
         }
         range.outputBlack = 0; range.outputWhite = 255;
-        result.ranges[size_t(channel)] = normalized(range);
+        result.ranges[size_t(channel)] = range.normalized();
     }
     return result;
 }
@@ -299,19 +341,30 @@ QImage RasterOperations::exposure(const QImage &image, double stops, double offs
     if (!std::isfinite(stops) || !std::isfinite(offset) || !std::isfinite(gamma)) return image;
     stops = std::clamp(stops, -20.0, 20.0); offset = std::clamp(offset, -.5, .5); gamma = std::clamp(gamma, .01, 9.99);
     const double scale = std::pow(2, stops);
-    std::array<float,28> gpuParams{};gpuParams[0]=scale;gpuParams[1]=offset;gpuParams[2]=1/gamma;
+    GpuParameters gpuParams{};gpuParams[GpuParam::Exposure::multiplier]=scale;gpuParams[GpuParam::Exposure::offset]=offset;gpuParams[GpuParam::Exposure::inverseGamma]=1/gamma;
     if (auto gpu = GpuOperations::simple(image.convertToFormat(QImage::Format_RGBA8888_Premultiplied),GpuOp::Exposure,gpuParams); !gpu.isNull()) return gpu;
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
-    for (int y = 0; y < result.height(); ++y) { uchar *row = result.scanLine(y); for (int x = 0; x < result.width(); ++x) {
-        uchar *pixel = row + x * 4; const int alpha = pixel[3]; if (!alpha) continue;
-        for (int c = 0; c < 3; ++c) {
-            double encoded = std::clamp(pixel[c] * 255.0 / alpha, 0.0, 255.0) / 255;
-            double linear = encoded <= .04045 ? encoded / 12.92 : std::pow((encoded + .055) / 1.055, 2.4);
-            linear = std::pow(std::max(0.0, linear * scale + offset), 1 / gamma);
-            const double output = linear <= .0031308 ? linear * 12.92 : 1.055 * std::pow(linear, 1 / 2.4) - .055;
-            pixel[c] = uchar(std::clamp(qRound(output * alpha), 0, alpha));
-        }
-    } }
+    const auto channel = [&](int value, int alpha) {
+        double encoded = std::clamp(value * 255.0 / alpha, 0.0, 255.0) / 255;
+        double linear = encoded <= .04045 ? encoded / 12.92 : std::pow((encoded + .055) / 1.055, 2.4);
+        linear = std::pow(std::max(0.0, linear * scale + offset), 1 / gamma);
+        const double output = linear <= .0031308 ? linear * 12.92 : 1.055 * std::pow(linear, 1 / 2.4) - .055;
+        return uchar(std::clamp(qRound(output * alpha), 0, alpha));
+    };
+    // The result depends only on (value, alpha): above 65536 channels a table of every pair is cheaper than three
+    // pow() calls per channel, and it holds exactly the values the per-pixel formula gives.
+    std::vector<uchar> table;
+    if (qint64(result.width()) * result.height() * 3 > 65536) {
+        table.resize(256 * 256);
+        for (int alpha = 1; alpha < 256; ++alpha) for (int value = 0; value < 256; ++value) table[size_t(alpha) * 256 + value] = channel(value, alpha);
+    }
+    result.detach(); // Rows are written from several threads.
+    parallelRows(result.height(), [&](int first, int end) {
+        for (int y = first; y < end; ++y) { uchar *row = result.scanLine(y); for (int x = 0; x < result.width(); ++x) {
+            uchar *pixel = row + x * 4; const int alpha = pixel[3]; if (!alpha) continue;
+            for (int c = 0; c < 3; ++c) pixel[c] = table.empty() ? channel(pixel[c], alpha) : table[size_t(alpha) * 256 + pixel[c]];
+        } }
+    });
     return result;
 }
 
@@ -373,18 +426,20 @@ QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationS
             values[i*4+2] = responses[i].lightness;
             values[i*4+3] = 1;
         }
-        std::array<float,28> parameters{};
+        GpuParameters parameters{};
         const auto &master = settings.adjustments[size_t(settings.range)];
-        parameters[0] = settings.colorize;
-        parameters[1] = wrapHue(master.hue)/360;
-        parameters[2] = std::clamp(master.saturation/100, 0., 1.);
-        parameters[3] = master.lightness/100;
+        parameters[GpuParam::HueSaturation::colorize] = settings.colorize;
+        parameters[GpuParam::HueSaturation::hue] = wrapHue(master.hue)/360;
+        parameters[GpuParam::HueSaturation::saturation] = std::clamp(master.saturation/100, 0., 1.);
+        parameters[GpuParam::HueSaturation::lightness] = master.lightness/100;
         GpuGraph graph;
         const int input = graph.source(result), response = graph.source(table);
         const auto gpu = graph.execute(graph.pass(GpuOp::HueSaturation,input,response,parameters,1),result.format());
         if (!gpu.isNull()) return gpu;
     }
-    for (int y = 0; y < result.height(); ++y) {
+    result.detach(); // Rows are written from several threads.
+    parallelRows(result.height(), [&](int first, int end) {
+    for (int y = first; y < end; ++y) {
         uchar *row = result.scanLine(y);
         for (int x = 0; x < result.width(); ++x) {
             uchar *p = row + x * 4; const int alpha = p[3]; if (!alpha) continue;
@@ -408,6 +463,7 @@ QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationS
             p[2] = uchar(std::clamp(qRound(adjusted.blueF() * alpha), 0, alpha));
         }
     }
+    });
     return result;
 }
 
@@ -416,9 +472,7 @@ QImage RasterOperations::curves(const QImage &image, const CurvesSettings &setti
     if (DeepImage::isDeep(image)) return DeepImage::through(image, [&](const QImage &low) { return curves(low, settings); });
     if (!settings.isValid()) return image;
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
-    std::array<float, 3 * 256> tables{};
-    for (int channel = 0; channel < 3; ++channel) for (int input = 0; input < 256; ++input)
-        tables[size_t(channel * 256 + input)] = float(settings.value(settings.value(input, channel + 1), 0) / 255);
+    const auto tables = curvesTables(settings);
     if (auto gpu = GpuOperations::lookup(result,tables.data()); !gpu.isNull()) return gpu;
     levels_apply(result.bits(), size_t(result.width()) * result.height(), tables.data());
     return result;
@@ -442,24 +496,11 @@ QImage RasterOperations::adjustment(const QImage &image, const QJsonObject &sett
         const QJsonArray bands=hsv.value(QStringLiteral("bands")).toArray();for(int i=0;i+1<bands.size();i+=2){const int range=names.indexOf(bands[i].toString());const QJsonObject b=bands[i+1].toObject();if(range>=0)value.bands[size_t(range)]={b.value(QStringLiteral("falloffStart")).toDouble(),b.value(QStringLiteral("rangeStart")).toDouble(),b.value(QStringLiteral("rangeEnd")).toDouble(),b.value(QStringLiteral("falloffEnd")).toDouble()};}
         return hueSaturation(image, value);
     }
-    if (kind == QStringLiteral("Levels")) {
-        LevelsSettings value; const QJsonArray ranges = settings.value(QStringLiteral("levels")).toObject().value(QStringLiteral("ranges")).toArray();
-        for (int i = 0; i < std::min(4, int(ranges.size())); ++i) { const QJsonObject r = ranges[i].toObject(); value.ranges[size_t(i)] = {
-            r.value(QStringLiteral("black")).toDouble(), r.value(QStringLiteral("gamma")).toDouble(1), r.value(QStringLiteral("white")).toDouble(255),
-            r.value(QStringLiteral("outputBlack")).toDouble(), r.value(QStringLiteral("outputWhite")).toDouble(255)}; }
-        return levels(image, value);
-    }
-    if (kind == QStringLiteral("Curves")) {
-        CurvesSettings value; const QJsonArray channels = settings.value(QStringLiteral("curves")).toObject().value(QStringLiteral("channels")).toArray();
-        for (int c = 0; c < std::min(4, int(channels.size())); ++c) { QVector<CurvePoint> points; for (const QJsonValue &entry : channels[c].toArray()) {
-            const QJsonObject point = entry.toObject(); points.push_back({point.value(QStringLiteral("x")).toDouble(), point.value(QStringLiteral("y")).toDouble()}); }
-            if (!points.isEmpty()) value.channels[size_t(c)] = points;
-        }
-        return curves(image, value);
-    }
+    if (kind == QStringLiteral("Levels")) return levels(image, levelsFromJson(settings));
+    if (kind == QStringLiteral("Curves")) return curves(image, curvesFromJson(settings));
     if (kind == QStringLiteral("Exposure")) {
-        QJsonObject value = settings.value(QStringLiteral("exposureSettings")).toObject(); if (value.isEmpty()) value = settings.value(QStringLiteral("exposure")).toObject();
-        return exposure(image, value.value(QStringLiteral("exposure")).toDouble(), value.value(QStringLiteral("offset")).toDouble(), value.value(QStringLiteral("gamma")).toDouble(1));
+        const auto value = exposureFromJson(settings);
+        return exposure(image, value.stops, value.offset, value.gamma);
     }
     if (kind == QStringLiteral("Gradient Map")) {
         QJsonObject value = settings.value(QStringLiteral("gradientMapSettings")).toObject(); if (value.isEmpty()) value = settings.value(QStringLiteral("gradientMap")).toObject();
@@ -533,7 +574,7 @@ QImage RasterOperations::blackWhite(const QImage &image, const float *weights, b
 {
     if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return blackWhite(low, weights, tint, tintHue, tintSaturation); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
-    std::array<float,28> p{};for(int i=0;i<6;++i)p[i]=weights[i];p[6]=tint?1:0;p[7]=tintHue/360;p[8]=tintSaturation;
+    GpuParameters p{};for(int i=0;i<6;++i)p[GpuParam::BlackWhite::red+i]=weights[i];p[GpuParam::BlackWhite::tint]=tint?1:0;p[GpuParam::BlackWhite::tintHue]=tintHue/360;p[GpuParam::BlackWhite::tintSaturation]=tintSaturation;
     if(auto gpu=GpuOperations::simple(result,GpuOp::BlackWhite,p);!gpu.isNull())return gpu;
     adjust_black_white(result.bits(), size_t(result.width()), size_t(result.height()),
                        size_t(result.bytesPerLine()), weights, tint ? 1 : 0, tintHue, tintSaturation);
@@ -544,7 +585,7 @@ QImage RasterOperations::colorBalance(const QImage &image, const float *shadows,
 {
     if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return colorBalance(low, shadows, midtones, highlights, preserveLuminosity); });
     QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
-    std::array<float,28> p{};for(int i=0;i<3;++i){p[i]=shadows[i];p[3+i]=midtones[i];p[6+i]=highlights[i];}p[9]=preserveLuminosity?1:0;
+    GpuParameters p{};for(int i=0;i<3;++i){p[GpuParam::ColorBalance::shadowRed+i]=shadows[i];p[GpuParam::ColorBalance::midRed+i]=midtones[i];p[GpuParam::ColorBalance::highlightRed+i]=highlights[i];}p[GpuParam::ColorBalance::preserveLuminosity]=preserveLuminosity?1:0;
     if(auto gpu=GpuOperations::simple(result,GpuOp::ColorBalance,p);!gpu.isNull())return gpu;
     adjust_color_balance(result.bits(), size_t(result.width()), size_t(result.height()),
                          size_t(result.bytesPerLine()), shadows, midtones, highlights, preserveLuminosity ? 1 : 0);
@@ -673,7 +714,7 @@ QImage RasterOperations::gradientMap(const QImage &image, const QColor &shadows,
         table[i * 3 + 1] = uint8_t(qRound(dark.green() + (light.green() - dark.green()) * t));
         table[i * 3 + 2] = uint8_t(qRound(dark.blue() + (light.blue() - dark.blue()) * t));
     }
-    if (GpuRenderer::shouldAttempt(result.size(), 1)) {
+    if (GpuRenderer::shouldAttempt(result.size(), 8)) { // ~3.4× faster at 1080p (tools/GpuBenchmark).
         QImage ramp(256,1,QImage::Format_RGBA32FPx4_Premultiplied);
         auto *values=reinterpret_cast<float *>(ramp.bits());
         for(int i=0;i<256;++i){for(int c=0;c<3;++c)values[i*4+c]=table[i*3+c]/255.f;values[i*4+3]=1;}

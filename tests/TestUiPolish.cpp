@@ -104,6 +104,28 @@ private slots:
         QCOMPARE(window.session().selectionFeatherAmount(), 7);   // cancelled: unchanged
     }
 
+    void renderingSettingsUseThePanel()
+    {
+        MainWindow window; window.resize(1000, 700); window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QAction *rendering = nullptr;
+        for (QAction *candidate : window.findChildren<QAction *>()) if (candidate->text() == QStringLiteral("Rendering…")) rendering = candidate;
+        QVERIFY(rendering);
+        bool seen = false;
+        QTimer::singleShot(200, [&seen] {
+            for (QWidget *top : QApplication::topLevelWidgets())
+                if (top->isVisible() && top->objectName() == QLatin1String("messageDialog") && top->property("panelKind") == QStringLiteral("rendering")) {
+                    QVERIFY(top->findChild<QWidget *>(QStringLiteral("messagePanel")));
+                    QVERIFY(top->findChild<QWidget *>(QStringLiteral("renderingDiagnostics")));
+                    QVERIFY(top->findChild<QWidget *>(QStringLiteral("renderingCanvas")));
+                    seen = true;
+                    top->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();
+                }
+        });
+        rendering->trigger();
+        QVERIFY(seen);
+    }
+
     void manifestOpensItsProject()
     {
         QTemporaryDir dir; QVERIFY(dir.isValid());

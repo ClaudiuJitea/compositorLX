@@ -50,8 +50,22 @@ QImage gaussian(const QImage &image, double radius, bool bytes) {
         return graph.execute(at, tile.format());
     });
 }
-QImage simple(const QImage &image, GpuOp op, const std::array<float, 28> &p, unsigned quantization) {
-    if (!GpuRenderer::shouldAttempt(image.size(), op == GpuOp::Exposure ? 16 : 1))
+// Automatic costs from tools/GpuBenchmark (1080p, cold, Iris Xe): Black & White and Color Balance gain
+// ~30-40×, Exposure only ~1.1× since its CPU lookup table; Invert is faster on the CPU (memory bound).
+static double cost(GpuOp op) {
+    switch (op) {
+    case GpuOp::BlackWhite:
+    case GpuOp::ColorBalance:
+    case GpuOp::Exposure:
+        return 16;
+    case GpuOp::Invert:
+        return 1;
+    default:
+        return 8;
+    }
+}
+QImage simple(const QImage &image, GpuOp op, const GpuParameters &p, unsigned quantization) {
+    if (!GpuRenderer::shouldAttempt(image.size(), cost(op)))
         return {};
     return runLocal(image, 0, [&](const QImage &tile) {
         GpuGraph graph;
@@ -59,7 +73,8 @@ QImage simple(const QImage &image, GpuOp op, const std::array<float, 28> &p, uns
     });
 }
 QImage lookup(const QImage &image, const float *tables) {
-    if (!GpuRenderer::shouldAttempt(image.size(), 1))
+    // Levels/Curves: ~10× faster than the single-threaded CPU table at 1080p.
+    if (!GpuRenderer::shouldAttempt(image.size(), 8))
         return {};
     QImage table(256, 1, QImage::Format_RGBA32FPx4_Premultiplied);
     auto *data = reinterpret_cast<float *>(table.bits());
@@ -87,9 +102,9 @@ QImage cube(const QImage &image, const float *values, int grid, int clipping) {
             data[i * 4 + c] = values[i * 3 + c];
         data[i * 4 + 3] = 1;
     }
-    std::array<float, 28> p{};
-    p[0] = grid;
-    p[1] = clipping;
+    GpuParameters p{};
+    p[GpuParam::Cube::grid] = grid;
+    p[GpuParam::Cube::clipping] = clipping;
     return runLocal(image, 0, [&](const QImage &tile) {
         GpuGraph graph;
         int in = graph.source(tile), lut = graph.source(table);
@@ -101,9 +116,9 @@ QImage bloom(const QImage &image, double amount, double radius, bool deep) {
         !GpuRenderer::shouldAttempt(image.size(), 32))
         return {};
     radius = std::clamp(radius, 1., 150.);
-    std::array<float, 28> p{};
-    p[0] = float(std::clamp(amount, 0., 100.) / 50);
-    p[1] = deep ? 1 : 0;
+    GpuParameters p{};
+    p[GpuParam::Bloom::amount] = float(std::clamp(amount, 0., 100.) / 50);
+    p[GpuParam::Bloom::deep] = deep ? 1 : 0;
     return runLocal(image, int(std::ceil(radius * 3)) + 6, [&](const QImage &tile) {
         GpuGraph graph;
         int in = graph.source(tile), blur = graph.gaussian(in, radius, !deep);
@@ -117,10 +132,10 @@ QImage motion(const QImage &image, double angle, double distance) {
     const double radians = std::clamp(angle, -90., 90.) * M_PI / 180, dx = std::cos(radians), dy = -std::sin(radians);
     const bool horizontal = std::abs(dx) >= std::abs(dy);
     const double major = horizontal ? dx : dy;
-    std::array<float, 28> p{};
-    p[0] = horizontal ? 1 : 0;
-    p[1] = float((horizontal ? dy : dx) / major);
-    p[2] = float(std::lround(std::clamp(distance, 1., 2000.) * std::abs(major) / 2));
+    GpuParameters p{};
+    p[GpuParam::MotionBlur::horizontal] = horizontal ? 1 : 0;
+    p[GpuParam::MotionBlur::slope] = float((horizontal ? dy : dx) / major);
+    p[GpuParam::MotionBlur::reach] = float(std::lround(std::clamp(distance, 1., 2000.) * std::abs(major) / 2));
     GpuGraph graph;
     return graph.execute(graph.pass(GpuOp::MotionBlur, graph.source(image), -1, p, image.depth() <= 32 ? 1 : 0),
                          image.format());
@@ -140,23 +155,24 @@ int appendProgressive(GpuGraph &graph, int original, const ProgressiveBlurSettin
         int blurred = graph.gaussian(original, strongest * level / 12);
         // The CPU pyramid converts each blurred level back to the source format.
         blurred = graph.pass(GpuOp::Copy, blurred, -1, {}, precision);
-        std::array<float, 28> p{};
-        p[0] = s.start.x();
-        p[1] = s.start.y();
-        p[2] = delta.x();
-        p[3] = delta.y();
-        p[4] = s.radial ? 1 : 0;
-        p[5] = low;
-        p[6] = high;
-        p[7] = strongest;
-        p[8] = level;
+        using P = GpuParam::ProgressiveMix;
+        GpuParameters p{};
+        p[P::startX] = s.start.x();
+        p[P::startY] = s.start.y();
+        p[P::deltaX] = delta.x();
+        p[P::deltaY] = delta.y();
+        p[P::radial] = s.radial ? 1 : 0;
+        p[P::low] = low;
+        p[P::high] = high;
+        p[P::strongest] = strongest;
+        p[P::level] = level;
         int candidate = graph.pass(GpuOp::ProgressiveMix, previous, blurred, p);
         if (result < 0)
             result = candidate;
         else {
-            p = {};
-            p[0] = -1;
-            result = graph.pass(GpuOp::Mix, result, candidate, p);
+            GpuParameters add{};
+            add[GpuParam::Mix::amount] = -1;
+            result = graph.pass(GpuOp::Mix, result, candidate, add);
         }
         previous = blurred;
     }
@@ -172,92 +188,63 @@ QImage progressive(const QImage &image, const ProgressiveBlurSettings &s) {
     const int output = appendProgressive(graph, graph.source(image), s, precision);
     return graph.execute(output, DeepImage::canonical(image).format());
 }
-int appendRgbSplit(GpuGraph &graph, int input, const RgbSplitSettings &s, unsigned edges) {
+int appendRgbSplit(GpuGraph &graph, int input, const RgbSplitSettings &s, unsigned edges, QPoint origin) {
     const QSize size = graph.nodes()[input].size;
     for (double n : {s.distance, s.blur, s.angle, s.reach, s.center.x(), s.center.y()})
         if (!std::isfinite(n) || std::abs(n) > 1e7) {
             return -1;
         }
-    // The deterministic sample jitter depends only on image coordinates. Cache one
-    // size so slider changes reuse both its CPU data and its GPU upload.
+    // The deterministic sample jitter depends only on image coordinates. Cache one size
+    // as a single float channel so slider changes reuse both its CPU data and its upload.
     static std::mutex mutex;
-    static QImage cached;
-    QImage noise;
+    static std::shared_ptr<const std::vector<float>> cached;
+    static QSize cachedSize;
+    static QPoint cachedOrigin;
+    std::shared_ptr<const std::vector<float>> noise;
     {
         std::lock_guard lock(mutex);
-        if (cached.size() != size) {
-            QImage next(size, QImage::Format_RGBA32FPx4_Premultiplied);
-            if (next.isNull())
-                return -1;
-            for (int y = 0; y < next.height(); ++y) {
-                auto *row = reinterpret_cast<float *>(next.scanLine(y));
-                for (int x = 0; x < next.width(); ++x) {
-                    const double hash = std::sin(x * 12.9898 + y * 78.233) * 43758.5453;
-                    row[x * 4] = float(hash - std::floor(hash));
-                    row[x * 4 + 1] = row[x * 4 + 2] = 0;
-                    row[x * 4 + 3] = 1;
+        if (!cached || cachedSize != size || cachedOrigin != origin) {
+            auto next = std::make_shared<std::vector<float>>(size_t(size.width()) * size.height());
+            for (int y = 0; y < size.height(); ++y)
+                for (int x = 0; x < size.width(); ++x) {
+                    const double hash = std::sin((x + origin.x()) * 12.9898 + (y + origin.y()) * 78.233) * 43758.5453;
+                    (*next)[size_t(y) * size.width() + x] = float(hash - std::floor(hash));
                 }
-            }
             cached = next;
+            cachedSize = size;
+            cachedOrigin = origin;
         }
         noise = cached;
     }
-    std::array<float, 28> p{};
+    using P = GpuParam::RgbSplit;
+    GpuParameters p{};
     const double radians = s.angle * M_PI / 180;
-    p[0] = s.distance;
-    p[1] = s.blur;
-    p[2] = std::cos(radians);
-    p[3] = std::sin(radians);
-    p[4] = s.center.x();
-    p[5] = s.center.y();
-    p[6] = s.reach;
-    p[7] = s.radial ? 1 : 0;
-    p[8] = std::clamp(std::ceil(s.distance * 2) + 1, 1., 48.);
-    p[9] = s.blur > 0 ? std::clamp(std::ceil(s.blur / 3), 2., 24.) : 1;
-    p[10] = edges & 15;
-    return graph.pass(GpuOp::RgbSplit, input, graph.source(noise), p);
+    p[P::distance] = s.distance;
+    p[P::blur] = s.blur;
+    p[P::directionX] = std::cos(radians);
+    p[P::directionY] = std::sin(radians);
+    p[P::centerX] = s.center.x();
+    p[P::centerY] = s.center.y();
+    p[P::reach] = s.reach;
+    p[P::radial] = s.radial ? 1 : 0;
+    p[P::spectralSamples] = std::clamp(std::ceil(s.distance * 2) + 1, 1., 48.);
+    p[P::smearSamples] = s.blur > 0 ? std::clamp(std::ceil(s.blur / 3), 2., 24.) : 1;
+    p[P::edges] = edges & 15;
+    return graph.pass(GpuOp::RgbSplit, input, graph.channel(noise, size), p);
 }
 QImage rgbSplit(const QImage &image, const RgbSplitSettings &s, unsigned edges, GpuExecution *report) {
     GpuGraph graph;
     const int output = appendRgbSplit(graph, graph.source(image), s, edges);
     return graph.execute(output, image.format(), RenderBackend::Vulkan, report);
 }
-QImage masked(const QImage &image, const QImage &mask, float factor, bool alpha) {
-    if (image.size() != mask.size() || !GpuRenderer::shouldAttempt(image.size(), 1))
-        return {};
-    GpuGraph graph;
-    int in = graph.source(image), coverage = graph.source(mask);
-    std::array<float, 28> p{};
-    p[0] = alpha ? 1 : 0;
-    p[1] = factor;
-    return graph.execute(graph.pass(GpuOp::Mask, in, coverage, p), image.format());
-}
 QImage composite(const QImage &image, const QImage &top, int mode, float opacity, unsigned quantization) {
     if (image.size() != top.size() || !GpuRenderer::shouldAttempt(image.size(), 8))
         return {};
     GpuGraph graph;
     int in = graph.source(image), over = graph.source(top);
-    std::array<float, 28> p{};
-    p[0] = mode;
-    p[1] = opacity;
+    GpuParameters p{};
+    p[GpuParam::Composite::mode] = mode;
+    p[GpuParam::Composite::opacity] = opacity;
     return graph.execute(graph.pass(GpuOp::Composite, in, over, p, quantization), image.format());
-}
-QImage transformed(const QImage &image, QSize size, const QTransform &inverse, bool smooth, float opacity,
-                   unsigned quantization) {
-    if (!inverse.isAffine() || !GpuRenderer::shouldAttempt(size, 8))
-        return {};
-    std::array<float, 28> p{};
-    p[0] = inverse.m11();
-    p[1] = inverse.m21();
-    p[2] = inverse.dx();
-    p[3] = inverse.m12();
-    p[4] = inverse.m22();
-    p[5] = inverse.dy();
-    p[6] = image.width();
-    p[7] = image.height();
-    p[8] = smooth ? 1 : 0;
-    p[9] = opacity;
-    GpuGraph graph;
-    return graph.execute(graph.pass(GpuOp::Transform, graph.source(image), -1, p, quantization, size), image.format());
 }
 } // namespace compositor::GpuOperations

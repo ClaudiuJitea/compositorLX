@@ -303,9 +303,10 @@ void MainWindow::scanlinesDialog()
     timer->setInterval(60);
     session_.beginEdit(QStringLiteral("Scanlines"));
     const auto preview = [&] {
-        session_.rollbackLayer(id, original);
         if (enabled->isChecked())
-            session_.applyScanlines(settings);
+            previewFilter(&dialog, id, original, [value = settings](EditorSession &s) { return s.applyScanlines(value); });
+        else
+            session_.rollbackLayer(id, original);
         canvas_->invalidateDocument();
     };
     connect(timer, &QTimer::timeout, &dialog, preview);
@@ -369,9 +370,10 @@ void MainWindow::progressiveBlurDialog()
         settings.to = to->value();
         settings.radial = radial->isChecked();
         settings.inverted = inverted->isChecked();
-        session_.rollbackLayer(id, original);
         if (enabled->isChecked())
-            session_.applyProgressiveBlur(settings);
+            previewFilter(&dialog, id, original, [value = settings](EditorSession &s) { return s.applyProgressiveBlur(value); });
+        else
+            session_.rollbackLayer(id, original);
         canvas_->invalidateDocument();
     };
     connect(timer, &QTimer::timeout, &dialog, preview);

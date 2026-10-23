@@ -185,7 +185,7 @@ class TestGpuRenderer : public QObject {
         const auto image = fixture({257, 129}, QImage::Format_RGBA32FPx4_Premultiplied);
         GpuGraph graph;
         int in = graph.source(image);
-        std::array<float, 28> p{};
+        GpuParameters p{};
         p[0] = 1.5;
         p[2] = 1;
         p[3] = 1;
@@ -229,14 +229,24 @@ class TestGpuRenderer : public QObject {
     }
     void transformsAndMasks() {
         const auto image = fixture({31, 19}, QImage::Format_RGBA32FPx4_Premultiplied);
-        const QTransform identity;
-        const auto result = GpuOperations::transformed(image, {53, 37}, identity, false);
+        GpuGraph graph;
+        GpuParameters t{};
+        t[GpuParam::Transform::m11] = t[GpuParam::Transform::m22] = 1;
+        t[GpuParam::Transform::sourceWidth] = image.width();
+        t[GpuParam::Transform::sourceHeight] = image.height();
+        t[GpuParam::Transform::opacity] = 1;
+        const auto result =
+            graph.execute(graph.pass(GpuOp::Transform, graph.source(image), -1, t, 0, {53, 37}), image.format());
         QVERIFY(!result.isNull());
         QCOMPARE(result.copy(image.rect()), image);
         QCOMPARE(result.pixelColor(50, 30).alpha(), 0);
         QImage mask(image.size(), QImage::Format_Grayscale8);
         mask.fill(128);
-        const auto covered = GpuOperations::masked(image, mask);
+        GpuGraph masking;
+        GpuParameters m{};
+        m[GpuParam::Mask::factor] = 1;
+        const auto covered = masking.execute(
+            masking.pass(GpuOp::Mask, masking.source(image), masking.source(mask), m), image.format());
         QImage expected = image;
         for (int y = 0; y < image.height(); ++y) {
             auto *p = reinterpret_cast<float *>(expected.scanLine(y));
@@ -305,7 +315,7 @@ class TestGpuRenderer : public QObject {
         const auto gpu = LayerRenderer::flattened(document);
         QVERIFY(error(cpu, gpu) <= 2.01 / 255);
         QVERIFY(GpuRenderer::lastExecution().dispatches > 40);
-        QCOMPARE(GpuRenderer::lastExecution().downloadedBytes, quint64(69 * 53 * 16));
+        QCOMPARE(GpuRenderer::lastExecution().downloadedBytes, quint64(69 * 53 * 4)); // Read back as RGBA8.
     }
     void adjustmentChain() {
         Document document;
@@ -337,7 +347,7 @@ class TestGpuRenderer : public QObject {
         QVERIFY(error(cpu, gpu) <= 2.01 / 255);
         QVERIFY(GpuRenderer::lastExecution().dispatches >= 10);
         QCOMPARE(GpuRenderer::lastExecution().downloadedBytes,
-                 quint64(document.canvasSize.width()) * document.canvasSize.height() * 16);
+                 quint64(document.canvasSize.width()) * document.canvasSize.height() * 4);
     }
     void largeBlurAndTiling() {
         const auto image = fixture({1537, 1041}, QImage::Format_RGBA8888_Premultiplied);
@@ -420,7 +430,7 @@ class TestGpuRenderer : public QObject {
         const auto image = fixture({17, 15}, QImage::Format_RGBA8888_Premultiplied);
         GpuGraph graph;
         int at = graph.source(image);
-        std::array<float, 28> p{};
+        GpuParameters p{};
         p[0] = INFINITY;
         at = graph.pass(GpuOp::Exposure, at, -1, p);
         GpuExecution r;

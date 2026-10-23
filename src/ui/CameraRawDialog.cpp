@@ -5,7 +5,11 @@
 #include "rendering/LayerRenderer.h"
 #include "ui/CanvasWidget.h"
 #include "ui/SliderTracks.h"
+#include <QApplication>
+#include <QEventLoop>
+#include <QFutureWatcher>
 #include <QLabel>
+#include <QtConcurrent>
 #include <QToolButton>
 #include <QStackedWidget>
 #include <QConicalGradient>
@@ -1258,7 +1262,7 @@ void CameraRawDialog::setSettings(const CameraRawSettings &settings)
 void CameraRawDialog::updatePreview()
 {
     if (!previewBox_->isChecked()) {
-        previewJobs_->cancel();session_.rollbackLayerImage(layerId_,originalLayer_.image);lastGraded_={};
+        previewJobs_->cancel();session_.rollbackLayerImage(layerId_,originalLayer_.image);lastGraded_={};lastGradedSettings_.reset();
         if(onPreview_)onPreview_();
         return;
     }
@@ -1267,13 +1271,24 @@ void CameraRawDialog::updatePreview()
     int visualize=-1;
     if(mixerPageCombo_&&mixerPageCombo_->currentIndex()==2&&pointIndex_>=0&&pointIndex_<rendered.mixer.points.size()&&rendered.mixer.points[pointIndex_].visualize)visualize=pointIndex_;
     const QImage original=originalLayer_.image;const bool sharpen=sharpenMaskPreview_;
-    const auto work=[original,rendered,clip,visualize,sharpen]{return RasterOperations::cameraRaw(original,rendered,clip,1.,0,visualize,sharpen);};
-    const auto completed=[this](QImage graded){
+    // The scope and the clipping overlay are computed with the render, on the worker (C3).
+    struct Extras { QImage shown; std::optional<CameraRawScope> scope; };
+    const auto extras=std::make_shared<Extras>();
+    const bool shadows=showShadowClipping_,highlights=showHighlightClipping_;
+    const auto work=[original,rendered,clip,visualize,sharpen,extras,shadows,highlights]{
+        QImage graded=RasterOperations::cameraRaw(original,rendered,clip,1.,0,visualize,sharpen);
+        if(graded.isNull())return graded;
+        extras->shown=shadows||highlights?CameraRawScope::overlay(graded,shadows,highlights):graded;
+        extras->scope=CameraRawScope::make(graded);
+        return graded;
+    };
+    const bool plain=clip==CameraRawClipping::None&&visualize<0&&!sharpen;
+    const auto completed=[this,extras,rendered,plain](QImage graded){
         if(graded.isNull())return;
         lastGraded_=graded;
-        if(showShadowClipping_||showHighlightClipping_)graded=CameraRawScope::overlay(graded,showShadowClipping_,showHighlightClipping_);
-        session_.previewLayerImage(layerId_,graded);
-        if(auto scope=CameraRawScope::make(lastGraded_))scopeWidget_->setScope(*scope);
+        if(plain)lastGradedSettings_=rendered;else lastGradedSettings_.reset();
+        session_.previewLayerImage(layerId_,extras->shown);
+        if(extras->scope)scopeWidget_->setScope(*extras->scope);
         if(onPreview_)onPreview_();
     };
     if(qint64(original.width())*original.height()>=262144)previewJobs_->request(work,completed);
@@ -1339,7 +1354,24 @@ void CameraRawDialog::accept()
     session_.lastCameraRaw = rendered;
     session_.rollbackLayer(layerId_, originalLayer_);
     if (!rendered.isIdentity()) {
-        session_.applyCameraRaw(layerId_, rendered);
+        // C3: the full-resolution preview of these settings is the result; otherwise large layers render on a worker
+        // while the event loop keeps running.
+        QImage graded;
+        if (!lastGraded_.isNull() && lastGradedSettings_ && *lastGradedSettings_ == rendered) graded = lastGraded_;
+        else if (qint64(originalLayer_.image.width()) * originalLayer_.image.height() >= 262144) {
+            setEnabled(false);
+            QApplication::setOverrideCursor(Qt::BusyCursor);
+            QFutureWatcher<QImage> watcher;
+            QEventLoop loop;
+            connect(&watcher, &QFutureWatcherBase::finished, &loop, &QEventLoop::quit);
+            watcher.setFuture(QtConcurrent::run([image = originalLayer_.image, rendered] { return RasterOperations::cameraRaw(image, rendered); }));
+            if (!watcher.isFinished()) loop.exec();
+            graded = watcher.result();
+            QApplication::restoreOverrideCursor();
+            setEnabled(true);
+        } else graded = RasterOperations::cameraRaw(originalLayer_.image, rendered);
+        session_.commitFilterResult(layerId_, graded, QStringLiteral("Camera Raw Filter"),
+                                    [rendered](EditorSession &s) { return s.applyCameraRaw(rendered); });
     }
     releaseCanvas();
     if (onPreview_) onPreview_();

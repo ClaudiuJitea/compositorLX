@@ -10,9 +10,11 @@
 #include <QVector>
 #include <QMap>
 #include <QFuture>
+#include <QFutureWatcher>
 #include <QMessageBox>
 
 #include <memory>
+#include <optional>
 #include <functional>
 
 class QDialog;
@@ -179,6 +181,25 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    // Destructive filter previews (C1). Large layers render on a worker from a snapshot of the document and only the
+    // newest result is shown; small layers, and the final render when the dialog closes, run synchronously.
+    void previewFilter(QWidget *dialog, const QUuid &target, const Layer &original,
+                       std::function<bool(EditorSession &)> apply);
+    void startFilterPreview();
+    struct FilterPreviewResult {
+        Layer layer;
+        std::function<bool(EditorSession &)> lastFilter;
+    };
+    struct FilterPreviewRequest {
+        QPointer<QWidget> dialog;
+        QUuid target;
+        std::shared_ptr<Document> snapshot;
+        std::function<bool(EditorSession &)> apply;
+        quint64 generation = 0;
+    };
+    QFutureWatcher<FilterPreviewResult> *filterPreviewWatcher_ = nullptr;
+    std::optional<FilterPreviewRequest> filterPreviewPending_, filterPreviewRunning_;
+    quint64 filterPreviewRequested_ = 0, filterPreviewApplied_ = 0, filterPreviewAppliedEpoch_ = 0;
     void finishInlineText();
     void createActions();
     void chooseProject();

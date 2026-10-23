@@ -210,6 +210,18 @@ public:
     bool applyLastFilter();
     bool hasLastFilter() const { return bool(lastFilter_); }
     QString lastFilterName() const { return lastFilterName_; }
+    // Off-thread filter previews run a filter on a copy of the document; the result is adopted here as if it had
+    // been run in this session (the layer and, inside an edit, the filter Last Filter repeats).
+    [[nodiscard]] std::function<bool(EditorSession &)> lastFilterAction() const { return lastFilter_; }
+    void adoptPreviewedLayer(const QUuid &id, const Layer &layer, const std::function<bool(EditorSession &)> &filter)
+    {
+        rollbackLayer(id, layer);
+        if (filter && editDepth_ > 0) pendingFilter_ = filter;
+    }
+    // A filter result rendered elsewhere (e.g. off the GUI thread), committed as one undoable edit of `id`'s pixels:
+    // `edited` is clipped to the selection as the filter itself would, and `filter` becomes Last Filter.
+    bool commitFilterResult(const QUuid &id, const QImage &edited, const QString &historyName,
+                            const std::function<bool(EditorSession &)> &filter);
     bool applyMotionBlur(double angleDegrees, double distance);
     bool applyBlackWhite(const float *weights, bool tint, double tintHue, double tintSaturation);
     bool applyColorBalance(const float *shadows, const float *midtones, const float *highlights, bool preserveLuminosity);

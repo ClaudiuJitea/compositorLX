@@ -2014,6 +2014,23 @@ bool EditorSession::applyCameraRaw(const QUuid &id, const CameraRawSettings &set
     return true;
 }
 
+bool EditorSession::commitFilterResult(const QUuid &id, const QImage &edited, const QString &historyName,
+                                       const std::function<bool(EditorSession &)> &filter)
+{
+    if (!document_) return false;
+    const int index = indexOf(id);
+    if (index < 0) return false;
+    const Layer &layer = document_->layers.at(index);
+    if (layer.group || layer.image.isNull() || edited.size() != layer.image.size()) return false;
+    const QImage result = clippedPixels(layer.image, edited, layer, document_->selection);
+    if (result == layer.image) return false;
+    beginEdit(historyName);
+    document_->layers[index].image = result;
+    rasterizeLayer(document_->layers[index]);
+    pendingFilter_ = filter; endEdit();
+    return true;
+}
+
 bool EditorSession::contentAwareFill()
 {
     const Layer *layer = activeLayer();
@@ -2151,7 +2168,7 @@ bool EditorSession::removeBackground(const SubjectRemovalSettings &settings, con
 LevelsHistogram EditorSession::levelsHistogram() const
 {
     const Layer *layer=activeLayer();if(!document_||!layer)return {};
-    if(!layer->adjustment.isEmpty()){Document below=*document_;const int index=indexOf(layer->id);below.layers=below.layers.mid(0,index);const QImage image=LayerRenderer::flattened(below);return RasterOperations::levelsHistogram(image,document_->selection?*document_->selection:QImage());}
+    if(!layer->adjustment.isEmpty()){Document below=*document_;const int index=indexOf(layer->id);below.layers=below.layers.mid(0,index);const QImage image=LayerRenderer::flattened(below,RenderPurpose::Display);return RasterOperations::levelsHistogram(image,document_->selection?*document_->selection:QImage());}
     if(layer->image.isNull())return {};
     return RasterOperations::levelsHistogram(layer->image,selectionCoverageForLayer(*layer,layer->image.size(),document_->selection));
 }
@@ -2163,7 +2180,7 @@ std::optional<QColor> EditorSession::levelsSampleAt(const QPointF &documentPoint
     if (!layer->adjustment.isEmpty()) {
         Document below = *document_;
         below.layers = below.layers.mid(0, indexOf(layer->id));
-        const QImage image = LayerRenderer::flattened(below);
+        const QImage image = LayerRenderer::flattened(below, RenderPurpose::Display);
         const QPoint point(qFloor(documentPoint.x()), qFloor(documentPoint.y()));
         const QColor color = image.pixelColor(point);
         return color.alpha() ? std::optional<QColor>(color) : std::nullopt;

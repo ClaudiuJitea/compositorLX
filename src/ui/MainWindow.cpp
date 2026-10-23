@@ -1,5 +1,6 @@
 #include "ui/RenderingSettingsDialog.h"
 #include "ui/MainWindow.h"
+#include "ui/PanelDialog.h"
 #include "ui/GifTimeline.h"
 #include "core/ToolDefaults.h"
 #include "core/SelectionOps.h"
@@ -393,86 +394,6 @@ int runFloatingDialog(QDialog &dialog)
     if (canvas) canvas->setEditorInteractionBlocked(canvasWasBlocked);
     return dialog.result();
 }
-
-// The editor's own dialog window for messages, questions and short prompts: a rounded panel in the theme's colours (light
-// or dark from the palette tokens), its buttons in the desktop's order (QDialogButtonBox follows KDE or GNOME), Escape
-// for Cancel, and a drag anywhere on the panel to move it (startSystemMove also works on Wayland, where a frameless
-// window cannot move itself).
-class PanelDialog : public QDialog {
-public:
-    PanelDialog(QWidget *parent, const QString &title) : QDialog(parent)
-    {
-        setObjectName(QStringLiteral("messageDialog"));
-        setWindowTitle(title);
-        setAccessibleName(title);
-        setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-        setAttribute(Qt::WA_TranslucentBackground);
-        setModal(true);
-        auto *outer = new QVBoxLayout(this);
-        outer->setContentsMargins(10, 10, 10, 10);
-        panel_ = new QWidget(this);
-        panel_->setObjectName(QStringLiteral("messagePanel"));
-        panel_->setAttribute(Qt::WA_StyledBackground);
-        panel_->setMinimumWidth(440);
-        content_ = new QVBoxLayout(panel_);
-        content_->setContentsMargins(22, 20, 22, 18);
-        content_->setSpacing(0);
-        outer->addWidget(panel_);
-    }
-    [[nodiscard]] QWidget *panel() const { return panel_; }
-    [[nodiscard]] QVBoxLayout *content() const { return content_; }
-    static QLabel *makeLabel(QWidget *parent, const QString &text, const QString &name, Qt::TextFormat format = Qt::PlainText)
-    {
-        auto *label = new QLabel(text, parent);
-        label->setObjectName(name);
-        label->setWordWrap(true);
-        label->setTextFormat(format);
-        if (format == Qt::RichText) {
-            label->setOpenExternalLinks(true);
-            label->setTextInteractionFlags(Qt::TextBrowserInteraction);
-        } else label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        return label;
-    }
-    QLabel *addLabel(const QString &text, const QString &name, int spacingBefore, Qt::TextFormat format = Qt::PlainText)
-    {
-        if (spacingBefore > 0) content_->addSpacing(spacingBefore);
-        QLabel *label = makeLabel(panel_, text, name, format);
-        content_->addWidget(label);
-        return label;
-    }
-    // Buttons that end the dialog with their standard button as the result; the primary one is the accent default.
-    QDialogButtonBox *addButtons(QDialogButtonBox::StandardButtons buttons, QDialogButtonBox::StandardButton primary,
-                                 const QHash<int, QString> &labels = {})
-    {
-        content_->addSpacing(20);
-        auto *box = new QDialogButtonBox(buttons, panel_);
-        box->setObjectName(QStringLiteral("messageButtons"));
-        for (QAbstractButton *button : box->buttons()) {
-            const QDialogButtonBox::StandardButton standard = box->standardButton(button);
-            if (standard == QDialogButtonBox::Discard) { button->setText(QObject::tr("Don't Save")); button->setProperty("dialogRole", QStringLiteral("destructive")); }
-            if (standard == primary) button->setProperty("dialogRole", QStringLiteral("primary"));
-            if (labels.contains(int(standard))) button->setText(labels.value(int(standard)));
-            button->setMinimumWidth(92);
-            if (auto *push = qobject_cast<QPushButton *>(button)) {
-                push->setAutoDefault(false);
-                if (standard == primary) { push->setDefault(true); push->setFocus(); }
-            }
-            button->style()->unpolish(button); button->style()->polish(button);   // the role is set after the box made it
-            QObject::connect(button, &QAbstractButton::clicked, this, [this, standard] { done(int(standard)); });
-        }
-        content_->addWidget(box);
-        return box;
-    }
-protected:
-    void mousePressEvent(QMouseEvent *event) override
-    {
-        if (event->button() == Qt::LeftButton && windowHandle() && windowHandle()->startSystemMove()) { event->accept(); return; }
-        QDialog::mousePressEvent(event);
-    }
-private:
-    QWidget *panel_ = nullptr;
-    QVBoxLayout *content_ = nullptr;
-};
 
 // "Working…" while a background job runs: the panel with an indeterminate bar, and Cancel (or Escape) when it can stop.
 class BusyPanel : public PanelDialog {
@@ -1203,10 +1124,71 @@ public:
 
 } // namespace
 
+// Counts restores of a previewed layer, so a final render can tell whether the shown preview is still in place.
+static quint64 filterRestoreEpoch = 0;
 void restoreLayer(Document *doc, EditorSession &session, const QUuid &target, const Layer &original)
 {
     Q_UNUSED(doc);
+    ++filterRestoreEpoch;
     session.rollbackLayer(target, original);
+}
+
+void MainWindow::previewFilter(QWidget *dialog, const QUuid &target, const Layer &original, std::function<bool(EditorSession &)> apply)
+{
+    const quint64 generation = ++filterPreviewRequested_;
+    const bool final = !dialog || !dialog->isVisible();
+    const bool large = qint64(original.image.width()) * original.image.height() >= 262144 && !qEnvironmentVariableIsSet("COMPOSITOR_SYNC_PREVIEWS");
+    if (final || !large) {
+        // The dialog closed (or the layer is small): render here. A completed asynchronous preview of the same request
+        // that is still on the layer is the result already.
+        const bool shown = final && generation == filterPreviewApplied_ + 1 && !filterPreviewRunning_ && !filterPreviewPending_ && filterPreviewAppliedEpoch_ == filterRestoreEpoch && filterPreviewApplied_ > 0;
+        filterPreviewPending_.reset();
+        filterPreviewRunning_.reset(); // A running job's result is now stale.
+        if (shown) { filterPreviewApplied_ = generation; return; }
+        session_.rollbackLayer(target, original);
+        apply(session_);
+        filterPreviewApplied_ = generation;
+        filterPreviewAppliedEpoch_ = filterRestoreEpoch;
+        return;
+    }
+    auto snapshot = std::make_shared<Document>(*document_);
+    for (Layer &layer : snapshot->layers) if (layer.id == target) layer = original;
+    snapshot->activeLayerId = target;
+    filterPreviewPending_ = FilterPreviewRequest{dialog, target, std::move(snapshot), std::move(apply), generation};
+    if (!filterPreviewRunning_) startFilterPreview();
+}
+
+void MainWindow::startFilterPreview()
+{
+    if (!filterPreviewPending_) return;
+    if (!filterPreviewWatcher_) {
+        filterPreviewWatcher_ = new QFutureWatcher<FilterPreviewResult>(this);
+        connect(filterPreviewWatcher_, &QFutureWatcherBase::finished, this, [this] {
+            const auto finished = std::move(filterPreviewRunning_);
+            filterPreviewRunning_.reset();
+            // Only the newest request reaches the document, and only while its dialog is still open.
+            if (finished && finished->generation == filterPreviewRequested_ && finished->dialog && finished->dialog->isVisible()) {
+                const FilterPreviewResult result = filterPreviewWatcher_->result();
+                session_.adoptPreviewedLayer(finished->target, result.layer, result.lastFilter);
+                filterPreviewApplied_ = finished->generation;
+                filterPreviewAppliedEpoch_ = filterRestoreEpoch;
+                canvas_->invalidateDocument();
+            }
+            startFilterPreview();
+        });
+    }
+    filterPreviewRunning_ = std::move(filterPreviewPending_);
+    filterPreviewPending_.reset();
+    const auto request = *filterPreviewRunning_;
+    filterPreviewWatcher_->setFuture(QtConcurrent::run([request] {
+        EditorSession session;
+        session.setDocument(request.snapshot);
+        request.apply(session);
+        FilterPreviewResult result;
+        for (const Layer &layer : request.snapshot->layers) if (layer.id == request.target) result.layer = layer;
+        result.lastFilter = session.lastFilterAction();
+        return result;
+    }));
 }
 
 void MainWindow::setMessageDialogHook(std::function<std::optional<QMessageBox::StandardButton>(const QString &title, const QString &text)> hook)
@@ -3030,7 +3012,7 @@ void MainWindow::openColorPicker(bool background)
     // canvas remains clickable and feeds its composited color into the picker.
     colorSampleOverride_ = [this](const QPoint &point) {
         if (!colorPicker_ || !document_ || !QRect(QPoint(), document_->canvasSize).contains(point)) return;
-        const QColor sampled = LayerRenderer::flattened(*document_).pixelColor(point);
+        const QColor sampled = LayerRenderer::flattened(*document_, RenderPurpose::Display).pixelColor(point);
         if (sampled.isValid() && sampled.alpha() != 0) colorPicker_->setCurrentColor(sampled.toRgb());
     };
     // With text being edited, the foreground color is the color of the selected letters (all the text when nothing
@@ -3437,7 +3419,7 @@ void MainWindow::createActions()
         Layer *active=session_.activeLayer();if(!active||active->image.isNull())return;const QUuid target=active->id;const Layer original=*active;
         QDialog dialog(this);dialog.setWindowTitle(tr("Lens Correction"));auto *layout=new QVBoxLayout(&dialog);auto *amount=new QDoubleSpinBox(&dialog);amount->setRange(-100,100);amount->setValue(0);amount->setDecimals(0);layout->addWidget(new ScrubLabel(tr("Remove Distortion"),amount,1.0,std::nullopt,&dialog));layout->addWidget(sliderField(amount));auto *hint=new QLabel(tr("Positive straightens barrel distortion; negative straightens pincushion distortion."),&dialog);hint->setWordWrap(true);layout->addWidget(hint);auto *previewEnabled=new QCheckBox(tr("Preview"),&dialog);previewEnabled->setChecked(true);previewEnabled->setObjectName(QStringLiteral("filterPreview"));layout->addWidget(previewEnabled);
         rememberFilter(session_,dialog,false,QStringLiteral("lens"),{{QStringLiteral("distortion"),amount}});
-        session_.beginEdit(QStringLiteral("Lens Correction"));const auto preview=[this,target,original,amount,previewEnabled]{restoreLayer(document_.get(),session_,target,original);if(previewEnabled->isChecked())session_.distortActiveLayer(amount->value());canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel|QDialogButtonBox::Ok,&dialog);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);layout->addWidget(buttons);if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else restoreLayer(document_.get(),session_,target,original);session_.endEdit();syncDocumentViews();
+        session_.beginEdit(QStringLiteral("Lens Correction"));const auto preview=[this,&dialog,target,original,amount,previewEnabled]{if(previewEnabled->isChecked())previewFilter(&dialog,target,original,[a=amount->value()](EditorSession &s){return s.distortActiveLayer(a);});else restoreLayer(document_.get(),session_,target,original);canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel|QDialogButtonBox::Ok,&dialog);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);layout->addWidget(buttons);if(runFloatingDialog(dialog)==QDialog::Accepted){previewEnabled->setChecked(true);preview();}else restoreLayer(document_.get(),session_,target,original);session_.endEdit();syncDocumentViews();
     });
 
     auto *filterMenu = menuBar()->addMenu(tr("&Filter"));
@@ -4031,13 +4013,13 @@ void MainWindow::levelsDialog()
     auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog); previewEnabled->setChecked(true); previewEnabled->setObjectName(QStringLiteral("levelsPreview")); auto *reset = new QPushButton(tr("Reset"), &dialog); reset->setObjectName(QStringLiteral("levelsReset")); auto *previewRow = new QHBoxLayout; previewRow->addWidget(previewEnabled); previewRow->addStretch(); previewRow->addWidget(reset); layout->addLayout(previewRow);
     connect(black, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, [white](double value) { white->setMinimum(value + 1); });
     connect(channel, &QComboBox::currentIndexChanged, &dialog, [&, storeAt, loadCurrent, previousChannel = 0](int current) mutable { storeAt(previousChannel); previousChannel=current; loadCurrent(); histogramView->update(); inputHandles->update(); outputHandles->update(); });
-    const auto preview = [this, live, target, storeCurrent, &settings, originalLayer, previewEnabled] {
+    const auto preview = [this, &dialog, live, target, storeCurrent, &settings, originalLayer, previewEnabled] {
         storeCurrent();
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, originalLayer.adjustment);
             else restoreLayer(document_.get(), session_, target, originalLayer);
         } else if (live) session_.previewAdjustment(target, levelsAdjustment(settings));
-        else { restoreLayer(document_.get(), session_, target, originalLayer); session_.applyLevels(settings); }
+        else previewFilter(&dialog, target, originalLayer, [settings](EditorSession &s) { return s.applyLevels(settings); });
         canvas_->invalidateDocument();
     };
     const CanvasWidget::Tool previousTool = canvas_->tool(); int sampleMode = -1;
@@ -4088,7 +4070,7 @@ void MainWindow::exposureDialog()
         const QJsonObject saved = originalAdjustment.value(QStringLiteral("exposureSettings")).toObject(); stops->setValue(saved.value(QStringLiteral("exposure")).toDouble()); offset->setValue(saved.value(QStringLiteral("offset")).toDouble()); gamma->setValue(saved.value(QStringLiteral("gamma")).toDouble(1));
     }
     session_.beginEdit(live ? QStringLiteral("Edit Exposure") : QStringLiteral("Exposure"));
-    const auto preview = [this, live, target, value, originalLayer, stops, offset, gamma, previewEnabled] { if (!previewEnabled->isChecked()) { if (live) session_.previewAdjustment(target, originalLayer.adjustment); else restoreLayer(document_.get(), session_, target, originalLayer); } else if (live) session_.previewAdjustment(target, value()); else { restoreLayer(document_.get(), session_, target, originalLayer); session_.applyExposure(stops->value(),offset->value(),gamma->value()); } canvas_->invalidateDocument(); };
+    const auto preview = [this, &dialog, live, target, value, originalLayer, stops, offset, gamma, previewEnabled] { if (!previewEnabled->isChecked()) { if (live) session_.previewAdjustment(target, originalLayer.adjustment); else restoreLayer(document_.get(), session_, target, originalLayer); } else if (live) session_.previewAdjustment(target, value()); else previewFilter(&dialog, target, originalLayer, [e = stops->value(), o = offset->value(), g = gamma->value()](EditorSession &s) { return s.applyExposure(e, o, g); }); canvas_->invalidateDocument(); };
     connect(stops, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview); connect(offset, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview); connect(gamma, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, preview);
     addScrubRow(form, tr("Exposure (stops)"), stops); addScrubRow(form, tr("Offset"), offset); addScrubRow(form, tr("Gamma"), gamma, true); layout->addLayout(form); layout->addWidget(previewEnabled); connect(previewEnabled, &QCheckBox::toggled, &dialog, preview);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
@@ -4292,12 +4274,12 @@ void MainWindow::hueSaturationDialog()
     form->addRow(tr("Range"), range); addScrubRow(form, tr("Hue"), hue); addScrubRow(form, tr("Saturation"), saturation); addScrubRow(form, tr("Lightness"), lightness);
     const auto liveValue = [&] { store(); return hueAdjustment(settings); };
     session_.beginEdit(live ? QStringLiteral("Edit Hue/Saturation") : QStringLiteral("Hue/Saturation"));
-    const auto preview = [this, live, target, liveValue, originalLayer, &settings, previewEnabled] {
+    const auto preview = [this, &dialog, live, target, liveValue, originalLayer, &settings, previewEnabled] {
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, originalLayer.adjustment);
             else restoreLayer(document_.get(), session_, target, originalLayer);
         } else if(live) session_.previewAdjustment(target,liveValue());
-        else { restoreLayer(document_.get(), session_, target, originalLayer); liveValue(); session_.applyHueSaturation(settings); }
+        else { liveValue(); previewFilter(&dialog, target, originalLayer, [settings](EditorSession &s) { return s.applyHueSaturation(settings); }); }
         canvas_->invalidateDocument();
     };
     connect(hue, qOverload<int>(&QSpinBox::valueChanged), &dialog, preview); connect(saturation, qOverload<int>(&QSpinBox::valueChanged), &dialog, preview); connect(lightness, qOverload<int>(&QSpinBox::valueChanged), &dialog, preview); connect(colorize, &QCheckBox::toggled, &dialog, preview); connect(invert, &QCheckBox::toggled, &dialog, preview);
@@ -4322,7 +4304,7 @@ void MainWindow::hueSaturationDialog()
     });
     const auto sampledHue = [this](const QPoint &point) -> std::optional<double> {
         if (!document_ || !QRect(QPoint(), document_->canvasSize).contains(point)) return std::nullopt;
-        const QColor color = LayerRenderer::flattened(*document_).pixelColor(point); float h = 0, s = 0, l = 0; color.getHslF(&h, &s, &l);
+        const QColor color = LayerRenderer::flattened(*document_, RenderPurpose::Display).pixelColor(point); float h = 0, s = 0, l = 0; color.getHslF(&h, &s, &l);
         if (!color.isValid() || color.alpha() == 0 || s <= .02f || h < 0) return std::nullopt;
         return h * 360.0;
     };
@@ -4389,7 +4371,7 @@ void MainWindow::curvesDialog()
     CurvesSettings settings; const QJsonObject originalAdjustment=active->adjustment; const Layer originalLayer=*active;
     if(live){const QJsonArray saved=originalAdjustment.value(QStringLiteral("curves")).toObject().value(QStringLiteral("channels")).toArray();for(int c=0;c<std::min(4,int(saved.size()));++c){QVector<CurvePoint> curve;for(const QJsonValue &entry:saved[c].toArray()){const QJsonObject point=entry.toObject();curve.push_back({point.value(QStringLiteral("x")).toDouble(),point.value(QStringLiteral("y")).toDouble()});}if(!curve.isEmpty())settings.channels[size_t(c)]=curve;}}
     graph->settings = &settings;
-    const auto preview=[this,live,target,&settings,originalLayer,previewEnabled]{if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,curvesAdjustment(settings));else{restoreLayer(document_.get(), session_, target, originalLayer);session_.applyCurves(settings);}canvas_->invalidateDocument();};
+    const auto preview=[this,&dialog,live,target,&settings,originalLayer,previewEnabled]{if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,curvesAdjustment(settings));else previewFilter(&dialog,target,originalLayer,[settings](EditorSession &s){return s.applyCurves(settings);});canvas_->invalidateDocument();};
     session_.beginEdit(live?QStringLiteral("Edit Curves"):QStringLiteral("Curves"));
     const auto refreshSelection = [&](int row) {
         const auto &curve = settings.channels[size_t(channel->currentIndex())]; const bool valid = row >= 0 && row < curve.size();
@@ -4444,7 +4426,7 @@ void MainWindow::gradientMapDialog()
         session_.filterMemory.insert(QStringLiteral("gradientMap.highlights"), highlights);
     });
     session_.beginEdit(live?QStringLiteral("Edit Gradient Map"):QStringLiteral("Gradient Map"));
-    const auto preview = [this, live, target, value, originalLayer, &shadows, &highlights, reverse, previewEnabled] { if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,value());else{restoreLayer(document_.get(), session_, target, originalLayer);session_.applyGradientMap(shadows,highlights,reverse->isChecked());}canvas_->invalidateDocument(); };
+    const auto preview = [this, &dialog, live, target, value, originalLayer, &shadows, &highlights, reverse, previewEnabled] { if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,value());else previewFilter(&dialog,target,originalLayer,[shadows,highlights,r=reverse->isChecked()](EditorSession &s){return s.applyGradientMap(shadows,highlights,r);});canvas_->invalidateDocument(); };
     const auto refreshGradient = [&] {
         QImage strip(std::max(1, gradientView->width()), 20, QImage::Format_RGB32); QPainter painter(&strip); QLinearGradient gradient(0, 0, strip.width(), 0); const QColor first = reverse->isChecked() ? highlights : shadows; const QColor last = reverse->isChecked() ? shadows : highlights; gradient.setColorAt(0, first); gradient.setColorAt(1, last); painter.fillRect(strip.rect(), gradient); painter.end(); gradientView->setPixmap(QPixmap::fromImage(strip));
         shadowButton->setStyleSheet(QStringLiteral("text-align:left;padding-left:32px;background:%1;").arg(shadows.name())); highlightButton->setStyleSheet(QStringLiteral("text-align:left;padding-left:32px;background:%1;").arg(highlights.name()));
@@ -4479,7 +4461,7 @@ void MainWindow::grainDialog()
     const QJsonObject originalAdjustment = active->adjustment; const Layer originalLayer=*active; quint32 seed = QRandomGenerator::global()->generate();
     if (live) { const QJsonObject saved = originalAdjustment.value(QStringLiteral("grainSettings")).toObject(); amount->setValue(saved.value(QStringLiteral("amount")).toDouble(25)); size->setValue(saved.value(QStringLiteral("size")).toDouble(1.5)); roughness->setValue(saved.value(QStringLiteral("roughness")).toDouble(50)); seed = quint32(saved.value(QStringLiteral("seed")).toDouble(seed)); }
     const auto value = [&] { return QJsonObject{{QStringLiteral("kind"), QStringLiteral("Grain")}, {QStringLiteral("grainSettings"), QJsonObject{{QStringLiteral("amount"), amount->value()}, {QStringLiteral("size"), size->value()}, {QStringLiteral("roughness"), roughness->value()}, {QStringLiteral("seed"), double(seed)}}}}; };
-    session_.beginEdit(live?QStringLiteral("Edit Grain"):QStringLiteral("Grain"));const auto preview=[this,live,target,value,originalLayer,amount,size,roughness,seed,previewEnabled]{if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,value());else{restoreLayer(document_.get(), session_, target, originalLayer);session_.applyGrain(amount->value(),size->value(),roughness->value(),seed);}canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(size,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(roughness,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);
+    session_.beginEdit(live?QStringLiteral("Edit Grain"):QStringLiteral("Grain"));const auto preview=[this,&dialog,live,target,value,originalLayer,amount,size,roughness,seed,previewEnabled]{if(!previewEnabled->isChecked()){if(live)session_.previewAdjustment(target,originalLayer.adjustment);else restoreLayer(document_.get(), session_, target, originalLayer);}else if(live)session_.previewAdjustment(target,value());else previewFilter(&dialog,target,originalLayer,[a=amount->value(),z=size->value(),r=roughness->value(),seed](EditorSession &s){return s.applyGrain(a,z,r,seed);});canvas_->invalidateDocument();};connect(amount,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(size,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);connect(roughness,qOverload<double>(&QDoubleSpinBox::valueChanged),&dialog,preview);
     addScrubRow(form, tr("Amount"), amount); addScrubRow(form, tr("Size"), size, true); addScrubRow(form, tr("Roughness"), roughness); layout->addLayout(form); layout->addWidget(previewEnabled); connect(previewEnabled,&QCheckBox::toggled,&dialog,preview);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject); layout->addWidget(buttons);
@@ -4574,7 +4556,7 @@ void MainWindow::blackWhiteDialog()
 
     session_.beginEdit(live ? QStringLiteral("Edit Black & White") : QStringLiteral("Black & White"));
 
-    const auto preview = [this, live, target, value, originalLayer, reds, yellows, greens, cyans, blues, magentas, tint, tintHue, tintSaturation, previewEnabled] {
+    const auto preview = [this, &dialog, live, target, value, originalLayer, reds, yellows, greens, cyans, blues, magentas, tint, tintHue, tintSaturation, previewEnabled] {
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, originalLayer.adjustment);
             else {
@@ -4583,12 +4565,13 @@ void MainWindow::blackWhiteDialog()
         } else if (live) {
             session_.previewAdjustment(target, value());
         } else {
-            restoreLayer(document_.get(), session_, target, originalLayer);
-            const float weights[6] = {
+            const std::array<float, 6> weights = {
                 float(reds->value() / 100.0), float(yellows->value() / 100.0), float(greens->value() / 100.0),
                 float(cyans->value() / 100.0), float(blues->value() / 100.0), float(magentas->value() / 100.0)
             };
-            session_.applyBlackWhite(weights, tint->isChecked(), tintHue->value(), tintSaturation->value() / 100.0);
+            previewFilter(&dialog, target, originalLayer, [weights, t = tint->isChecked(), h = tintHue->value(), saturation = tintSaturation->value() / 100.0](EditorSession &s) {
+                return s.applyBlackWhite(weights.data(), t, h, saturation);
+            });
         }
         canvas_->invalidateDocument();
     };
@@ -4733,18 +4716,19 @@ void MainWindow::colorBalanceDialog()
 
     session_.beginEdit(live ? QStringLiteral("Edit Color Balance") : QStringLiteral("Color Balance"));
 
-    const auto preview = [this, live, target, value, originalLayer, sCR, sMG, sYB, mCR, mMG, mYB, hCR, hMG, hYB, preserveLuminosity, previewEnabled] {
+    const auto preview = [this, &dialog, live, target, value, originalLayer, sCR, sMG, sYB, mCR, mMG, mYB, hCR, hMG, hYB, preserveLuminosity, previewEnabled] {
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, originalLayer.adjustment);
             else restoreLayer(document_.get(), session_, target, originalLayer);
         } else if (live) {
             session_.previewAdjustment(target, value());
         } else {
-            restoreLayer(document_.get(), session_, target, originalLayer);
-            const float shadows[3] = { float(sCR->value() / 100.0), float(sMG->value() / 100.0), float(sYB->value() / 100.0) };
-            const float midtones[3] = { float(mCR->value() / 100.0), float(mMG->value() / 100.0), float(mYB->value() / 100.0) };
-            const float highlights[3] = { float(hCR->value() / 100.0), float(hMG->value() / 100.0), float(hYB->value() / 100.0) };
-            session_.applyColorBalance(shadows, midtones, highlights, preserveLuminosity->isChecked());
+            const std::array<float, 3> shadows = { float(sCR->value() / 100.0), float(sMG->value() / 100.0), float(sYB->value() / 100.0) };
+            const std::array<float, 3> midtones = { float(mCR->value() / 100.0), float(mMG->value() / 100.0), float(mYB->value() / 100.0) };
+            const std::array<float, 3> highlights = { float(hCR->value() / 100.0), float(hMG->value() / 100.0), float(hYB->value() / 100.0) };
+            previewFilter(&dialog, target, originalLayer, [shadows, midtones, highlights, preserve = preserveLuminosity->isChecked()](EditorSession &s) {
+                return s.applyColorBalance(shadows.data(), midtones.data(), highlights.data(), preserve);
+            });
         }
         canvas_->invalidateDocument();
     };
@@ -4849,15 +4833,14 @@ void MainWindow::gaussianBlurDialog()
             {QStringLiteral("blurRadius"), radius->value()}
         };
     };
-    const auto preview = [this, live, target, original, value, radius, preserve, previewEnabled] {
+    const auto preview = [this, &dialog, live, target, original, value, radius, preserve, previewEnabled] {
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, original.adjustment);
             else restoreLayer(document_.get(), session_, target, original);
         } else if (live) {
             session_.previewAdjustment(target, value());
         } else {
-            restoreLayer(document_.get(), session_, target, original);
-            session_.applyGaussianBlur(radius->value(),preserve->isChecked());
+            previewFilter(&dialog, target, original, [r = radius->value(), keep = preserve->isChecked()](EditorSession &s) { return s.applyGaussianBlur(r, keep); });
         }
         canvas_->invalidateDocument();
     };
@@ -4921,15 +4904,14 @@ void MainWindow::motionBlurDialog()
             {QStringLiteral("motionDistance"), distance->value()}
         };
     };
-    const auto preview = [this, live, target, original, value, angle, distance, previewEnabled] {
+    const auto preview = [this, &dialog, live, target, original, value, angle, distance, previewEnabled] {
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, original.adjustment);
             else restoreLayer(document_.get(), session_, target, original);
         } else if (live) {
             session_.previewAdjustment(target, value());
         } else {
-            restoreLayer(document_.get(), session_, target, original);
-            session_.applyMotionBlur(angle->value(), distance->value());
+            previewFilter(&dialog, target, original, [a = angle->value(), d = distance->value()](EditorSession &s) { return s.applyMotionBlur(a, d); });
         }
         canvas_->invalidateDocument();
     };
@@ -5012,11 +4994,12 @@ void MainWindow::vignetteDialog()
 
     rememberFilter(session_, dialog, false, QStringLiteral("vignette"), {{QStringLiteral("amount"), amount}, {QStringLiteral("midpoint"), midpoint}, {QStringLiteral("roundness"), roundness}, {QStringLiteral("feather"), feather}, {QStringLiteral("highlights"), highlights}});
     session_.beginEdit(QStringLiteral("Vignette"));
-    const auto preview = [this, target, original, amount, &edgeColor, midpoint, roundness, feather, highlights, previewEnabled] {
-        restoreLayer(document_.get(), session_, target, original);
+    const auto preview = [this, &dialog, target, original, amount, &edgeColor, midpoint, roundness, feather, highlights, previewEnabled] {
         if (previewEnabled->isChecked()) {
-            session_.applyVignette(amount->value(), edgeColor, midpoint->value(), roundness->value(), feather->value(), highlights->value());
-        }
+            previewFilter(&dialog, target, original, [a = amount->value(), c = edgeColor, m = midpoint->value(), r = roundness->value(), f = feather->value(), h = highlights->value()](EditorSession &s) {
+                return s.applyVignette(a, c, m, r, f, h);
+            });
+        } else restoreLayer(document_.get(), session_, target, original);
         canvas_->invalidateDocument();
     };
 
@@ -5097,11 +5080,10 @@ void MainWindow::bloomGlowDialog()
 
     rememberFilter(session_, dialog, false, QStringLiteral("bloomGlow"), {{QStringLiteral("amount"), amount}, {QStringLiteral("radius"), radius}});
     session_.beginEdit(QStringLiteral("Bloom / Glow"));
-    const auto preview = [this, target, original, amount, radius, previewEnabled] {
-        restoreLayer(document_.get(), session_, target, original);
-        if (previewEnabled->isChecked()) {
-            session_.applyBloomGlow(amount->value(), radius->value());
-        }
+    const auto preview = [this, &dialog, target, original, amount, radius, previewEnabled] {
+        if (previewEnabled->isChecked())
+            previewFilter(&dialog, target, original, [a = amount->value(), r = radius->value()](EditorSession &s) { return s.applyBloomGlow(a, r); });
+        else restoreLayer(document_.get(), session_, target, original);
         canvas_->invalidateDocument();
     };
 
@@ -5174,11 +5156,12 @@ void MainWindow::tonalContrastDialog()
 
     rememberFilter(session_, dialog, false, QStringLiteral("tonalContrast"), {{QStringLiteral("amount"), amount}, {QStringLiteral("radius"), radius}, {QStringLiteral("shadows"), shadows}, {QStringLiteral("midtones"), midtones}, {QStringLiteral("highlights"), highlights}});
     session_.beginEdit(QStringLiteral("Tonal Contrast"));
-    const auto preview = [this, target, original, amount, radius, shadows, midtones, highlights, previewEnabled] {
-        restoreLayer(document_.get(), session_, target, original);
+    const auto preview = [this, &dialog, target, original, amount, radius, shadows, midtones, highlights, previewEnabled] {
         if (previewEnabled->isChecked()) {
-            session_.applyTonalContrast(amount->value(), radius->value(), shadows->value(), midtones->value(), highlights->value());
-        }
+            previewFilter(&dialog, target, original, [a = amount->value(), r = radius->value(), sh = shadows->value(), m = midtones->value(), h = highlights->value()](EditorSession &s) {
+                return s.applyTonalContrast(a, r, sh, m, h);
+            });
+        } else restoreLayer(document_.get(), session_, target, original);
         canvas_->invalidateDocument();
     };
 
@@ -5326,9 +5309,9 @@ void MainWindow::ditherDialog()
     const auto updateRows = [form, rows] {
         for (const auto &[row, visible] : rows) form->setRowVisible(row, visible());
     };
-    const auto preview = [this, target, original, settings, previewEnabled] {
-        restoreLayer(document_.get(), session_, target, original);
-        if (previewEnabled->isChecked()) session_.applyDither(*settings);
+    const auto preview = [this, &dialog, target, original, settings, previewEnabled] {
+        if (previewEnabled->isChecked()) previewFilter(&dialog, target, original, [value = *settings](EditorSession &s) { return s.applyDither(value); });
+        else restoreLayer(document_.get(), session_, target, original);
         canvas_->invalidateDocument();
     };
     const auto refresh = [updateRows, preview] { updateRows(); preview(); };
@@ -5430,15 +5413,16 @@ void MainWindow::addNoiseDialog()
             {QStringLiteral("noiseSeed"), double(seed)}
         };
     };
-    const auto preview = [this, live, target, original, value, seed, amount, distribution, monochromatic, previewEnabled] {
+    const auto preview = [this, &dialog, live, target, original, value, seed, amount, distribution, monochromatic, previewEnabled] {
         if (!previewEnabled->isChecked()) {
             if (live) session_.previewAdjustment(target, original.adjustment);
             else restoreLayer(document_.get(), session_, target, original);
         } else if (live) {
             session_.previewAdjustment(target, value());
         } else {
-            restoreLayer(document_.get(), session_, target, original);
-            session_.addNoiseToActiveLayer(float(amount->value()), distribution->currentIndex() == 1, monochromatic->isChecked(), seed);
+            previewFilter(&dialog, target, original, [a = float(amount->value()), gaussian = distribution->currentIndex() == 1, mono = monochromatic->isChecked(), seed](EditorSession &s) {
+                return s.addNoiseToActiveLayer(a, gaussian, mono, seed);
+            });
         }
         canvas_->invalidateDocument();
     };

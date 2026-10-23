@@ -1,16 +1,19 @@
 #include "rendering/GpuDocument.h"
-#include "rendering/GpuOperations.h"
+#include "rendering/GpuRenderer.h"
 #include "rendering/LayerRenderer.h"
 #include "rendering/DeepImage.h"
 #include "rendering/LayerEffectsRenderer.h"
 #include "rendering/RasterOperations.h"
 
+#include <QHash>
 #include <QPainter>
+#include <QtConcurrent/QtConcurrentMap>
 #include <QSet>
 
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <mutex>
 
 namespace compositor {
 
@@ -62,13 +65,39 @@ QTransform LayerRenderer::pixelToDocument(const LayerTransform &placement,const 
     QTransform result;result.translate(placement.center().x(),placement.center().y());result.rotate(placement.rotation);result.scale((placement.flipX?-1:1)*placement.size.width()/pixels.width(),(placement.flipY?-1:1)*placement.size.height()/pixels.height());result.translate(-pixels.width()/2.0,-pixels.height()/2.0);return result;
 }
 
+namespace {
+// Placed masks are recomputed for every render; keeping the last few keeps their identity, so the effects cache and
+// the GPU upload cache can recognize them.
+struct PlacedMaskKey {
+    qint64 mask; LayerTransform owner, target; std::optional<LayerTransform> placement; bool same; QSize size;
+    bool operator==(const PlacedMaskKey &) const = default;
+};
+std::mutex placedMaskMutex;
+std::vector<std::pair<PlacedMaskKey, QImage>> placedMasks;
+}
+
+static QImage computePlacedMask(const Layer &owner,const Layer &target,const QSize &size);
 QImage LayerRenderer::placedMask(const Layer &owner,const Layer &target,const QSize &size)
 {
     if(owner.mask.isNull())return {};
+    const PlacedMaskKey key{owner.mask.cacheKey(),owner.transform,target.transform,owner.maskPlacement,owner.id==target.id,size};
+    {
+        std::lock_guard lock(placedMaskMutex);
+        for(const auto &[k,image]:placedMasks)if(k==key)return image;
+    }
+    QImage result=computePlacedMask(owner,target,size);
+    std::lock_guard lock(placedMaskMutex);
+    if(placedMasks.size()>=16)placedMasks.erase(placedMasks.begin());
+    placedMasks.emplace_back(key,result);
+    return result;
+}
+
+static QImage computePlacedMask(const Layer &owner,const Layer &target,const QSize &size)
+{
     const QImage source=owner.mask.convertToFormat(QImage::Format_Grayscale8);const LayerTransform placement=owner.maskPlacement.value_or(owner.transform);
     if(owner.id==target.id&&!owner.maskPlacement&&owner.transform==target.transform)return source.scaled(size,Qt::IgnoreAspectRatio,target.transform.sampling==Sampling::Nearest?Qt::FastTransformation:Qt::SmoothTransformation);
     int edgeTotal=0,edgeCount=0;for(int y=0;y<source.height();++y)for(int x=0;x<source.width();++x)if(x==0||y==0||x+1==source.width()||y+1==source.height()){edgeTotal+=source.constScanLine(y)[x];++edgeCount;}const int background=edgeCount&&edgeTotal*2<edgeCount*255?0:255;
-    QImage result(size,QImage::Format_Grayscale8);result.fill(background);bool ok=false;const QTransform toMask=pixelToDocument(placement,source.size()).inverted(&ok);if(!ok)return result;const QTransform toDocument=pixelToDocument(target.transform,size);
+    QImage result(size,QImage::Format_Grayscale8);result.fill(background);bool ok=false;const QTransform toMask=LayerRenderer::pixelToDocument(placement,source.size()).inverted(&ok);if(!ok)return result;const QTransform toDocument=LayerRenderer::pixelToDocument(target.transform,size);
     for(int y=0;y<size.height();++y){uchar *out=result.scanLine(y);for(int x=0;x<size.width();++x){const QPointF sample=toMask.map(toDocument.map(QPointF(x+.5,y+.5)));const int sx=qFloor(sample.x()),sy=qFloor(sample.y());if(QRect(QPoint(),source.size()).contains(sx,sy))out[x]=source.constScanLine(sy)[sx];}}
     return result;
 }
@@ -154,7 +183,9 @@ static bool customMode(BlendMode mode)
 }
 static double luminance(const std::array<double,3>&c){return .3*c[0]+.59*c[1]+.11*c[2];}
 static double saturation(const std::array<double,3>&c){return *std::max_element(c.begin(),c.end())-*std::min_element(c.begin(),c.end());}
-static std::array<double,3> setLum(std::array<double,3> c,double value){const double d=value-luminance(c);for(double &v:c)v+=d;const double low=*std::min_element(c.begin(),c.end()),high=*std::max_element(c.begin(),c.end());const double l=luminance(c);if(low<0)for(double &v:c)v=l+(v-l)*l/(l-low);if(high>1)for(double &v:c)v=l+(v-l)*(1-l)/(high-l);for(double &v:c)v=std::clamp(v,0.0,1.0);return c;}
+// W3C SetLum/ClipColor (OD3). Gray HDR colors (luminance above 1) made both clip divisions 0/0 and produced NaN pixels;
+// a degenerate clip is skipped instead, which keeps the function continuous (the clamp then gives white).
+static std::array<double,3> setLum(std::array<double,3> c,double value){const double d=value-luminance(c);for(double &v:c)v+=d;const double low=*std::min_element(c.begin(),c.end()),high=*std::max_element(c.begin(),c.end());const double l=luminance(c);if(low<0&&l-low>0)for(double &v:c)v=l+(v-l)*l/(l-low);if(high>1&&high-l>0)for(double &v:c)v=l+(v-l)*(1-l)/(high-l);for(double &v:c)v=std::clamp(v,0.0,1.0);return c;}
 static std::array<double,3> setSat(std::array<double,3> c,double value){std::array<int,3> order{0,1,2};std::sort(order.begin(),order.end(),[&](int a,int b){return c[a]<c[b];});const int low=order[0],mid=order[1],high=order[2];if(c[high]>c[low]){c[mid]=(c[mid]-c[low])*value/(c[high]-c[low]);c[high]=value;}else c[mid]=c[high]=0;c[low]=0;return c;}
 static std::array<double,3> blendColor(std::array<double,3> backdrop, std::array<double,3> source, BlendMode mode)
 {
@@ -234,8 +265,14 @@ static std::array<double,3> blendColor(std::array<double,3> backdrop, std::array
 }
 static void customComposite(QImage &backdrop,const QImage &source,BlendMode mode)
 {
-    if(auto gpu=GpuOperations::composite(backdrop,source,int(mode),1,1);!gpu.isNull()){backdrop=gpu;return;}
-    for(int y=0;y<backdrop.height();++y){uchar *out=backdrop.scanLine(y);const uchar *top=source.constScanLine(y);for(int x=0;x<backdrop.width();++x){uchar *b=out+x*4;const uchar *s=top+x*4;const double ab=b[3]/255.0,as=s[3]/255.0;if(as<=0)continue;std::array<double,3> cb{},cs{};for(int c=0;c<3;++c){cb[c]=ab?b[c]/255.0/ab:0;cs[c]=as?s[c]/255.0/as:0;}const auto mixed=blendColor(cb,cs,mode);const double ao=as+ab-as*ab;for(int c=0;c<3;++c){const double premult=(1-as)*b[c]/255.0+(1-ab)*s[c]/255.0+as*ab*mixed[c];b[c]=uchar(std::clamp(qRound(premult*255),0,255));}b[3]=uchar(std::clamp(qRound(ao*255),0,255));}}
+    // Rows are independent; bands run on the global pool (the caller works too), with identical per-pixel results.
+    std::vector<int> bands;for(int y=0;y<backdrop.height();y+=32)bands.push_back(y);
+    backdrop.detach();
+    QtConcurrent::blockingMap(bands,[&](int first){
+    for(int y=first;y<std::min(backdrop.height(),first+32);++y){uchar *out=backdrop.scanLine(y);const uchar *top=source.constScanLine(y);for(int x=0;x<backdrop.width();++x){uchar *b=out+x*4;const uchar *s=top+x*4;const double ab=b[3]/255.0,as=s[3]/255.0;if(as<=0)continue;std::array<double,3> cb{},cs{};for(int c=0;c<3;++c){cb[c]=ab?b[c]/255.0/ab:0;cs[c]=as?s[c]/255.0/as:0;}auto mixed=blendColor(cb,cs,mode);
+        // Hard Mix decides cb + cs >= 1 exactly in integers: in doubles, exact ties (e.g. 168/174 + 4/116) fell either way.
+        if(mode==BlendMode::HardMix)for(int c=0;c<3;++c)mixed[c]=int(b[c])*s[3]+int(s[c])*b[3]>=int(b[3])*s[3]?1.0:0.0;
+        const double ao=as+ab-as*ab;for(int c=0;c<3;++c){const double premult=(1-as)*b[c]/255.0+(1-ab)*s[c]/255.0+as*ab*mixed[c];b[c]=uchar(std::clamp(qRound(premult*255),0,255));}b[3]=uchar(std::clamp(qRound(ao*255),0,255));}}});
 }
 
 static void applyMaskToImage(QImage &image, const QImage &mask);
@@ -378,7 +415,8 @@ static void renderScope(const Document &document,
                         const QSize &canvasSize,
                         QImage &scopeCanvas,
                         const QImage &clip,
-                        const std::function<QImage(const Layer &, QSet<QUuid>)> &clippedImage)
+                        const std::function<QImage(const Layer &, QSet<QUuid>)> &clippedImage,
+                        int first = 0)
 {
     const auto clipped = [&clip](QImage image) {
         if (!clip.isNull()) applyMaskToImage(image, clip);
@@ -392,7 +430,7 @@ static void renderScope(const Document &document,
         }
     }
 
-    for (int i = 0; i < children.size(); ++i) {
+    for (int i = first; i < children.size(); ++i) {
         const Layer &base = children.at(i);
         if (!LayerRenderer::effectivelyVisible(document, base)) continue;
 
@@ -560,11 +598,13 @@ static void renderScope(const Document &document,
             }
         } else if (customMode(base.blendMode)) {
             compositeRendered(scopeCanvas, document, base, clip);
-        } else if (!clip.isNull()) {
+        } else if (!clip.isNull() || base.blendMode != BlendMode::Normal) {
+            // Blend modes composite the placed layer as a plane (OD2): QPainter's scaled Nearest drawing samples
+            // differently under non-SourceOver modes, so the same layer would render differently per mode and backend.
             QImage plane(canvasSize, QImage::Format_RGBA8888_Premultiplied);
             plane.fill(Qt::transparent);
             { QPainter own(&plane); drawLayer(own, document, base, QPainter::CompositionMode_SourceOver); }
-            applyMaskToImage(plane, clip);
+            if (!clip.isNull()) applyMaskToImage(plane, clip);
             QPainter p(&scopeCanvas);
             p.setCompositionMode(compositionMode(base.blendMode));
             p.drawImage(0, 0, plane);
@@ -578,7 +618,6 @@ static void renderScope(const Document &document,
 // Deep documents composite in floating point, keeping highlights and precision until display quantization.
 static void deepComposite(QImage &backdrop,const QImage &source,BlendMode mode)
 {
-    if(auto gpu=GpuOperations::composite(backdrop,source,int(mode));!gpu.isNull()){backdrop=gpu;return;}
     const QImage top=DeepImage::floating(source);
     for(int y=0;y<backdrop.height();++y){auto *b=reinterpret_cast<float *>(backdrop.scanLine(y));const auto *s=reinterpret_cast<const float *>(top.constScanLine(y));
         for(int x=0;x<backdrop.width();++x){const float ab=b[x*4+3],as=s[x*4+3];if(as<=0)continue;
@@ -609,11 +648,11 @@ static void deepMask(QImage &image,const QImage &coverage)
     if(coverage.isNull())return;
     for(int y=0;y<image.height();++y){auto *p=reinterpret_cast<float *>(image.scanLine(y));const auto *mask=coverage.constScanLine(y);for(int x=0;x<image.width();++x)for(int c=0;c<4;++c)p[x*4+c]*=mask[x]/255.0f;}
 }
-static void renderDeepScope(const Document &document,const std::optional<QUuid> &parent,QImage &canvas,const QImage &clip={})
+static void renderDeepScope(const Document &document,const std::optional<QUuid> &parent,QImage &canvas,const QImage &clip={},int first=0)
 {
     QVector<const Layer *> children;for(const auto &layer:document.layers)if(layer.parentId==parent)children.push_back(&layer);
     const auto plane=[&](const Layer &layer){QImage image(document.canvasSize,QImage::Format_RGBA32FPx4_Premultiplied);image.fill(Qt::transparent);{QPainter p(&image);drawLayer(p,document,layer,QPainter::CompositionMode_SourceOver);}return image;};
-    for(int i=0;i<children.size();++i){const Layer &layer=*children[i];if(!LayerRenderer::effectivelyVisible(document,layer))continue;
+    for(int i=first;i<children.size();++i){const Layer &layer=*children[i];if(!LayerRenderer::effectivelyVisible(document,layer))continue;
         if(layer.group){QImage mask=clip;if(layer.maskEnabled&&!layer.mask.isNull()){QImage own=LayerRenderer::placedMask(layer,layer,document.canvasSize);if(!clip.isNull())for(int y=0;y<own.height();++y)for(int x=0;x<own.width();++x)own.scanLine(y)[x]=uchar(int(own.constScanLine(y)[x])*clip.constScanLine(y)[x]/255);mask=own;}renderDeepScope(document,layer.id,canvas,mask);continue;}
         if(!layer.adjustment.isEmpty()){canvas=deepAdjusted(canvas,document,layer,clip);continue;}
         if(!drawable(layer))continue;
@@ -631,9 +670,18 @@ static void renderDeepScope(const Document &document,const std::optional<QUuid> 
 }
 static bool hasDeepLayers(const Document &document){return std::any_of(document.layers.cbegin(),document.layers.cend(),[](const Layer &layer){return DeepImage::isDeep(layer.image);});}
 
-void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
+// The CPU reference composite, optionally continuing from `base` = the first `first` top-level layers already composited.
+static QImage renderCpu(const Document &document, const QImage &base = {}, int first = 0)
 {
-    if(hasDeepLayers(document)) {QImage canvas(document.canvasSize,QImage::Format_RGBA32FPx4_Premultiplied);if(std::none_of(document.layers.cbegin(),document.layers.cend(),[](const Layer &l){return DeepImage::isHDR(l.image);}))canvas.setText(QStringLiteral("compositorDepth"),QStringLiteral("16"));canvas.fill(Qt::transparent);renderDeepScope(document,std::nullopt,canvas);outputPainter.drawImage(0,0,canvas);return;}
+    const bool deep = hasDeepLayers(document);
+    QImage canvas = base.isNull() ? QImage(document.canvasSize, deep ? QImage::Format_RGBA32FPx4_Premultiplied : QImage::Format_RGBA8888_Premultiplied) : base.copy();
+    if (base.isNull()) canvas.fill(Qt::transparent);
+    if (deep) {
+        if (std::none_of(document.layers.cbegin(), document.layers.cend(), [](const Layer &l) { return DeepImage::isHDR(l.image); }))
+            canvas.setText(QStringLiteral("compositorDepth"), QStringLiteral("16"));
+        renderDeepScope(document, std::nullopt, canvas, {}, first);
+        return canvas;
+    }
     const auto findLayer = [&document](const QUuid &id) -> const Layer * {
         const auto it = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &layer) { return layer.id == id; });
         return it == document.layers.cend() ? nullptr : &*it;
@@ -649,22 +697,108 @@ void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
         const QImage coverage = layerCoverage(document, *source, visiting);
         QPainter clip(&image); clip.setCompositionMode(QPainter::CompositionMode_DestinationIn); clip.drawImage(0, 0, coverage); return image;
     };
-
-    QImage canvas(document.canvasSize, QImage::Format_RGBA8888_Premultiplied);
-    canvas.fill(Qt::transparent);
-    renderScope(document, std::nullopt, document.canvasSize, canvas, QImage(), clippedImage);
-    outputPainter.drawImage(0, 0, canvas);
+    renderScope(document, std::nullopt, document.canvasSize, canvas, QImage(), clippedImage, first);
+    return canvas;
 }
 
-QImage LayerRenderer::flattened(const Document &document)
+static QImage render(const Document &document, const QImage &base = {}, int first = 0)
 {
-    if (auto gpu=tryGpuDocument(document); !gpu.isNull()) return gpu;
-    QImage output(document.canvasSize, hasDeepLayers(document)?QImage::Format_RGBA32FPx4_Premultiplied:QImage::Format_RGBA8888_Premultiplied);
-    if(hasDeepLayers(document)&&std::none_of(document.layers.cbegin(),document.layers.cend(),[](const Layer &l){return DeepImage::isHDR(l.image);}))output.setText(QStringLiteral("compositorDepth"),QStringLiteral("16"));
-    output.fill(Qt::transparent);
-    QPainter painter(&output);
-    draw(painter, document);
-    return output;
+    if (auto gpu = tryGpuDocument(document, base, first); !gpu.isNull()) return gpu;
+    return renderCpu(document, base, first);
+}
+
+void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
+{
+    GpuRenderer::CpuScope cpu;
+    outputPainter.drawImage(0, 0, renderCpu(document));
+}
+
+namespace {
+// Canvas renders keep the composite of the unchanged top-level layers below the one being edited, so repeated
+// edits (painting, sliders, moves) re-render only that layer and what is above it.
+struct PrefixCache {
+    QUuid document;
+    QSize canvas;
+    bool deep = false;
+    RenderBackend backend = RenderBackend::Auto;
+    QVector<QVector<Layer>> previous; // Each top-level layer with its descendants, from the last render.
+    int count = 0;                    // Top-level layers composited into `image`.
+    QImage image;
+};
+std::mutex prefixMutex;
+PrefixCache prefixCache;
+
+QVector<QVector<Layer>> topLevelSubtrees(const Document &document)
+{
+    QHash<QUuid, int> topOf;
+    QVector<QVector<Layer>> trees;
+    for (const Layer &layer : document.layers) if (!layer.parentId) { topOf.insert(layer.id, int(trees.size())); trees.push_back({layer}); }
+    for (const Layer &layer : document.layers) {
+        if (!layer.parentId) continue;
+        std::optional<QUuid> ancestor = layer.parentId;
+        for (int depth = 0; ancestor && depth < 64; ++depth) {
+            if (const auto it = topOf.constFind(*ancestor); it != topOf.cend()) { trees[*it].push_back(layer); break; }
+            const auto parent = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &l) { return l.id == *ancestor; });
+            ancestor = parent == document.layers.cend() ? std::nullopt : parent->parentId;
+        }
+    }
+    return trees;
+}
+
+Document prefixDocument(const Document &document, const QVector<QVector<Layer>> &trees, int count)
+{
+    QSet<QUuid> kept;
+    for (int i = 0; i < count; ++i) for (const Layer &layer : trees[i]) kept.insert(layer.id);
+    Document below = document;
+    below.layers.clear();
+    for (const Layer &layer : document.layers) if (kept.contains(layer.id)) below.layers.push_back(layer);
+    return below;
+}
+}
+
+static QImage displayed(const Document &document)
+{
+    const QVector<QVector<Layer>> trees = topLevelSubtrees(document);
+    const bool deep = hasDeepLayers(document);
+    QImage base;
+    int first = 0;
+    int unchanged = 0;
+    {
+        std::lock_guard lock(prefixMutex);
+        auto &c = prefixCache;
+        const bool compatible = c.document == document.id && c.canvas == document.canvasSize && c.deep == deep &&
+                                c.backend == GpuRenderer::backend();
+        if (compatible)
+            while (unchanged < trees.size() && unchanged < c.previous.size() && trees[unchanged] == c.previous[unchanged]) ++unchanged;
+        if (compatible && c.count > 0 && c.count <= unchanged && !c.image.isNull()) { base = c.image; first = c.count; }
+        if (!compatible) { c = {}; c.document = document.id; c.canvas = document.canvasSize; c.deep = deep; c.backend = GpuRenderer::backend(); }
+        c.previous = trees;
+    }
+    if (first == 0 && unchanged > 0 && unchanged < trees.size()) {
+        // A layer above `unchanged` is being edited: composite what is below it once and keep it. A clipped layer
+        // must render with its base, so the split moves below a clipping stack.
+        int split = unchanged;
+        while (split > 0 && trees[split].front().maskSourceId) --split;
+        if (split > 0) {
+            base = render(prefixDocument(document, trees, split));
+            first = split;
+            std::lock_guard lock(prefixMutex);
+            if (prefixCache.document == document.id) { prefixCache.count = split; prefixCache.image = base; }
+        }
+    }
+    if (first > 0 && first >= trees.size()) return base.copy();
+    return render(document, base, first);
+}
+
+QImage LayerRenderer::flattened(const Document &document, RenderPurpose purpose)
+{
+    if (purpose == RenderPurpose::Display) return displayed(document);
+    // OD1: committed output is the CPU reference unless the GPU backend was chosen explicitly.
+    if (GpuRenderer::backend() == RenderBackend::Auto) {
+        GpuRenderer::CpuScope cpu;
+        return render(document);
+    }
+    return render(document);
 }
 
 // The layer's own pixels, in their own grid, with the live (clipping) coverage of its source multiplied into their alpha

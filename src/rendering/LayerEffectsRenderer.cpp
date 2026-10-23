@@ -47,25 +47,20 @@ void gaussianBlurFloats(std::vector<float> &buffer, int width, int height, doubl
     if (sigma <= 0.0 || buffer.empty() || width <= 0 || height <= 0) return;
     sigma = std::clamp(sigma, 0.05, 500.0);
     if (GpuRenderer::shouldAttempt({width,height},32)) {
-        QImage image(width,height,QImage::Format_RGBA32FPx4_Premultiplied);
-        if(!image.isNull()) {
-            auto *pixels=reinterpret_cast<float *>(image.bits());
-            for(size_t i=0;i<buffer.size();++i)for(int c=0;c<4;++c)pixels[i*4+c]=buffer[i];
-            GpuGraph graph;int at=graph.source(image);
-            if(sigma<=16) {
-                const int reach=std::max(1,int(std::ceil(sigma*3)));QImage weights(reach*2+1,1,image.format());
-                auto *w=reinterpret_cast<float *>(weights.bits());double total=0;
-                for(int i=-reach;i<=reach;++i)total+=std::exp(-i*i/(2*sigma*sigma));
-                for(int i=-reach;i<=reach;++i)for(int c=0;c<4;++c)w[(i+reach)*4+c]=float(float(std::exp(-i*i/(2*sigma*sigma)))/total);
-                int table=graph.source(weights);for(int axis=0;axis<2;++axis){std::array<float,28> p{};p[0]=reach;p[1]=axis;at=graph.pass(GpuOp::Gaussian,at,table,p);}
-            }else{
-                const int passes=6;int lower=int(std::floor(std::sqrt(12*sigma*sigma/passes+1)));if(!(lower&1))--lower;
-                const int count=qRound((12*sigma*sigma-passes*lower*lower-4*passes*lower-3*passes)/(-4.*lower-4));
-                for(int pass=0;pass<passes;++pass)for(int axis=0;axis<2;++axis){std::array<float,28> p{};p[0]=std::max(0,((pass<count?lower:lower+2)-1)/2);p[1]=axis;at=graph.pass(GpuOp::BoxBlur,at,-1,p);}
-            }
-            const QImage result=graph.execute(at,image.format());
-            if(!result.isNull()){const auto *p=reinterpret_cast<const float *>(result.constBits());for(size_t i=0;i<buffer.size();++i)buffer[i]=p[i*4];return;}
+        // Coverage is one float channel; it stays one channel on the GPU (4 bytes per pixel).
+        GpuGraph graph;int at=graph.channel(std::make_shared<const std::vector<float>>(buffer),{width,height});
+        if(sigma<=16) {
+            const int reach=std::max(1,int(std::ceil(sigma*3)));QImage weights(reach*2+1,1,QImage::Format_RGBA32FPx4_Premultiplied);
+            auto *w=reinterpret_cast<float *>(weights.bits());double total=0;
+            for(int i=-reach;i<=reach;++i)total+=std::exp(-i*i/(2*sigma*sigma));
+            for(int i=-reach;i<=reach;++i)for(int c=0;c<4;++c)w[(i+reach)*4+c]=float(float(std::exp(-i*i/(2*sigma*sigma)))/total);
+            int table=graph.source(weights);for(int axis=0;axis<2;++axis){GpuParameters p{};p[GpuParam::Gaussian::reach]=reach;p[GpuParam::Gaussian::axis]=axis;at=graph.pass(GpuOp::Gaussian,at,table,p);}
+        }else{
+            const int passes=6;int lower=int(std::floor(std::sqrt(12*sigma*sigma/passes+1)));if(!(lower&1))--lower;
+            const int count=qRound((12*sigma*sigma-passes*lower*lower-4*passes*lower-3*passes)/(-4.*lower-4));
+            for(int pass=0;pass<passes;++pass)for(int axis=0;axis<2;++axis)at=graph.boxBlur(at,std::max(0,((pass<count?lower:lower+2)-1)/2),axis);
         }
+        if(auto result=graph.executeChannel(at);result.size()==buffer.size()){buffer=std::move(result);return;}
     }
     if (sigma <= 16.0) {
         // A true Gaussian (edge pixels repeated, as Core Image's clamped blur does): three box passes have no tail, which
@@ -110,6 +105,7 @@ void gaussianBlurFloats(std::vector<float> &buffer, int width, int height, doubl
 struct CacheEntry {
     qint64 imageKey = 0;
     qint64 maskKey = 0;
+    bool gpu = false;
     LayerEffects effects;
     QImage result;
     double inset = 0.0;
@@ -155,15 +151,11 @@ std::vector<float> LayerEffectsRenderer::extreme(const std::vector<float> &sourc
 {
     if (width <= 0 || height <= 0 || source.size() != size_t(width * height)) return {};
     const int radius = std::max(0, reach);
-    if(radius>0&&GpuRenderer::shouldAttempt({width,height},8)){
-        QImage image(width,height,QImage::Format_RGBA32FPx4_Premultiplied);
-        if(!image.isNull()){
-            auto *pixels=reinterpret_cast<float *>(image.bits());for(size_t i=0;i<source.size();++i)for(int c=0;c<4;++c)pixels[i*4+c]=source[i];
-            GpuGraph graph;int at=graph.source(image);
-            for(int axis=0;axis<2;++axis){std::array<float,28> p{};p[0]=radius;p[1]=axis;p[2]=smallest?1:0;at=graph.pass(GpuOp::Morphology,at,-1,p);}
-            const QImage rendered=graph.execute(at,image.format());
-            if(!rendered.isNull()){std::vector<float> values(source.size());const auto *p=reinterpret_cast<const float *>(rendered.constBits());for(size_t i=0;i<values.size();++i)values[i]=p[i*4];return values;}
-        }
+    // The CPU's monotonic deque is O(1) per pixel; measured on Iris Xe, the GPU only wins for small radii (direct
+    // min/max), so Automatic keeps larger ones on the CPU (tools/GpuBenchmark).
+    if(radius>0&&GpuRenderer::shouldAttempt({width,height},radius<=6?8:4)){
+        GpuGraph graph;const int at=graph.morphology(graph.channel(std::make_shared<const std::vector<float>>(source),{width,height}),radius,smallest);
+        if(auto values=graph.executeChannel(at);values.size()==source.size())return values;
     }
     std::vector<float> pass(source.size(), 0.0f);
     std::vector<float> result(source.size(), 0.0f);
@@ -450,11 +442,13 @@ std::pair<QImage, double> LayerEffectsRenderer::cached(const QImage &image, cons
     }
     const qint64 imgKey = image.cacheKey();
     const qint64 mskKey = mask.isNull() ? 0 : mask.cacheKey();
+    // GPU and CPU results may differ in the last bit; committed (CPU) renders never reuse a GPU one.
+    const bool gpu = GpuRenderer::backend() != RenderBackend::Cpu;
 
     {
         QMutexLocker locker(&s_cacheMutex);
         for (auto it = s_cache.begin(); it != s_cache.end(); ++it) {
-            if (it->imageKey == imgKey && it->maskKey == mskKey && it->effects == visible) {
+            if (it->imageKey == imgKey && it->maskKey == mskKey && it->gpu == gpu && it->effects == visible) {
                 return {it->result, it->inset};
             }
         }
@@ -467,7 +461,7 @@ std::pair<QImage, double> LayerEffectsRenderer::cached(const QImage &image, cons
         if (s_cache.size() >= 8) {
             s_cache.erase(s_cache.begin());
         }
-        s_cache.push_back({imgKey, mskKey, visible, rendered.first, rendered.second});
+        s_cache.push_back({imgKey, mskKey, gpu, visible, rendered.first, rendered.second});
     }
 
     return rendered;

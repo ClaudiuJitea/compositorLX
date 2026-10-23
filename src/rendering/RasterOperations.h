@@ -128,6 +128,14 @@ public:
                                  int fuzziness, bool invert);
     // The straight color at `point`, averaged over the 3 x 3 pixels around it; nullopt for fully transparent ones.
     static std::optional<std::array<quint8, 3>> colorRangeSample(const QImage &image, const QPoint &point);
+    // Adjustment-layer settings parsed once, for the CPU renderer and the GPU document graph alike.
+    struct ExposureSettings { double stops = 0, offset = 0, gamma = 1; };
+    [[nodiscard]] static LevelsSettings levelsFromJson(const QJsonObject &adjustment);
+    [[nodiscard]] static CurvesSettings curvesFromJson(const QJsonObject &adjustment);
+    [[nodiscard]] static ExposureSettings exposureFromJson(const QJsonObject &adjustment);
+    // Per-channel 8-bit lookup tables (red, green, blue; 256 entries each) applied by levels() and curves().
+    [[nodiscard]] static std::array<float, 768> levelsTables(const LevelsSettings &settings);
+    [[nodiscard]] static std::array<float, 768> curvesTables(const CurvesSettings &settings);
     static QJsonObject levelsSettingsToJson(const LevelsSettings &settings);
     static QJsonObject curvesSettingsToJson(const CurvesSettings &settings);
     static QJsonObject hueSaturationSettingsToJson(const HueSaturationSettings &settings);

@@ -250,6 +250,7 @@ protected:
 private:
     QWidget *gpuViewport_ = nullptr;
     bool gpuViewportAttempted_ = false;
+    int gpuViewportMode_ = -1; // The CanvasPresentation the viewport was created (or refused) for.
     QImage displayImageCache_;
     qint64 displayImageKey_ = 0;
     void configurePresentation();

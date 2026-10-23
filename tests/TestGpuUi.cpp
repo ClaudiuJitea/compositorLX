@@ -4,9 +4,15 @@
 #include "ui/AsyncImagePreview.h"
 #include "ui/CameraRawDialog.h"
 #include "ui/CanvasWidget.h"
+#include "ui/MainWindow.h"
+#include "rendering/RasterOperations.h"
 #include "ui/RenderingSettingsDialog.h"
 #include <QApplication>
 #include <QComboBox>
+#include <QLabel>
+#include <QPushButton>
+#include <QDoubleSpinBox>
+#include <QElapsedTimer>
 #include <QDialog>
 #include <QPainter>
 #include <QSemaphore>
@@ -110,6 +116,50 @@ class TestGpuUi : public QObject {
         QCOMPARE(decoded.pixelColor(0, 0).alpha(), expected.pixelColor(0, 0).alpha());
         qunsetenv("COMPOSITOR_RENDER_BACKEND");
     }
+    // C1: twenty rapid changes in a filter dialog on a 24 MP layer never block the event loop; only the last result
+    // reaches the layer, and OK leaves one undo step.
+    void asynchronousFilterPreviews() {
+        MainWindow window;
+        QImage photo(6000, 4000, QImage::Format_RGBA8888_Premultiplied);
+        photo.fill(QColor(120, 100, 80));
+        window.session().createDocument(6000, 4000);
+        window.session().insertImage(photo, "Photo");
+        window.syncDocumentViews();
+        const QImage original = window.session().activeLayer()->image;
+        const int undoSteps = window.session().history().undoCount();
+        auto *exposure = window.findChild<QAction *>("cmdExposure");
+        QVERIFY(exposure);
+        double slowest = 0;
+        bool driven = false;
+        QTimer::singleShot(0, &window, [&] {
+            QDialog *dialog = nullptr;
+            for (auto *candidate : window.findChildren<QDialog *>())
+                if (candidate->isVisible() && candidate->windowTitle() == "Exposure")
+                    dialog = candidate;
+            QVERIFY(dialog);
+            auto *stops = dialog->findChild<QDoubleSpinBox *>("exposureStops");
+            QVERIFY(stops);
+            for (int i = 1; i <= 20; ++i) {
+                QElapsedTimer timer;
+                timer.start();
+                stops->setValue(i * .05);
+                slowest = std::max(slowest, timer.nsecsElapsed() / 1e6);
+                QTest::qWait(2);
+            }
+            QImage pixel(1, 1, QImage::Format_RGBA8888_Premultiplied);
+            pixel.fill(QColor(120, 100, 80));
+            const QColor expected = RasterOperations::exposure(pixel, 1., 0, 1).pixelColor(0, 0);
+            QTRY_COMPARE_WITH_TIMEOUT(window.session().activeLayer()->image.pixelColor(10, 10), expected, 20000);
+            driven = true;
+            dialog->accept();
+        });
+        exposure->trigger();
+        QVERIFY(driven);
+        QVERIFY2(slowest < 50, qPrintable(QString("a value change blocked for %1 ms").arg(slowest)));
+        QCOMPARE(window.session().history().undoCount(), undoSteps + 1);
+        window.session().undo();
+        QCOMPARE(window.session().activeLayer()->image, original);
+    }
     void cameraRawCancellation() {
         QImage image(512, 512, QImage::Format_RGBA8888_Premultiplied);
         image.fill(QColor(80, 130, 190));
@@ -153,6 +203,46 @@ class TestGpuUi : public QObject {
         QCOMPARE(GpuRenderer::backend(), RenderBackend::Cpu);
         QCOMPARE(GpuRenderer::memoryBudgetMiB(), 128);
         GpuRenderer::setBackend(RenderBackend::Auto);
+        GpuRenderer::setMemoryBudgetMiB(512);
+    }
+    // A7: environment overrides are reported, their controls disabled, and OK never saves them as preferences.
+    void renderingOverrides() {
+        GpuRenderer::setBackend(RenderBackend::Auto);
+        GpuRenderer::setMemoryBudgetMiB(512);
+        qputenv("COMPOSITOR_RENDER_BACKEND", "vulkan");
+        qputenv("COMPOSITOR_GPU_MEMORY_MIB", "333");
+        bool checked = false;
+        QTimer::singleShot(0, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            auto *backend = dialog->findChild<QComboBox *>("renderingBackend");
+            auto *memory = dialog->findChild<QComboBox *>("renderingMemoryBudget");
+            QVERIFY(!backend->isEnabled());
+            QVERIFY(!memory->isEnabled());
+            QCOMPARE(backend->currentIndex(), int(RenderBackend::Auto)); // The saved preference, not the override.
+            QCOMPARE(memory->currentData().toInt(), 512);
+            QVERIFY(dialog->findChild<QLabel *>("renderingOverride"));
+            QVERIFY(dialog->findChild<QPushButton *>("renderingSelfCheck"));
+            QVERIFY(dialog->findChild<QPushButton *>("renderingCopyDiagnostics"));
+            checked = true;
+            dialog->accept();
+        });
+        QVERIFY(showRenderingSettings(nullptr));
+        QVERIFY(checked);
+        qunsetenv("COMPOSITOR_RENDER_BACKEND");
+        qunsetenv("COMPOSITOR_GPU_MEMORY_MIB");
+        QCOMPARE(GpuRenderer::backend(), RenderBackend::Auto);
+        QCOMPARE(GpuRenderer::memoryBudgetMiB(), 512);
+        // A budget saved outside the list stays selected instead of becoming 64 MiB.
+        QSettings().setValue("rendering/memoryMiB", 333);
+        GpuRenderer::setMemoryBudgetMiB(333);
+        QTimer::singleShot(0, [] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            QCOMPARE(dialog->findChild<QComboBox *>("renderingMemoryBudget")->currentData().toInt(), 333);
+            dialog->accept();
+        });
+        QVERIFY(showRenderingSettings(nullptr));
+        QCOMPARE(GpuRenderer::memoryBudgetMiB(), 333);
         GpuRenderer::setMemoryBudgetMiB(512);
     }
     void canvasPresentation() {

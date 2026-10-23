@@ -25,15 +25,26 @@ CompositorLX is a full-featured raster editor for Linux: layered `.comp` project
 
 ## GPU acceleration — updated 0.5.5
 
-The **0.5.5 release and its AppImage/DEB assets have been refreshed** with a shared Vulkan renderer, GPU layer compositing, more accelerated filters, hardware canvas presentation, and asynchronous Camera RAW previews. The application version remains **0.5.5**.
+The **0.5.5 release and its AppImage/DEB assets have been refreshed** with a shared Vulkan renderer and a follow-up audit of it. The application version remains **0.5.5**. The CPU renderer stays the reference and the fallback for everything; the GPU is used where it measurably helps.
 
-Choose **View › Rendering…** for Automatic, CPU, or GPU with CPU fallback, a working-memory limit, and diagnostics. Automatic keeps small or inexpensive work on the CPU. Missing drivers, unsupported operations, or memory limits retain the CPU rendering path.
+- **The canvas** renders the whole document on the GPU (in canvas tiles for large documents): all 24 blend modes, masks, folders, transformed layers, layer effects and the common filter layers. After an edit, only the edited layer and the ones above it are re-rendered.
+- **Exports are identical everywhere.** In Automatic mode, export, merge, flatten, GIF frames and project previews always use the CPU reference, so a file renders byte-identically on any machine. Choose GPU explicitly to accelerate them too.
+- **Filters** run on the GPU from 512 × 512 pixels when measured faster there: Gaussian, Motion and Progressive Blur, Bloom, RGB Split, Exposure, Hue/Saturation, Levels, Curves, Gradient Map, Black & White and Color Balance. Previews of large layers render in the background and never block the dialog; Camera RAW also computes its histogram in the background.
+- **View › Rendering…** chooses Automatic, CPU or GPU, the GPU working memory, the canvas presentation (OpenGL is automatic on Mesa and Intel drivers) and, on multi-GPU systems, the device. It shows diagnostics and a log of recent GPU work, and runs a self-check.
 
-GPU coverage now includes RGB Split, Gaussian/Motion/Progressive Blur, Bloom, exposure and several color adjustments, mask processing, layer-effect blur/morphology, and all 24 layer blend modes. Supported layer/filter chains keep their intermediate images on the GPU. The canvas uses Qt OpenGL where available; large Camera RAW previews run in the background and discard obsolete slider results.
+Measured on Intel Iris Xe at 1920 × 1080, including uploads (cold) or with the image already on the GPU (warm, as during slider previews):
 
-On the tested Intel Iris Xe, warm 1080p renders measured **36× faster for exposure**, **26× for Hue/Saturation**, **13× for Progressive Blur**, and roughly **2–5× for the tested blur/bloom cases**, including conversion and transfers. The Camera RAW lookup was slower on the GPU, so Automatic keeps that standalone step on the CPU. These are measurements on one machine, not universal speed guarantees.
+| Operation | CPU | GPU cold | GPU warm |
+| --- | ---: | ---: | ---: |
+| Color Balance | 202 ms | 4.4 ms | 3.0 ms |
+| Black & White | 120 ms | 4.6 ms | 3.3 ms |
+| Progressive Blur 0→15 | 4922 ms | 296 ms | 299 ms |
+| Levels | 57 ms | 5.8 ms | 3.8 ms |
+| Gaussian Blur 2.5 / 12.5 | 133 / 135 ms | 21 / 29 ms | 17 / 23 ms |
+| Hue/Saturation | 52 ms | 9.3 ms | 3.6 ms |
+| Exposure | 9.3 ms | 8.6 ms | 2.9 ms |
 
-**This is a mixed CPU/GPU pipeline.** Some tools, deep-color adjustments, complex placements, codecs, and the bundled Remove Background model still use the CPU. See the [coverage matrix, benchmarks, controls, and validation notes](docs/GPU_ROLLOUT.md).
+A 4000 × 3000 document with five layers, a rotated and a masked one, and two filter layers renders on the canvas in 238 ms instead of 1254 ms; a 6000 × 4000 document with ten layers and effects in 838 ms instead of 3120 ms. The CPU paths got faster too: Exposure (37×) and Hue/Saturation (5.5×). These numbers come from one machine; AMD and NVIDIA GPUs have not been tested on hardware. Remove Background runs on the CPU in the released builds. See [GPU rendering notes](docs/GPU_ROLLOUT.md) for coverage, accuracy, controls and the full benchmark.
 
 ## What's new in version 0.5.5
 

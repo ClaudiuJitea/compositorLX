@@ -1,83 +1,141 @@
-# GPU rendering in the refreshed 0.5.5 release
+# GPU rendering in CompositorLX 0.5.5
 
-This update keeps the application version, GitHub release, and asset names at **0.5.5**. It replaces the original CPU-oriented packages with the shared-renderer build. It is a mixed CPU/GPU implementation, not a claim that every function executes on the GPU.
+The 0.5.5 release and its assets were refreshed (again) with the follow-up to the GPU audit: exact CPU-matching exports, compact GPU storage, tiled large documents, an incremental canvas, asynchronous filter previews and a reworked Rendering panel. The application version stays **0.5.5**. CompositorLX is a mixed CPU/GPU editor: the CPU renderer is the reference and the fallback for everything, and the GPU is used where it measurably helps.
 
-## Coverage and CPU boundaries
+## What runs where
 
-| Area | Implementation in this update | Boundary or fallback |
+| Area | GPU (Vulkan compute) | CPU |
 | --- | --- | --- |
-| Shared backend | Vulkan 1.0 compute, one persistent pipeline/queue, reusable memory, source-upload cache, intermediate lifetime reuse, one readback per graph | Hardware integrated/discrete GPUs only; missing loader/driver, limits, allocation/dispatch failures fall back to CPU. Device loss disables subsequent attempts. |
-| Color adjustments | GPU exposure, invert, levels/curves lookup, 8-bit Hue/Saturation, gradient map, black-and-white and color balance | Automatic accelerates expensive exposure/HSL; cheap standalone adjustments remain CPU. Some deep-color adapters still use CPU reconstruction. Deep HSL retains QColor's exact lookup generation; HDR exposure retains its existing CPU implementation. |
-| Blur/effects | Gaussian, Motion, Progressive Blur, RGB Split and Bloom; mask feathering and layer-effect coverage blur/morphology | Premultiplied float computation supports deep images; byte algorithms preserve their intermediate quantization. Local Gaussian/Bloom/lookup operations can tile with overlap. Oversized non-local graphs fall back. |
-| Document rendering | All 24 blend modes, layer/group masks, opacity, pixel-aligned placement; resident 8-bit chains for Invert, Exposure, Levels, Curves, Gaussian, Bloom, Progressive Blur and RGB Split | Clipping stacks, unsupported adjustments and deep adjustment layers use the established renderer with individually accelerated filters. Rotated/fractional or partially opaque placement is rasterized through QPainter to preserve its coverage/rounding. |
-| Canvas | Optional public Qt OpenGLWidgets presentation; stable display-image cache avoids repeated deep-color dithering; existing background flattening retained and queued-completion handling fixed | One CPU readback remains between Vulkan rendering and Qt presentation. This is not Vulkan/OpenGL zero-copy sharing. Software GL, unsupported/offscreen platforms, CPU mode, or context failure use raster presentation. |
-| Camera RAW | Coalesced asynchronous previews for images ≥262,144 pixels; only the latest result reaches the document; cancellation cannot commit stale pixels. GPU cube kernel available in explicit GPU mode | The standalone color cube was slower on this machine, so Automatic uses CPU. Histograms, denoise, optics and many RAW stages remain CPU. Final OK commits still render synchronously. |
-| Interactive editing | Large blur-brush regions reuse the shared blur backend; small patches avoid GPU overhead. Canvas pan/zoom uses hardware presentation where available | Brush coverage, healing, cloning, smudge/warp, flood fill and selection topology retain CPU implementations. |
-| Remove Background | Provider discovery and optional OpenVINO GPU/CUDA session selection, with CPU retry on provider initialization/inference failure | **Released packages bundle CPU ONNX Runtime.** GPU AI requires a compatible provider-enabled custom runtime and its drivers. It is not accelerated merely because Vulkan works. Optional provider execution was not validated on physical hardware here. |
-| Other work | Existing behavior preserved | Noise/grain, scanlines/dither, some vignette/tonal operations, text/vector rasterization, ICC proofing, import/export codecs, GIF encoding, project storage and history remain wholly or partly CPU. |
+| Canvas display | The whole document as one GPU graph (or overlapping tiles of one) in Automatic and GPU modes: all 24 blend modes, layer and folder masks, opacity, aligned and transformed layers, layer effects, and the filter layers Invert, Exposure, Levels, Curves, Gaussian Blur, Bloom / Glow, Progressive Blur and RGB Split. Re-renders after an edit reuse the composite of the unchanged layers below it. | Clipping stacks, other adjustment layers, adjustment layers on 16-bit/HDR documents, and effects rasterization. |
+| Exports and committed results | Only when **GPU** is chosen explicitly. | **Automatic and CPU modes**: export, GIF frames, project previews, Copy Merged, Merge/Flatten, channel packing and sampling always use the CPU reference, so a file renders byte-identically on every machine. |
+| Filters and adjustments | Exposure, Hue/Saturation, Levels, Curves, Gradient Map, Black & White, Color Balance, Gaussian/Motion/Progressive Blur, Bloom, RGB Split, mask feathering, layer-effect blur, small-radius morphology. | Invert (memory-bound; CPU is faster), the Camera RAW color cube (CPU is faster standalone), large-radius stroke morphology (the CPU deque is faster on the tested GPU), noise, grain, dither, scanlines, lens correction, tonal contrast, vignette, healing, cloning, warping, selections, codecs. |
+| Filter dialogs | Previews of layers of 512 × 512 pixels and larger render on a worker thread from a snapshot of the document; only the newest result reaches the layer, the dialog never waits, and OK reuses the finished preview. | Smaller layers preview synchronously (no visible latency). |
+| Camera RAW | Previews, the histogram/scope and the clipping overlay are computed on a worker; OK reuses the shown full-resolution preview or renders on a worker. | The develop pipeline itself. |
+| Canvas presentation | Qt OpenGL presentation of the rendered image (Automatic on Mesa and Intel drivers; OpenGL can be chosen on others). | Raster presentation in CPU mode, on untested drivers in Automatic, offscreen, or with software GL. |
+| Remove Background | — | **Released packages run the model on the CPU.** The optional OpenVINO/CUDA provider code is dormant unless the app is built against a provider-enabled ONNX Runtime; it is not tested or shipped. |
 
-The seven rollout areas are covered by implementation, measurement, UI integration, AI-provider evaluation, and validation. Remaining CPU boundaries above are explicit scope limits; a fully GPU-resident editor, additional kernels, provider-enabled distribution packages and per-device autotuning are follow-up work.
+## How the renderer works
+
+```
+caller (filter, adjustment, document, layer effect)
+  └─ GpuGraph: source nodes (QImage or one float channel) + passes; one output
+       └─ Vulkan context (runtime-loaded libvulkan.so.1)
+            ├─ before the lock: graph analysis, source format conversion
+            ├─ priority lock: interactive > canvas > export; GUI-thread calls never wait (CPU fallback)
+            ├─ upload (skipped for sources already resident), one command buffer, one pipeline per operation
+            └─ one readback, straight into the requested image format
+```
+
+- **One contract.** Operation IDs, blend-mode IDs, storage formats and named parameter slots are generated for C++ (`src/rendering/GpuContract.h`) and GLSL (`src/rendering/shaders/contract.glsl`) from the tables in `scripts/compile-rendering-shader.py`; `GpuDocument.cpp` static-asserts the blend IDs against `BlendMode`. The shader is readable source; `--check` (a CTest) fails if any generated file is stale.
+- **Compact storage.** Each node is stored in the smallest exact format: 8-bit sources and 8-bit intermediates as RGBA8 (4 bytes per pixel), 16-bit as RGBA16, half-float as RGBA16F, masks as R8, coverage and noise as one float channel; only float work uses RGBA32F. The output is written in the requested QImage format, so 8-bit results are read back at 4 bytes per pixel with no CPU conversion. A document starts from a GPU clear instead of an uploaded transparent canvas.
+- **Exact 8-bit paths.** Byte blurs sum and divide in integers, the gradient map uses the integer Rec. 709 luma, Hard Mix compares exact integer products, and Normal plus the eight QPainter blend modes mirror QPainter's own integer formulas, so they match the CPU bit for bit. The other blend modes agree within the fixture tolerances below.
+- **Pipelines.** One pipeline per operation through a specialization constant, compiled lazily or at startup on a worker, and persisted in a validated pipeline cache under the user cache directory.
+- **Memory.** Every graph is checked against the working-memory budget (default 512 MiB) before any CPU preparation; a document that does not fit is split into canvas tiles with enough overlap for its filters' reach, or left to the CPU. Pooled buffers are released after 30 seconds idle and when the budget changes; choosing CPU closes the Vulkan device. On discrete GPUs, uploads and readback go through cached system memory and a device-local working buffer. A lost device is recreated once, then the GPU stays off for the session.
+- **Device choice.** Hardware devices only (software Vulkan is allowed only with `COMPOSITOR_GPU_ALLOW_SOFTWARE=1`, for tests). Automatic prefers the integrated GPU on hybrid laptops so a discrete GPU is not woken; the Rendering panel lists the devices when there is more than one.
 
 ## Controls and diagnostics
 
-Use **View › Rendering…** to select Automatic, CPU, or GPU (with CPU fallback), choose a 64–2048 MiB working-memory budget (default 512 MiB), and inspect the device, last graph's dispatch/upload/readback counts, and available AI providers. Preferences persist across launches. GPU mode requests supported kernels even when transfer overhead may make them slower.
+**View › Rendering…** sets the renderer (Automatic, CPU, GPU with CPU fallback), the GPU working memory (64–2048 MiB), the canvas presentation (Automatic, Raster, OpenGL) and, with several GPUs, the device. It shows the device, driver, Vulkan version and memory heaps, the last 20 GPU graphs (operations, time, transfers, priority, fallback reason), **Run self-check** (as `--check-renderer`) and **Copy diagnostics**. Diagnostics load in the background.
 
-Environment overrides:
+Environment overrides take precedence; the panel shows them and never saves them as preferences:
 
 ```sh
-COMPOSITOR_RENDER_BACKEND=cpu ./build/compositor-lx
-COMPOSITOR_RENDER_BACKEND=vulkan ./build/compositor-lx
-COMPOSITOR_GPU_MEMORY_MIB=256 ./build/compositor-lx
-COMPOSITOR_CANVAS_BACKEND=raster ./build/compositor-lx
-COMPOSITOR_AI_BACKEND=cpu ./build/compositor-lx
-QT_QPA_PLATFORM=offscreen ./build/compositor-lx --check-renderer
+COMPOSITOR_RENDER_BACKEND=auto|cpu|vulkan   # renderer
+COMPOSITOR_GPU_MEMORY_MIB=256               # working-memory budget
+COMPOSITOR_CANVAS_BACKEND=auto|raster|opengl
+COMPOSITOR_GPU_DEVICE="Device name"         # as listed in the panel
+COMPOSITOR_AI_BACKEND=cpu|openvino|cuda|auto
+QT_QPA_PLATFORM=offscreen compositor-lx --check-renderer
 ```
 
-`auto` restores automatic backend selection. `COMPOSITOR_AI_BACKEND=openvino|cuda|auto` selects an available custom-runtime provider. Legacy `COMPOSITOR_RGB_SPLIT_BACKEND` remains supported for that filter; an explicit legacy override takes precedence over its automatic selection.
+Testing aids: `COMPOSITOR_GPU_ALLOW_SOFTWARE=1` (lavapipe), `COMPOSITOR_GPU_FORCE_STAGING=1` (discrete-GPU copy path), `COMPOSITOR_GPU_NO_PIPELINE_CACHE=1`, `COMPOSITOR_GPU_IDLE_TRIM_MS`, `COMPOSITOR_SYNC_PREVIEWS=1`.
 
-Automatic generally requires ≥262,144 pixels and an operation classified as expensive; RGB Split also requires ≥16 combined samples. These are conservative fixed thresholds, not live device benchmarking. A supported resident chain can include cheap operations without separate transfers. The memory limit counts pooled Vulkan host/device buffers (including staging), not the document's QImages and other application memory. Allocations also respect device storage/dispatch limits and one quarter of the selected memory heap.
+**What Automatic sends to the GPU.** Images of at least 262,144 pixels (512 × 512) for operations measured faster there: the document graph (canvas only), Exposure, Hue/Saturation, Levels, Curves, Gradient Map, Black & White, Color Balance, all blurs, Bloom, RGB Split, mask feathering, layer-effect blur and morphology up to radius 6. The thresholds come from the benchmark below; Invert, the standalone Camera RAW cube and larger morphology radii stay on the CPU because they were slower on the GPU.
 
-## Quality and resource safety
+## Accuracy
 
-The graph records compute passes with explicit barriers and waits for completion before readback. Source images are immutable snapshots; cached uploads are invalidated when their identity or layout changes. Concurrent preview/export callers share a serialized queue. Worker completion is drained before device teardown, ahead of driver/validation-layer static destruction.
+The CPU renderer is the reference. Fixture tolerances (all exercised by the tests): 8-bit filters within 1 level, documents within 2 levels (a 20-layer stack of mixed modes: 3 levels), 16-bit and float filters and blends within 0.00015, Progressive Blur's half-float output within 0.001, HDR component blends within 0.0005. The 8-bit Gaussian, the morphology and the Normal/QPainter-mode composites match exactly.
 
-GPU float arithmetic is not universally bit-identical to CPU double arithmetic. Fixtures allow one 8-bit step for filters, two steps for composed documents, 0.00015 for the tested deep filters/blends, and 0.001 for Progressive Blur's half-float canonical output. RGB Split retains its stricter existing comparisons. These are fixture tolerances, not universal bounds for arbitrary extreme inputs.
+Fixed CPU-side issues found by the audit:
 
-Testing uncovered a Qt 6.10 direct 8-bit-premultiplied-to-float conversion that could replace alpha with 1. A shared conversion helper now uses a 16-bit bridge, preserving transparency in CPU and GPU paths. Tests check the known alpha independently rather than comparing two equally incorrect conversions.
+- HDR documents using Hue, Saturation, Color or Luminosity layers produced NaN pixels (gray colors made the W3C clip divide 0 by 0). The degenerate clip is now skipped on both backends, which keeps the result continuous.
+- Hard Mix decided exact ties (e.g. 168/174 + 4/116 = 1) by floating-point accident; it now compares exact integers.
+- Blend-mode layers that are scaled or rotated now composite as a placed plane, like the custom modes already did; QPainter's scaled Nearest drawing sampled differently under non-SourceOver modes.
+- 8-bit exposure uses an exact lookup table of every (value, alpha) pair, and Hue/Saturation and the custom blend modes run on all cores, with results proven identical to the per-pixel code.
 
 ## Measurements
 
-Measured 2026-10-23 on Intel Core i7-1265U / Iris Xe ADL GT2, Mesa 26.0.8, Ubuntu 26.04, Qt 6.10.2, GCC 15.2, Release build. `OMP_NUM_THREADS=12`; deterministic translucent 8-bit input; median of three warm renders after warm-up; no concurrent build/test run. Conversion, transfers, synchronization and output conversion are included. Persistent pipeline/source caches are warm, so cold first use can be slower.
+Measured 2026-10-23 with `gpu_benchmark` on an Intel Core i7-1265U (12 threads) with Iris Xe (ADL GT2), Mesa 26.0.8, Ubuntu 26.04, Qt 6.10.2, Release build, default 512 MiB budget; medians of 3–5 runs. Results vary with content, settings, clocks and thermal state, and say nothing about other GPUs. Peak resident memory of the whole benchmark: 1867 MiB.
 
-| 1920 × 1080 workload | CPU ms | GPU ms | CPU/GPU |
-| --- | ---: | ---: | ---: |
-| Exposure +0.75, offset .05, gamma 1.2 | 329.57 | 9.05 | 36.4× |
-| Gaussian, byte algorithm, radius 2.5 | 124.00 | 59.84 | 2.1× |
-| Gaussian, byte algorithm, radius 12.5 | 125.10 | 64.62 | 1.9× |
-| Gaussian, float algorithm, radius 3.5 | 332.88 | 63.76 | 5.2× |
-| Bloom amount 35, radius 4 | 161.73 | 66.51 | 2.4× |
-| Progressive Blur, 12 levels, radius 2–15 | 5049.56 | 394.91 | 12.8× |
-| Camera RAW exposure .7, temperature 15 | 19.52 | 26.49 | 0.74×; Automatic keeps CPU |
-| Hue/Saturation +25/+30/−12 | 296.21 | 11.30 | 26.2× |
-| Motion Blur −31°, distance 13 | 48.43 | 19.09 | 2.5× |
+#### First GPU use in a fresh process
 
-At 512 × 512, the corresponding exposure/HSL measurements were 41.57/1.80 ms and 34.07/1.45 ms; Progressive Blur was 633.60/25.81 ms. Performance varies with image content, settings, cache state, thermal state and GPU. These numbers do not establish AMD/NVIDIA performance. Historical standalone RGB Split measurements are in [RGB_SPLIT_GPU.md](RGB_SPLIT_GPU.md).
+| Pipeline cache | Device + first graph (ms) |
+|---|---:|
+| disabled | 34.2 |
+| warm (second launch) | 29.6 |
 
-Reproduce with `OMP_NUM_THREADS=12 ./build/tests/gpu_renderer_tests --benchmark`; operation indices are defined in that test's `operation()` function.
+#### Filters at 1920×1080, 8-bit (cold = new image each run; warm = repeated image)
 
-## Validation and building
+| Operation | CPU (ms) | GPU cold (ms) | GPU warm (ms) | Speedup cold |
+|---|---:|---:|---:|---:|
+| Exposure | 9.3 | 8.6 | 2.9 | 1.08× |
+| Hue/Saturation | 52.4 | 9.3 | 3.6 | 5.64× |
+| Gaussian 2.5 | 133 | 20.8 | 16.5 | 6.37× |
+| Gaussian 12.5 | 135 | 29.1 | 23.3 | 4.66× |
+| Gaussian 60 | 134 | 40.0 | 30.3 | 3.34× |
+| Bloom 35/4 | 164 | 33.7 | 25.3 | 4.87× |
+| Progressive Blur 0→15 | 4922 | 296 | 299 | 16.63× |
+| Motion Blur 13 px | 53.5 | 5.7 | 4.0 | 9.31× |
+| Invert | 3.3 | 3.6 | 1.6 | 0.92× |
+| Levels | 56.6 | 5.8 | 3.8 | 9.84× |
+| Gradient Map | 12.2 | 3.7 | 2.3 | 3.32× |
+| Black & White | 120 | 4.6 | 3.3 | 26.27× |
+| Color Balance | 202 | 4.4 | 3.0 | 46.24× |
+| Morphology r=3, 2000×2000 coverage | 37.9 | 23.2 | — | 1.64× |
+| Morphology r=25, 2000×2000 coverage | 35.8 | 31.9 | — | 1.12× |
+| Morphology r=250, 2000×2000 coverage | 35.1 | 28.5 | — | 1.23× |
 
-The full suite now contains **26 CTest suites**. Added checks cover translucent conversions, 8/16/float filters, all 24 blend modes, resident adjustment/filter chains with one readback, source-cache invalidation, large overlapping tiles, allocation limits, morphology/coverage, group masks, concurrency, missing drivers, queued preview completion, cancellation/destruction, preferences, undo/redo, PNG output and Camera RAW rollback.
+#### Documents (canvas render = `RenderPurpose::Display`, export = `Commit`)
 
-The hardware renderer suite reports **120 passed, 0 failed, 0 skipped** with `COMPOSITOR_REQUIRE_VULKAN_TESTS=1`. The separate RGB Split suite has 151 checks. Khronos core/synchronization validation also passes with forced staging (`COMPOSITOR_GPU_FORCE_STAGING=1`) on Iris Xe; that exercises the copy/barrier path without claiming a physical discrete-GPU test. The OpenGL canvas presentation test passes on the actual Iris Xe/XCB session and the offscreen raster path. Physical AMD/NVIDIA GPUs and optional GPU AI providers remain untested.
+| Document | CPU (ms) | Automatic canvas (ms) | Speedup | Automatic export (ms) | GPU working memory |
+|---|---:|---:|---:|---:|---:|
+| 1080p, 3 layers | 17.3 | 9.0 | 1.92× | 12.4 | 134 MiB |
+| 4000×3000, 5 layers + rotated/masked/filters | 1254 | 238 | 5.27× | 1250 | 157 MiB |
+| 6000×4000, 10 layers + effects | 3120 | 838 | 3.72× | 3088 | 232 MiB |
+| 6000×4000, 10 layers + clipping | 3431 | 1779 | 1.93× | 3397 | 274 MiB |
+| 4000×3000, 16-bit, 3 layers | 478 | 289 | 1.66× | 484 | 274 MiB |
+| 4000×3000, HDR float, 3 layers | 468 | 409 | 1.15× | 468 | 313 MiB |
+| 4000×3000, 10 layers, edit layer 9 (cpu, prefix cache) | 379 full | 89.0 | 4.26× | — | — |
+| 4000×3000, 10 layers, edit layer 9 (auto, prefix cache) | 117 full | 39.4 | 2.96× | — | — |
 
-The embedded shader is Vulkan 1.0 SPIR-V. Normal builds need only Vulkan headers to enable compute; runtime loading avoids a mandatory libvulkan link. `-DCOMPOSITOR_ENABLE_VULKAN=OFF` builds the compute fallback. Qt OpenGLWidgets is detected separately. After shader changes:
+#### Camera RAW develop and blur-brush latency
+
+| Scenario | CPU | Automatic | Speedup |
+|---|---:|---:|---:|
+| Camera RAW develop, 4000×3000 | 324 ms | 334 ms | 0.97× |
+| Blur-brush dab 640×640 r=6 (cpu): p50 / p95 | 25.6 / 34.4 ms | | |
+| Blur-brush dab 640×640 r=6 (auto): p50 / p95 | 4.4 / 5.4 ms | | |
+
+Notes: Exposure is only ~1.1× faster on the GPU cold because its CPU path became ~37× faster (exact lookup table); warm previews are 3× faster. The prefix cache re-renders a 12 MP, 10-layer canvas after an edit to layer 9 in 89 ms instead of 379 ms on the CPU path and in 39 ms instead of 117 ms on the GPU path. Clipping stacks and HDR documents gain less because they use the CPU renderer (clipping) or float storage (HDR). The Camera RAW develop stays on the CPU in Automatic, so its two columns are the same work. Pipeline compilation adds little on Mesa, which has its own shader cache.
+
+Reproduce with `./build/tests/gpu_benchmark` (or `--quick`). "Cold" gives every run a new image, so uploads are included; "warm" repeats the same image, as slider previews do.
+
+## Validation
+
+- **CTest:** 26 suites, including `gpu_renderer_tests` (120), `gpu_document_tests` (40: placement × sampling × blend-mode matrix, HDR, audit probes, Automatic decisions, determinism of exports, tiling, prefix cache, scheduling, memory lifecycle, exact paths) and `gpu_ui_tests` (11: asynchronous previews, Rendering panel overrides, canvas presentation).
+- **Iris Xe (Mesa 26.0.8):** all GPU suites with `COMPOSITOR_REQUIRE_VULKAN_TESTS=1`; under the Khronos validation layer with synchronization checks, normally and with forced staging: 0 validation errors; at 64 and 128 MiB budgets; OpenGL canvas on X11 (XWayland) and native Wayland.
+- **lavapipe (software Vulkan, a second, independent implementation):** all GPU suites pass, also with forced staging and under validation. `scripts/ci-gpu-tests.sh` runs these passes on machines without a GPU; `.github/workflows/ci.yml` runs the build, the suite and that script (manually triggered).
+- **Not tested on hardware:** AMD (RADV), NVIDIA, Optimus laptops, ReBAR, and GPU execution providers for Remove Background. The discrete-GPU memory path is exercised only through forced staging.
+
+## Building
+
+Vulkan headers are optional (`-DCOMPOSITOR_ENABLE_VULKAN=OFF` builds the CPU-only renderer); the loader and driver are found at runtime. After editing the shader or the contract tables:
 
 ```sh
-python3 scripts/compile-rendering-shader.py   # glslangValidator and optional spirv-val
+python3 scripts/compile-rendering-shader.py          # needs glslang-tools; spirv-val if installed
 python3 scripts/compile-rendering-shader.py --check
-OMP_NUM_THREADS=4 ctest --test-dir build --output-on-failure
 COMPOSITOR_REQUIRE_VULKAN_TESTS=1 ./build/tests/gpu_renderer_tests
+COMPOSITOR_REQUIRE_VULKAN_TESTS=1 ./build/tests/gpu_document_tests
 ```
 
-`packaging/build-packages.sh` builds and runs the full suite, checks the subject model, verifies the version, and runs the packaged renderer self-check both normally and with a missing Vulkan ICD before generating SHA256SUMS. Drivers are supplied by the host, not bundled in the AppImage. The current Ubuntu 26.04 packages retain the existing glibc 2.43 requirement.
+New GPU code follows `src/rendering/.clang-format`. `packaging/build-packages.sh` builds, runs the full suite, and runs the packaged renderer self-check with and without a Vulkan driver.

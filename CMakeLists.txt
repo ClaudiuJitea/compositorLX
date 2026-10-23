@@ -152,6 +152,7 @@ add_library(compositor_core
     src/rendering/GpuRenderer.cpp
     src/rendering/GpuVulkan.cpp
     src/rendering/GpuOperations.cpp
+    src/rendering/RendererSelfCheck.cpp
     src/rendering/RgbSplitVulkan.cpp
     src/rendering/RgbSplit.cpp
     src/rendering/ProgressiveBlur.cpp

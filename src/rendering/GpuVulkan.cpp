@@ -6,15 +6,25 @@
 #include "rendering/shaders/RenderingSpirv.h"
 #include <QColorSpace>
 #include <QCoreApplication>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QLibrary>
+#include <QSettings>
+#include <QStandardPaths>
+#include <QThread>
 #include <QThreadPool>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -22,43 +32,253 @@ namespace compositor {
 namespace {
 #define INSTANCE_FUNCTIONS(X)                                                                                          \
     X(DestroyInstance)                                                                                                 \
-    X(EnumeratePhysicalDevices) X(GetPhysicalDeviceProperties) X(GetPhysicalDeviceMemoryProperties)                    \
-        X(GetPhysicalDeviceQueueFamilyProperties) X(CreateDevice) X(GetDeviceProcAddr)
+    X(EnumeratePhysicalDevices)                                                                                        \
+    X(GetPhysicalDeviceProperties)                                                                                     \
+    X(GetPhysicalDeviceMemoryProperties)                                                                               \
+    X(GetPhysicalDeviceQueueFamilyProperties)                                                                          \
+    X(CreateDevice)                                                                                                    \
+    X(GetDeviceProcAddr)
 #define DEVICE_FUNCTIONS(X)                                                                                            \
     X(DestroyDevice)                                                                                                   \
-    X(DeviceWaitIdle) X(GetDeviceQueue) X(CreateShaderModule) X(DestroyShaderModule) X(CreateDescriptorSetLayout)      \
-        X(DestroyDescriptorSetLayout) X(CreatePipelineLayout) X(DestroyPipelineLayout) X(CreateComputePipelines)       \
-            X(DestroyPipeline) X(CreateDescriptorPool) X(DestroyDescriptorPool) X(AllocateDescriptorSets)              \
-                X(UpdateDescriptorSets) X(CreateCommandPool) X(DestroyCommandPool) X(AllocateCommandBuffers)           \
-                    X(ResetCommandPool) X(BeginCommandBuffer) X(EndCommandBuffer) X(CmdBindPipeline)                   \
-                        X(CmdBindDescriptorSets) X(CmdPushConstants) X(CmdDispatch) X(CmdPipelineBarrier)              \
-                            X(CmdCopyBuffer) X(CreateBuffer) X(DestroyBuffer) X(GetBufferMemoryRequirements)           \
-                                X(AllocateMemory) X(FreeMemory) X(BindBufferMemory) X(MapMemory) X(UnmapMemory)        \
-                                    X(FlushMappedMemoryRanges) X(InvalidateMappedMemoryRanges) X(CreateFence)          \
-                                        X(DestroyFence) X(ResetFences) X(QueueSubmit) X(WaitForFences)
+    X(DeviceWaitIdle)                                                                                                  \
+    X(GetDeviceQueue)                                                                                                  \
+    X(CreateShaderModule)                                                                                              \
+    X(DestroyShaderModule)                                                                                             \
+    X(CreateDescriptorSetLayout)                                                                                       \
+    X(DestroyDescriptorSetLayout)                                                                                      \
+    X(CreatePipelineLayout)                                                                                            \
+    X(DestroyPipelineLayout)                                                                                           \
+    X(CreatePipelineCache)                                                                                             \
+    X(DestroyPipelineCache)                                                                                            \
+    X(GetPipelineCacheData)                                                                                            \
+    X(CreateComputePipelines)                                                                                          \
+    X(DestroyPipeline)                                                                                                 \
+    X(CreateDescriptorPool)                                                                                            \
+    X(DestroyDescriptorPool)                                                                                           \
+    X(AllocateDescriptorSets)                                                                                          \
+    X(UpdateDescriptorSets)                                                                                            \
+    X(CreateCommandPool)                                                                                               \
+    X(DestroyCommandPool)                                                                                              \
+    X(AllocateCommandBuffers)                                                                                          \
+    X(ResetCommandPool)                                                                                                \
+    X(BeginCommandBuffer)                                                                                              \
+    X(EndCommandBuffer)                                                                                                \
+    X(CmdBindPipeline)                                                                                                 \
+    X(CmdBindDescriptorSets)                                                                                           \
+    X(CmdPushConstants)                                                                                                \
+    X(CmdDispatch)                                                                                                     \
+    X(CmdPipelineBarrier)                                                                                              \
+    X(CmdCopyBuffer)                                                                                                   \
+    X(CreateBuffer)                                                                                                    \
+    X(DestroyBuffer)                                                                                                   \
+    X(GetBufferMemoryRequirements)                                                                                     \
+    X(AllocateMemory)                                                                                                  \
+    X(FreeMemory)                                                                                                      \
+    X(BindBufferMemory)                                                                                                \
+    X(MapMemory)                                                                                                       \
+    X(UnmapMemory)                                                                                                     \
+    X(FlushMappedMemoryRanges)                                                                                         \
+    X(InvalidateMappedMemoryRanges)                                                                                    \
+    X(CreateFence)                                                                                                     \
+    X(DestroyFence)                                                                                                    \
+    X(ResetFences)                                                                                                     \
+    X(QueueSubmit)                                                                                                     \
+    X(WaitForFences)
 
 struct Parameters {
-    uint32_t width, height, operation, quantization;
-    std::array<float, 28> values;
+    uint32_t width, height, operation, flags;
+    GpuParameters values;
 };
-static_assert(sizeof(Parameters) == 128);
+static_assert(sizeof(Parameters) == 128, "Vulkan guarantees 128 bytes of push constants");
 
-// One compute queue/pipeline, serialized across previews, canvas workers and exports. Vulkan
-// objects never depend on the Qt window system, so the same path works in headless tests.
+constexpr std::array<int, 6> bytesPerPixel{16, 4, 8, 8, 1, 4}; // Indexed by GpuFormat.
+VkDeviceSize storageBytes(GpuFormat format, QSize size) {
+    const VkDeviceSize pixels = VkDeviceSize(size.width()) * size.height();
+    return format == GpuFormat::Gray8 ? (pixels + 3) / 4 * 4 : pixels * bytesPerPixel[unsigned(format)];
+}
+// Storage that reads back directly into a QImage of the requested format.
+GpuFormat outputFormatFor(QImage::Format format) {
+    switch (format) {
+    case QImage::Format_RGBA8888_Premultiplied:
+        return GpuFormat::Unorm8;
+    case QImage::Format_RGBA64_Premultiplied:
+        return GpuFormat::Unorm16;
+    case QImage::Format_RGBA16FPx4_Premultiplied:
+        return GpuFormat::Half;
+    default:
+        return GpuFormat::Float32;
+    }
+}
+QImage::Format imageFormatFor(GpuFormat format) {
+    switch (format) {
+    case GpuFormat::Unorm8:
+        return QImage::Format_RGBA8888_Premultiplied;
+    case GpuFormat::Unorm16:
+        return QImage::Format_RGBA64_Premultiplied;
+    case GpuFormat::Half:
+        return QImage::Format_RGBA16FPx4_Premultiplied;
+    case GpuFormat::Gray8:
+        return QImage::Format_Grayscale8;
+    default:
+        return QImage::Format_RGBA32FPx4_Premultiplied;
+    }
+}
+// A source in a format the shader decodes directly. Conversions happen before the
+// device lock is taken, so slow CPU work never blocks other GPU users.
+struct Prepared {
+    QImage image;
+    GpuFormat format = GpuFormat::Float32;
+    std::shared_ptr<const std::vector<float>> channel;
+};
+Prepared prepare(const GpuNode &node) {
+    Prepared p;
+    if (node.channel) {
+        p.channel = node.channel;
+        p.format = GpuFormat::Red32;
+        return p;
+    }
+    const QImage &image = node.image;
+    switch (image.format()) {
+    case QImage::Format_RGBA8888_Premultiplied:
+    case QImage::Format_RGBA64_Premultiplied:
+    case QImage::Format_RGBA16FPx4_Premultiplied:
+    case QImage::Format_RGBA32FPx4_Premultiplied:
+    case QImage::Format_Grayscale8:
+        p.image = image;
+        break;
+    case QImage::Format_ARGB32_Premultiplied:
+    case QImage::Format_ARGB32:
+    case QImage::Format_RGB32:
+    case QImage::Format_RGBA8888:
+    case QImage::Format_RGBX8888:
+    case QImage::Format_RGB888:
+        p.image = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        break;
+    case QImage::Format_RGBA64:
+    case QImage::Format_RGBX64:
+    case QImage::Format_Grayscale16:
+        p.image = image.convertToFormat(QImage::Format_RGBA64_Premultiplied);
+        break;
+    case QImage::Format_RGBA16FPx4:
+    case QImage::Format_RGBX16FPx4:
+        p.image = image.convertToFormat(QImage::Format_RGBA16FPx4_Premultiplied);
+        break;
+    default:
+        p.image = DeepImage::floating(image);
+        break;
+    }
+    switch (p.image.format()) {
+    case QImage::Format_RGBA8888_Premultiplied:
+        p.format = GpuFormat::Unorm8;
+        break;
+    case QImage::Format_RGBA64_Premultiplied:
+        p.format = GpuFormat::Unorm16;
+        break;
+    case QImage::Format_RGBA16FPx4_Premultiplied:
+        p.format = GpuFormat::Half;
+        break;
+    case QImage::Format_Grayscale8:
+        p.format = GpuFormat::Gray8;
+        break;
+    default:
+        p.format = GpuFormat::Float32;
+        break;
+    }
+    return p;
+}
+bool singleChannelOperation(GpuOp op) {
+    return op == GpuOp::Copy || op == GpuOp::BoxBlur || op == GpuOp::Gaussian || op == GpuOp::Morphology ||
+           op == GpuOp::MorphologyStep || op == GpuOp::MorphologyCombine;
+}
+GpuFormat passFormat(const GpuNode &node, GpuFormat input) {
+    switch (GpuQuantization(node.quantization)) {
+    case GpuQuantization::Unorm8:
+        return GpuFormat::Unorm8;
+    case GpuQuantization::Unorm16:
+        return GpuFormat::Unorm16;
+    case GpuQuantization::Half:
+        return GpuFormat::Half;
+    default:
+        return input == GpuFormat::Red32 && singleChannelOperation(node.operation) ? GpuFormat::Red32
+                                                                                   : GpuFormat::Float32;
+    }
+}
+
+// Waiters are served highest priority first. A timeout of zero is a try-lock.
+class PriorityLock {
+  public:
+    bool acquire(GpuPriority priority, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex);
+        const int level = int(priority);
+        ++waiting[level];
+        const auto ready = [&] {
+            if (busy)
+                return false;
+            for (int above = level + 1; above < int(waiting.size()); ++above)
+                if (waiting[above])
+                    return false;
+            return true;
+        };
+        const bool acquired = timeout.count() < 0 ? (changed.wait(lock, ready), true)
+                                                  : changed.wait_for(lock, timeout, ready);
+        --waiting[level];
+        if (acquired)
+            busy = true;
+        else
+            changed.notify_all();
+        return acquired;
+    }
+    void release() {
+        {
+            std::lock_guard lock(mutex);
+            busy = false;
+        }
+        changed.notify_all();
+    }
+
+  private:
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool busy = false;
+    std::array<int, 3> waiting{};
+};
+struct Held {
+    PriorityLock &lock;
+    ~Held() { lock.release(); }
+};
+
+std::chrono::milliseconds idleTrimDelay() {
+    bool valid = false;
+    const int ms = qEnvironmentVariableIntValue("COMPOSITOR_GPU_IDLE_TRIM_MS", &valid);
+    return std::chrono::milliseconds(valid && ms > 0 ? ms : 30000);
+}
+
+// One compute queue shared by previews, canvas workers and exports. Vulkan objects never
+// depend on the Qt window system, so the same path works in headless tests.
 class Context {
   public:
+    using Consumer = std::function<void(const unsigned char *, GpuFormat)>;
     Context() {
         try {
             initialize();
         } catch (const std::exception &e) {
             error = QString::fromUtf8(e.what());
         }
+        if (device)
+            janitor = std::thread([this] { trimWhenIdle(); });
     }
     ~Context() {
+        {
+            std::lock_guard lock(janitorMutex);
+            stopping = true;
+        }
+        janitorWake.notify_all();
+        if (janitor.joinable())
+            janitor.join();
         if (device && DeviceWaitIdle)
             DeviceWaitIdle(device);
-        hostBuffer.reset();
-        localBuffer.reset();
+        savePipelineCache();
+        freeBuffers();
         if (device && DestroyDevice) {
             if (fence)
                 DestroyFence(device, fence, nullptr);
@@ -66,8 +286,11 @@ class Context {
                 DestroyCommandPool(device, commandPool, nullptr);
             if (descriptorPool)
                 DestroyDescriptorPool(device, descriptorPool, nullptr);
-            if (pipeline)
-                DestroyPipeline(device, pipeline, nullptr);
+            for (VkPipeline pipeline : pipelines)
+                if (pipeline)
+                    DestroyPipeline(device, pipeline, nullptr);
+            if (pipelineCache)
+                DestroyPipelineCache(device, pipelineCache, nullptr);
             if (pipelineLayout)
                 DestroyPipelineLayout(device, pipelineLayout, nullptr);
             if (descriptorLayout)
@@ -79,10 +302,58 @@ class Context {
         if (instance && DestroyInstance)
             DestroyInstance(instance, nullptr);
     }
-    QImage render(const GpuGraph &, int output, QImage::Format, GpuExecution &);
-    QString description() {
-        std::lock_guard lock(mutex);
-        return error.isEmpty() ? QStringLiteral("Vulkan: %1").arg(QString::fromUtf8(properties.deviceName)) : error;
+    bool render(const GpuGraph &, int output, GpuFormat outputFormat, const Consumer &, GpuExecution &);
+    bool deviceLost() const { return lost; }
+    GpuDeviceInfo info() {
+        GpuDeviceInfo i;
+        i.devices = deviceNames;
+        if (!device) {
+            i.error = error;
+            return i;
+        }
+        i.available = error.isEmpty();
+        i.error = error;
+        i.name = QString::fromUtf8(properties.deviceName);
+        i.type = properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU   ? QStringLiteral("discrete GPU")
+                 : properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? QStringLiteral("integrated GPU")
+                                                                                   : QStringLiteral("software Vulkan");
+        i.apiVersion = QStringLiteral("%1.%2.%3")
+                           .arg(VK_VERSION_MAJOR(properties.apiVersion))
+                           .arg(VK_VERSION_MINOR(properties.apiVersion))
+                           .arg(VK_VERSION_PATCH(properties.apiVersion));
+        const uint32_t d = properties.driverVersion;
+        i.driver = properties.vendorID == 0x10de
+                       ? QStringLiteral("%1.%2").arg(d >> 22).arg((d >> 14) & 0xff)
+                       : QStringLiteral("%1.%2.%3").arg(VK_VERSION_MAJOR(d)).arg(VK_VERSION_MINOR(d)).arg(VK_VERSION_PATCH(d));
+        for (uint32_t h = 0; h < memoryProperties.memoryHeapCount; ++h)
+            if (memoryProperties.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                i.deviceLocalBytes += memoryProperties.memoryHeaps[h].size;
+        for (uint32_t h = 0; h < memoryProperties.memoryHeapCount; ++h)
+            for (uint32_t t = 0; t < memoryProperties.memoryTypeCount; ++t)
+                if (memoryProperties.memoryTypes[t].heapIndex == h &&
+                    (memoryProperties.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                    i.hostVisibleBytes += memoryProperties.memoryHeaps[h].size;
+                    break;
+                }
+        return i;
+    }
+    void warmUp() {
+        if (!error.isEmpty() || !lock.acquire(GpuPriority::Export, std::chrono::milliseconds(-1)))
+            return;
+        Held held{lock};
+        try {
+            for (unsigned op = 1; op < gpuOperationCount; ++op)
+                pipelineFor(GpuOp(op));
+            savePipelineCache();
+        } catch (const std::exception &) {
+        }
+    }
+    // Free pooled buffers unless the queue is in use.
+    void trim() {
+        if (!lock.acquire(GpuPriority::Export, std::chrono::milliseconds(0)))
+            return;
+        Held held{lock};
+        freeBuffers();
     }
 
   private:
@@ -102,24 +373,55 @@ class Context {
     VkShaderModule shader = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptorLayout = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+    std::array<VkPipeline, gpuOperationCount> pipelines{};
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, 512> descriptorSets{};
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
-    QString error;
-    std::mutex mutex;
+    QString error, cachePath;
+    QStringList deviceNames;
+    bool lost = false;
+    PriorityLock lock;
+    // Idle trimming.
+    std::thread janitor;
+    std::mutex janitorMutex;
+    std::condition_variable janitorWake;
+    bool stopping = false;
+    std::chrono::steady_clock::time_point lastUse = std::chrono::steady_clock::now();
 
     void check(VkResult result, const char *operation) {
         if (result == VK_SUCCESS)
             return;
         const QString message = QStringLiteral("Vulkan %1 failed (%2)").arg(QLatin1String(operation)).arg(int(result));
-        if (result == VK_ERROR_DEVICE_LOST)
+        if (result == VK_ERROR_DEVICE_LOST) {
             error = message; // Do not retry a lost device on every preview.
+            lost = true;
+        }
         throw std::runtime_error(message.toStdString());
     }
     void initialize();
+    VkPipeline pipelineFor(GpuOp op);
+    void loadPipelineCache();
+    void savePipelineCache();
+    void trimWhenIdle() {
+        std::unique_lock guard(janitorMutex);
+        while (!stopping) {
+            janitorWake.wait_for(guard, idleTrimDelay());
+            if (stopping)
+                break;
+            if (std::chrono::steady_clock::now() - lastUse < idleTrimDelay())
+                continue;
+            guard.unlock();
+            trim();
+            guard.lock();
+        }
+    }
+    void touch() {
+        std::lock_guard guard(janitorMutex);
+        lastUse = std::chrono::steady_clock::now();
+    }
     void barrier(VkPipelineStageFlags from, VkAccessFlags writes, VkPipelineStageFlags to, VkAccessFlags reads) {
         VkMemoryBarrier b{};
         b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -154,7 +456,8 @@ class Context {
             context.check(context.CreateBuffer(context.device, &b, nullptr, &handle), "create buffer");
             VkMemoryRequirements requirements{};
             context.GetBufferMemoryRequirements(context.device, handle, &requirements);
-            int chosen = -1, score = -1;
+            const bool discrete = context.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+            int chosen = -1, score = -1000;
             for (uint32_t i = 0; i < context.memoryProperties.memoryTypeCount; ++i) {
                 if (!(requirements.memoryTypeBits & (1u << i)))
                     continue;
@@ -165,9 +468,18 @@ class Context {
                 const auto &heap = context.memoryProperties.memoryHeaps[type.heapIndex];
                 if (requirements.size > heap.size / 4)
                     continue;
-                const int rank = ((type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? 4 : 0) +
-                                 ((type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? 2 : 0) +
-                                 ((type.propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 1 : 0);
+                const bool local = type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                const bool cached = type.propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+                const bool coherent = type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                int rank = 0;
+                if (!host)
+                    rank = (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? 0 : 1;
+                else if (discrete)
+                    // Read back from cached system memory; mapped VRAM (ReBAR) is uncached for the CPU.
+                    rank = (cached ? 8 : 0) + (coherent ? 2 : 0) - (local ? 16 : 0);
+                else
+                    // Unified memory: a device-local host-visible heap avoids the staging copy.
+                    rank = (local ? 4 : 0) + (coherent ? 2 : 0) + (cached ? 1 : 0);
                 if (rank > score) {
                     chosen = int(i);
                     score = rank;
@@ -202,6 +514,13 @@ class Context {
     VkDeviceSize capacity = 0;
     std::vector<VkDeviceSize> sourceLayout;
     std::vector<qint64> sourceKeys;
+    void freeBuffers() {
+        hostBuffer.reset();
+        localBuffer.reset();
+        capacity = 0;
+        sourceKeys.clear();
+        sourceLayout.clear();
+    }
 };
 
 void Context::initialize() {
@@ -231,13 +550,20 @@ void Context::initialize() {
     check(EnumeratePhysicalDevices(instance, &count, nullptr), "enumerate devices");
     std::vector<VkPhysicalDevice> devices(count);
     check(EnumeratePhysicalDevices(instance, &count, devices.data()), "enumerate devices");
+    // Automatic device choice prefers the integrated GPU on hybrid laptops: it does not wake
+    // a discrete GPU (OD6). A saved or environment device name selects one explicitly.
+    QString wanted = qEnvironmentVariable("COMPOSITOR_GPU_DEVICE");
+    if (wanted.isEmpty())
+        wanted = QSettings().value("rendering/device").toString();
+    // Tests may run on software Vulkan (lavapipe) in CI; it is never used as acceleration otherwise.
+    const bool allowSoftware = qEnvironmentVariableIsSet("COMPOSITOR_GPU_ALLOW_SOFTWARE");
     int best = -1;
     for (uint32_t d = 0; d < count; ++d) {
         VkPhysicalDeviceProperties p{};
         GetPhysicalDeviceProperties(devices[d], &p);
-        // Software Vulkan is a CPU renderer, not hardware acceleration.
-        if (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU &&
-            p.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+        const bool hardware = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ||
+                              p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        if (!hardware && !(allowSoftware && p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU))
             continue;
         if (p.limits.maxComputeWorkGroupInvocations < 64 || p.limits.maxComputeWorkGroupSize[0] < 8 ||
             p.limits.maxComputeWorkGroupSize[1] < 8 || p.limits.maxPushConstantsSize < sizeof(Parameters) ||
@@ -249,7 +575,13 @@ void Context::initialize() {
         GetPhysicalDeviceQueueFamilyProperties(devices[d], &families, queues.data());
         for (uint32_t q = 0; q < families; ++q)
             if (queues[q].queueCount && (queues[q].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
-                const int rank = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
+                const QString name = QString::fromUtf8(p.deviceName);
+                deviceNames << name;
+                int rank = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2
+                           : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU  ? 1
+                                                                                   : 0;
+                if (!wanted.isEmpty() && name == wanted)
+                    rank = 10;
                 if (rank > best) {
                     physical = devices[d];
                     properties = p;
@@ -305,14 +637,7 @@ void Context::initialize() {
     pl.pushConstantRangeCount = 1;
     pl.pPushConstantRanges = &push;
     check(CreatePipelineLayout(device, &pl, nullptr, &pipelineLayout), "create pipeline layout");
-    VkComputePipelineCreateInfo pipe{};
-    pipe.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    pipe.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipe.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipe.stage.module = shader;
-    pipe.stage.pName = "main";
-    pipe.layout = pipelineLayout;
-    check(CreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipe, nullptr, &pipeline), "create compute pipeline");
+    loadPipelineCache();
     VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * uint32_t(descriptorSets.size())};
     VkDescriptorPoolCreateInfo dp{};
     dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -343,21 +668,95 @@ void Context::initialize() {
     check(CreateFence(device, &f, nullptr, &fence), "create fence");
 }
 
-QImage Context::render(const GpuGraph &graph, int output, QImage::Format format, GpuExecution &report) {
-    std::lock_guard lock(mutex);
+// The persistent cache lets later sessions skip the driver's shader compile. The header is
+// checked against this device so a driver or GPU change never loads foreign data.
+void Context::loadPipelineCache() {
+    QByteArray data;
+    if (!qEnvironmentVariableIsSet("COMPOSITOR_GPU_NO_PIPELINE_CACHE")) {
+        const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        if (!dir.isEmpty())
+            cachePath = dir + QStringLiteral("/vulkan-pipelines-%1-%2.bin")
+                                  .arg(properties.vendorID, 4, 16, QLatin1Char('0'))
+                                  .arg(properties.deviceID, 4, 16, QLatin1Char('0'));
+        QFile file(cachePath);
+        if (!cachePath.isEmpty() && file.open(QIODevice::ReadOnly))
+            data = file.readAll();
+        const auto word = [&](int at) {
+            uint32_t v = 0;
+            std::memcpy(&v, data.constData() + at, 4);
+            return v;
+        };
+        if (data.size() < 32 || word(4) != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || word(8) != properties.vendorID ||
+            word(12) != properties.deviceID ||
+            std::memcmp(data.constData() + 16, properties.pipelineCacheUUID, VK_UUID_SIZE) != 0)
+            data.clear();
+    }
+    VkPipelineCacheCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    info.initialDataSize = size_t(data.size());
+    info.pInitialData = data.isEmpty() ? nullptr : data.constData();
+    if (CreatePipelineCache(device, &info, nullptr, &pipelineCache) != VK_SUCCESS) {
+        info.initialDataSize = 0;
+        info.pInitialData = nullptr;
+        check(CreatePipelineCache(device, &info, nullptr, &pipelineCache), "create pipeline cache");
+    }
+}
+void Context::savePipelineCache() {
+    if (!pipelineCache || cachePath.isEmpty() || !GetPipelineCacheData)
+        return;
+    size_t size = 0;
+    if (GetPipelineCacheData(device, pipelineCache, &size, nullptr) != VK_SUCCESS || !size)
+        return;
+    QByteArray data(qsizetype(size), Qt::Uninitialized);
+    if (GetPipelineCacheData(device, pipelineCache, &size, data.data()) != VK_SUCCESS)
+        return;
+    data.resize(qsizetype(size));
+    QDir().mkpath(QFileInfo(cachePath).absolutePath());
+    QFile file(cachePath);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        file.write(data);
+}
+// One pipeline per operation, specialized so the driver compiles only that branch and
+// sizes registers for it alone.
+VkPipeline Context::pipelineFor(GpuOp op) {
+    VkPipeline &pipeline = pipelines[unsigned(op)];
+    if (pipeline)
+        return pipeline;
+    const uint32_t id = uint32_t(op);
+    VkSpecializationMapEntry entry{0, 0, sizeof(id)};
+    VkSpecializationInfo specialization{1, &entry, sizeof(id), &id};
+    VkComputePipelineCreateInfo pipe{};
+    pipe.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipe.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipe.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipe.stage.module = shader;
+    pipe.stage.pName = "main";
+    pipe.stage.pSpecializationInfo = &specialization;
+    pipe.layout = pipelineLayout;
+    check(CreateComputePipelines(device, pipelineCache, 1, &pipe, nullptr, &pipeline), "create compute pipeline");
+    return pipeline;
+}
+
+bool Context::render(const GpuGraph &graph, int output, GpuFormat outputFormat, const Consumer &consume,
+                     GpuExecution &report) {
     report.device = QString::fromUtf8(properties.deviceName);
     if (!error.isEmpty()) {
         report.reason = error;
-        return {};
+        return false;
     }
+    const auto &nodes = graph.nodes();
+    const int count = int(nodes.size());
+    // Everything that does not touch the device happens before the queue is locked.
+    std::vector<bool> used(count, false);
+    std::vector<int> last(count, -1);
+    std::vector<Prepared> prepared(count);
+    std::vector<GpuFormat> formats(count, GpuFormat::Float32);
+    std::vector<VkDeviceSize> sizes(count);
+    std::vector<int> sources, passes;
     try {
-        const auto &nodes = graph.nodes();
-        const int count = int(nodes.size());
         if (count > 2048)
             throw std::runtime_error("GPU graph exceeds the node limit");
-        std::vector<bool> used(count, false);
         used[output] = true;
-        std::vector<int> last(count, -1);
         last[output] = count;
         for (int i = output; i >= 0; --i)
             if (used[i] && nodes[i].operation != GpuOp::Source) {
@@ -369,37 +768,57 @@ QImage Context::render(const GpuGraph &graph, int output, QImage::Format format,
                         last[input] = std::max(last[input], i);
                     }
             }
+        for (int i = 0; i < count; ++i) {
+            if (!used[i])
+                continue;
+            const auto &n = nodes[i];
+            if (n.size.isEmpty())
+                throw std::runtime_error("Empty image in GPU graph");
+            for (float f : n.parameters)
+                if (!std::isfinite(f))
+                    throw std::runtime_error("Non-finite GPU parameters");
+            if (n.operation == GpuOp::Source) {
+                prepared[i] = prepare(n);
+                if (!n.channel && prepared[i].image.isNull())
+                    throw std::runtime_error("Could not convert GPU source");
+                formats[i] = prepared[i].format;
+                sources.push_back(i);
+            } else {
+                formats[i] = i == output ? outputFormat
+                                         : passFormat(n, n.input >= 0 ? formats[n.input] : GpuFormat::Float32);
+                passes.push_back(i);
+            }
+            sizes[i] = storageBytes(formats[i], n.size);
+            if (sizes[i] > properties.limits.maxStorageBufferRange)
+                throw std::runtime_error("GPU storage range exceeded");
+        }
+        if (passes.size() > descriptorSets.size())
+            throw std::runtime_error("Too many GPU passes");
+    } catch (const std::exception &e) {
+        report.reason = QString::fromUtf8(e.what());
+        return false;
+    }
+    // Interactive work on the GUI thread never queues behind a canvas render or an export.
+    const bool gui = report.priority == GpuPriority::Interactive && QCoreApplication::instance() &&
+                     QThread::currentThread() == QCoreApplication::instance()->thread();
+    if (!lock.acquire(report.priority, std::chrono::milliseconds(gui ? 0 : -1))) {
+        report.reason = QStringLiteral("GPU busy; rendered on the CPU");
+        return false;
+    }
+    Held held{lock};
+    QElapsedTimer timer;
+    timer.start();
+    try {
         const auto align = [&](VkDeviceSize bytes) {
             const auto a = std::max(VkDeviceSize(16), properties.limits.minStorageBufferOffsetAlignment);
             return (bytes + a - 1) / a * a;
         };
-        std::vector<VkDeviceSize> offsets(count), sizes(count);
-        std::vector<int> sources, passes;
+        std::vector<VkDeviceSize> offsets(count);
         VkDeviceSize total = 0;
-        for (int i = 0; i < count; ++i)
-            if (used[i]) {
-                const auto &n = nodes[i];
-                if (n.size.isEmpty())
-                    throw std::runtime_error("Empty image in GPU graph");
-                sizes[i] = VkDeviceSize(n.size.width()) * n.size.height() * 16;
-                if (sizes[i] > properties.limits.maxStorageBufferRange)
-                    throw std::runtime_error("GPU storage range exceeded");
-                for (float f : n.parameters)
-                    if (!std::isfinite(f))
-                        throw std::runtime_error("Non-finite GPU parameters");
-                if (n.operation == GpuOp::Source) {
-                    offsets[i] = total;
-                    total += align(sizes[i]);
-                    sources.push_back(i);
-                } else {
-                    if (uint32_t((n.size.width() + 7) / 8) > properties.limits.maxComputeWorkGroupCount[0] ||
-                        uint32_t((n.size.height() + 7) / 8) > properties.limits.maxComputeWorkGroupCount[1])
-                        throw std::runtime_error("GPU dispatch limit exceeded");
-                    passes.push_back(i);
-                }
-            }
-        if (passes.size() > descriptorSets.size())
-            throw std::runtime_error("Too many GPU passes");
+        for (int i : sources) {
+            offsets[i] = total;
+            total += align(sizes[i]);
+        }
         // Reuse intermediate allocations once their final consumer has completed.
         struct Slot {
             VkDeviceSize offset, size;
@@ -420,17 +839,13 @@ QImage Context::render(const GpuGraph &graph, int output, QImage::Format format,
                 total += align(sizes[i]);
             }
         }
-        const VkDeviceSize budget = VkDeviceSize(GpuRenderer::memoryBudgetMiB()) * 1024 * 1024;
+        const VkDeviceSize budget = GpuRenderer::memoryBudgetBytes();
         const bool forceStaging = qEnvironmentVariableIsSet("COMPOSITOR_GPU_FORCE_STAGING");
         if (total > budget)
             throw std::runtime_error("GPU graph exceeds the working-memory budget");
         if (!hostBuffer || capacity < total || capacity * (localBuffer ? 2 : 1) > budget ||
             (forceStaging && !localBuffer)) {
-            hostBuffer.reset();
-            localBuffer.reset();
-            capacity = 0;
-            sourceKeys.clear();
-            sourceLayout.clear();
+            freeBuffers();
             auto host = std::make_unique<Buffer>(*this);
             host->allocate(total, true);
             std::unique_ptr<Buffer> local;
@@ -452,6 +867,7 @@ QImage Context::render(const GpuGraph &graph, int output, QImage::Format format,
         for (int i : sources) {
             layout.push_back(offsets[i]);
             layout.push_back(sizes[i]);
+            layout.push_back(VkDeviceSize(formats[i]));
         }
         if (layout != sourceLayout) {
             sourceLayout = layout;
@@ -460,15 +876,17 @@ QImage Context::render(const GpuGraph &graph, int output, QImage::Format format,
         std::vector<VkBufferCopy> uploads;
         for (size_t root = 0; root < sources.size(); ++root) {
             const int i = sources[root];
-            const auto &image = nodes[i].image;
-            if (sourceKeys[root] == image.cacheKey())
+            if (sourceKeys[root] == nodes[i].key)
                 continue;
-            const QImage converted = DeepImage::floating(image);
-            if (converted.isNull())
-                throw std::runtime_error("Could not convert GPU source");
-            for (int y = 0; y < image.height(); ++y)
-                std::memcpy(mapped + offsets[i] + VkDeviceSize(y) * image.width() * 16, converted.constScanLine(y),
-                            size_t(image.width()) * 16);
+            unsigned char *target = mapped + offsets[i];
+            if (const auto &values = prepared[i].channel)
+                std::memcpy(target, values->data(), values->size() * sizeof(float));
+            else {
+                const QImage &image = prepared[i].image;
+                const size_t row = size_t(image.width()) * bytesPerPixel[unsigned(formats[i])];
+                for (int y = 0; y < image.height(); ++y)
+                    std::memcpy(target + VkDeviceSize(y) * row, image.constScanLine(y), row);
+            }
             uploads.push_back({offsets[i], offsets[i], sizes[i]});
             report.uploadedBytes += sizes[i];
         }
@@ -476,8 +894,8 @@ QImage Context::render(const GpuGraph &graph, int output, QImage::Format format,
         for (size_t pass = 0; pass < passes.size(); ++pass) {
             const int i = passes[pass];
             const auto &n = nodes[i];
-            const int aux = n.auxiliary < 0 ? n.input : n.auxiliary;
-            const std::array<VkDescriptorBufferInfo, 3> buffers{{{buffer, offsets[n.input], sizes[n.input]},
+            const int in = n.input < 0 ? i : n.input, aux = n.auxiliary < 0 ? in : n.auxiliary;
+            const std::array<VkDescriptorBufferInfo, 3> buffers{{{buffer, offsets[in], sizes[in]},
                                                                  {buffer, offsets[aux], sizes[aux]},
                                                                  {buffer, offsets[i], sizes[i]}}};
             std::array<VkWriteDescriptorSet, 3> writes{};
@@ -505,21 +923,31 @@ QImage Context::render(const GpuGraph &graph, int output, QImage::Format format,
         } else
             barrier(VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     VK_ACCESS_SHADER_READ_BIT);
-        CmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        VkPipeline bound = VK_NULL_HANDLE;
         for (size_t pass = 0; pass < passes.size(); ++pass) {
-            const auto &n = nodes[passes[pass]];
-            const Parameters params{uint32_t(n.size.width()), uint32_t(n.size.height()), uint32_t(n.operation),
-                                    n.quantization, n.parameters};
+            const int i = passes[pass];
+            const auto &n = nodes[i];
+            const int in = n.input < 0 ? i : n.input, aux = n.auxiliary < 0 ? in : n.auxiliary;
+            const uint32_t flags = (n.quantization & 15u) | (uint32_t(formats[in]) << 4) |
+                                   (uint32_t(formats[aux]) << 8) | (uint32_t(formats[i]) << 12);
+            const Parameters params{uint32_t(n.size.width()), uint32_t(n.size.height()), uint32_t(n.operation), flags,
+                                    n.parameters};
+            if (const VkPipeline pipeline = pipelineFor(n.operation); pipeline != bound) {
+                CmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+                bound = pipeline;
+            }
             CmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSets[pass],
                                   0, nullptr);
             CmdPushConstants(command, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
             uint32_t workWidth = params.width, workHeight = params.height;
             if (n.operation == GpuOp::BoxBlur) {
-                if (n.parameters[1] == 0)
-                    workWidth = (workWidth + 127) / 128;
-                else
-                    workHeight = (workHeight + 127) / 128;
+                const bool horizontal = n.parameters[GpuParam::BoxBlur::axis] == 0;
+                const uint32_t span = uint32_t(std::max(1.f, n.parameters[GpuParam::BoxBlur::span]));
+                (horizontal ? workWidth : workHeight) = ((horizontal ? workWidth : workHeight) + span - 1) / span;
             }
+            if ((workWidth + 7) / 8 > properties.limits.maxComputeWorkGroupCount[0] ||
+                (workHeight + 7) / 8 > properties.limits.maxComputeWorkGroupCount[1])
+                throw std::runtime_error("GPU dispatch limit exceeded");
             CmdDispatch(command, (workWidth + 7) / 8, (workHeight + 7) / 8, 1);
             barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
@@ -543,60 +971,137 @@ QImage Context::render(const GpuGraph &graph, int output, QImage::Format format,
         check(WaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "wait for graph");
         host.synchronize(false);
         for (size_t root = 0; root < sources.size(); ++root)
-            sourceKeys[root] = nodes[sources[root]].image.cacheKey();
-        QImage result(nodes[output].size, QImage::Format_RGBA32FPx4_Premultiplied);
-        if (result.isNull())
-            throw std::runtime_error("Could not allocate GPU readback");
-        for (int y = 0; y < result.height(); ++y)
-            std::memcpy(result.scanLine(y), mapped + offsets[output] + VkDeviceSize(y) * result.width() * 16,
-                        size_t(result.width()) * 16);
-        if (!sources.empty()) {
-            const auto &original = nodes[sources.front()].image;
-            result.setColorSpace(original.colorSpace());
-            result.setDotsPerMeterX(original.dotsPerMeterX());
-            result.setDotsPerMeterY(original.dotsPerMeterY());
-            for (const auto &key : original.textKeys())
-                result.setText(key, original.text(key));
-        }
-        result = result.convertToFormat(format);
-        if (result.isNull())
-            throw std::runtime_error("Could not convert GPU result");
+            sourceKeys[root] = nodes[sources[root]].key;
+        consume(mapped + offsets[output], formats[output]);
         report.accelerated = true;
         report.downloadedBytes = sizes[output];
         report.workingBytes = capacity * (shared ? 1 : 2);
         report.dispatches = passes.size();
-        return result;
+        report.milliseconds = timer.nsecsElapsed() / 1e6;
+        touch();
+        return true;
     } catch (const std::exception &e) {
         sourceKeys.assign(sourceKeys.size(), 0);
         report.reason = QString::fromUtf8(e.what());
-        return {};
+        report.milliseconds = timer.nsecsElapsed() / 1e6;
+        touch();
+        return false;
     }
 }
 #undef INSTANCE_FUNCTIONS
 #undef DEVICE_FUNCTIONS
-std::unique_ptr<Context> &contextStorage() {
-    static std::unique_ptr<Context> instance;
-    return instance;
-}
-Context &context() {
-    static const bool initialized = [] {
-        contextStorage() = std::make_unique<Context>();
-        // Drivers/validation layers can create lazy statics during rendering.
-        // Release the device before their exit handlers, after preview workers finish.
+
+// The context is created on first use and can be released (CPU mode) or replaced once
+// after a lost device; in-flight renders keep their own reference.
+std::mutex contextMutex;
+std::shared_ptr<Context> contextStorage;
+int deviceRecoveries = 0;
+std::shared_ptr<Context> context(bool create = true) {
+    std::lock_guard lock(contextMutex);
+    static const bool registered = [] {
+        // Drivers/validation layers can create lazy statics during rendering. Release the
+        // device before their exit handlers, after preview workers finish.
         qAddPostRoutine([] {
             QThreadPool::globalInstance()->waitForDone();
-            contextStorage().reset();
+            std::shared_ptr<Context> last;
+            {
+                std::lock_guard lock(contextMutex);
+                last = std::move(contextStorage);
+            }
         });
         return true;
     }();
-    Q_UNUSED(initialized)
-    return *contextStorage();
+    Q_UNUSED(registered)
+    if (!contextStorage && create)
+        contextStorage = std::make_shared<Context>();
+    return contextStorage;
+}
+void afterRender(const std::shared_ptr<Context> &used) {
+    if (!used->deviceLost())
+        return;
+    std::lock_guard lock(contextMutex);
+    if (contextStorage == used && deviceRecoveries < 1) {
+        ++deviceRecoveries; // Recover once; a second loss keeps the latched error.
+        contextStorage.reset();
+    }
+}
+void copyMetadata(QImage &result, const GpuGraph &graph) {
+    for (const auto &node : graph.nodes())
+        if (node.operation == GpuOp::Source && !node.channel) {
+            result.setColorSpace(node.image.colorSpace());
+            result.setDotsPerMeterX(node.image.dotsPerMeterX());
+            result.setDotsPerMeterY(node.image.dotsPerMeterY());
+            for (const auto &key : node.image.textKeys())
+                result.setText(key, node.image.text(key));
+            return;
+        }
 }
 } // namespace
 QImage executeVulkanGraph(const GpuGraph &graph, int output, QImage::Format format, GpuExecution &report) {
-    return context().render(graph, output, format, report);
+    const auto ctx = context();
+    const QSize size = graph.nodes()[output].size;
+    QImage result;
+    const bool ok = ctx->render(
+        graph, output, outputFormatFor(format),
+        [&](const unsigned char *data, GpuFormat storage) {
+            result = QImage(size, imageFormatFor(storage));
+            if (result.isNull())
+                throw std::runtime_error("Could not allocate GPU readback");
+            const size_t row = size_t(size.width()) * bytesPerPixel[unsigned(storage)];
+            for (int y = 0; y < size.height(); ++y)
+                std::memcpy(result.scanLine(y), data + VkDeviceSize(y) * row, row);
+        },
+        report);
+    afterRender(ctx);
+    if (!ok)
+        return {};
+    copyMetadata(result, graph);
+    if (result.format() != format)
+        result = result.convertToFormat(format);
+    if (result.isNull()) {
+        report.accelerated = false;
+        report.reason = QStringLiteral("Could not convert GPU result");
+    }
+    return result;
 }
-QString vulkanDeviceDescription() { return context().description(); }
+std::vector<float> executeVulkanChannel(const GpuGraph &graph, int output, GpuExecution &report) {
+    const auto ctx = context();
+    const QSize size = graph.nodes()[output].size;
+    std::vector<float> result;
+    const bool ok = ctx->render(
+        graph, output, GpuFormat::Red32,
+        [&](const unsigned char *data, GpuFormat) {
+            result.resize(size_t(size.width()) * size.height());
+            std::memcpy(result.data(), data, result.size() * sizeof(float));
+        },
+        report);
+    afterRender(ctx);
+    return ok ? result : std::vector<float>{};
+}
+QString vulkanDeviceDescription() {
+    const auto info = context()->info();
+    return info.available ? QStringLiteral("Vulkan: %1").arg(info.name) : info.error;
+}
+GpuDeviceInfo vulkanDeviceInfo(bool open) {
+    const auto ctx = context(open);
+    if (!ctx) {
+        GpuDeviceInfo info;
+        info.error = QStringLiteral("CPU rendering selected; the Vulkan device is closed");
+        return info;
+    }
+    return ctx->info();
+}
+void warmUpVulkan() { context()->warmUp(); }
+void trimVulkan() {
+    if (const auto ctx = context(false))
+        ctx->trim();
+}
+void releaseVulkan() {
+    std::shared_ptr<Context> old;
+    std::lock_guard lock(contextMutex);
+    old = std::move(contextStorage);
+    // `old` is destroyed after the lock is released, outside any render.
+}
 } // namespace compositor
 #else
 namespace compositor {
@@ -604,6 +1109,18 @@ QImage executeVulkanGraph(const GpuGraph &, int, QImage::Format, GpuExecution &r
     report.reason = QStringLiteral("This build has no Vulkan support");
     return {};
 }
+std::vector<float> executeVulkanChannel(const GpuGraph &, int, GpuExecution &report) {
+    report.reason = QStringLiteral("This build has no Vulkan support");
+    return {};
+}
 QString vulkanDeviceDescription() { return QStringLiteral("This build has no Vulkan support"); }
+GpuDeviceInfo vulkanDeviceInfo(bool) {
+    GpuDeviceInfo info;
+    info.error = QStringLiteral("This build has no Vulkan support");
+    return info;
+}
+void warmUpVulkan() {}
+void trimVulkan() {}
+void releaseVulkan() {}
 } // namespace compositor
 #endif

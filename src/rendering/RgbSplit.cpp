@@ -94,33 +94,52 @@ QImage RgbSplitSettings::applyCpu(const QImage &image, unsigned sides) const
     return result.convertToFormat(image.format());
 }
 
-QImage applyFilterLayer(const QImage &image, const QJsonObject &adjustment, const QPointF &origin, double unitsPerPixel)
+namespace {
+QPointF filterPoint(const QJsonObject &settings, const char *name, QPointF fallback, const QPointF &origin, double scale)
+{
+    const QJsonArray a = settings.value(QLatin1String(name)).toArray();
+    return a.size() == 2 ? (QPointF(a[0].toDouble(), a[1].toDouble()) - origin) / scale : fallback;
+}
+}
+ProgressiveBlurSettings progressiveFromJson(const QJsonObject &adjustment, QSize size, const QPointF &origin, double unitsPerPixel)
 {
     const auto settings = adjustment.value("filterLayerSettings").toObject();
-    const QString kind = adjustment.value("kind").toString();
     const double scale = std::max(.000001, unitsPerPixel);
-    const auto point = [&](const char *name, QPointF fallback) {
-        const QJsonArray a = settings.value(QLatin1String(name)).toArray();
-        return a.size() == 2 ? (QPointF(a[0].toDouble(), a[1].toDouble()) - origin) / scale : fallback;
-    };
-    if (kind == "Progressive Blur") {
-        ProgressiveBlurSettings s;
-        s.from = settings.value("progressiveFrom").toDouble() / scale;
-        s.to = settings.value("progressiveTo").toDouble(20) / scale;
-        s.start = point("progressiveStart", QPointF(image.width() / 2.0, image.height() * .35));
-        s.end = point("progressiveEnd", QPointF(image.width() / 2.0, image.height()));
-        s.radial = settings.value("progressiveRadial").toBool();
-        s.inverted = settings.value("progressiveInverted").toBool();
-        return s.apply(image);
-    }
-    if (kind == "Bloom / Glow") return RasterOperations::bloomGlow(image, settings.value("bloomAmount").toDouble(40), settings.value("bloomRadius").toDouble(24) / scale);
+    ProgressiveBlurSettings s;
+    s.from = settings.value("progressiveFrom").toDouble() / scale;
+    s.to = settings.value("progressiveTo").toDouble(20) / scale;
+    s.start = filterPoint(settings, "progressiveStart", QPointF(size.width() / 2.0, size.height() * .35), origin, scale);
+    s.end = filterPoint(settings, "progressiveEnd", QPointF(size.width() / 2.0, size.height()), origin, scale);
+    s.radial = settings.value("progressiveRadial").toBool();
+    s.inverted = settings.value("progressiveInverted").toBool();
+    return s;
+}
+RgbSplitSettings rgbSplitFromJson(const QJsonObject &adjustment, QSize size, const QPointF &origin, double unitsPerPixel)
+{
+    const auto settings = adjustment.value("filterLayerSettings").toObject();
+    const double scale = std::max(.000001, unitsPerPixel);
     RgbSplitSettings s;
     s.distance = settings.value("rgbSplitDistance").toDouble(10) / scale;
     s.blur = settings.value("rgbSplitBlur").toDouble() / scale;
     s.angle = settings.value("rgbSplitAngle").toDouble();
     s.radial = settings.value("rgbSplitRadial").toBool();
-    s.center = point("rgbSplitCenter", QPointF(image.width() / 2.0, image.height() / 2.0));
+    s.center = filterPoint(settings, "rgbSplitCenter", QPointF(size.width() / 2.0, size.height() / 2.0), origin, scale);
     s.reach = settings.value("rgbSplitReach").toDouble(1000) / scale;
-    return s.apply(image, 15);
+    return s;
+}
+BloomFilterSettings bloomFromJson(const QJsonObject &adjustment, double unitsPerPixel)
+{
+    const auto settings = adjustment.value("filterLayerSettings").toObject();
+    return {settings.value("bloomAmount").toDouble(40), settings.value("bloomRadius").toDouble(24) / std::max(.000001, unitsPerPixel)};
+}
+QImage applyFilterLayer(const QImage &image, const QJsonObject &adjustment, const QPointF &origin, double unitsPerPixel)
+{
+    const QString kind = adjustment.value("kind").toString();
+    if (kind == "Progressive Blur") return progressiveFromJson(adjustment, image.size(), origin, unitsPerPixel).apply(image);
+    if (kind == "Bloom / Glow") {
+        const auto bloom = bloomFromJson(adjustment, unitsPerPixel);
+        return RasterOperations::bloomGlow(image, bloom.amount, bloom.radius);
+    }
+    return rgbSplitFromJson(adjustment, image.size(), origin, unitsPerPixel).apply(image, 15);
 }
 }

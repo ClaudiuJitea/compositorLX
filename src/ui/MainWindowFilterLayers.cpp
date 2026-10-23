@@ -66,15 +66,22 @@ void MainWindow::filterLayerDialog(const QString &kind)
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog); layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     session_.beginEdit(live ? tr("Edit %1").arg(kind) : kind);
+    const auto rgbSplit = [&] {
+        RgbSplitSettings s; s.distance = settings.value("rgbSplitDistance").toDouble(); s.blur = settings.value("rgbSplitBlur").toDouble();
+        s.angle = settings.value("rgbSplitAngle").toDouble(); s.radial = settings.value("rgbSplitRadial").toBool(); s.reach = settings.value("rgbSplitReach").toDouble();
+        const auto p = settings.value("rgbSplitCenter").toArray(); s.center = QPointF(p[0].toDouble(), p[1].toDouble());
+        return s;
+    };
     const auto apply = [&] {
         if (live) { auto adjustment = original.adjustment; adjustment.insert("filterLayerSettings", settings); session_.previewAdjustment(id, adjustment); }
-        else if (kind == "RGB Split") {
-            RgbSplitSettings s; s.distance = settings.value("rgbSplitDistance").toDouble(); s.blur = settings.value("rgbSplitBlur").toDouble();
-            s.angle = settings.value("rgbSplitAngle").toDouble(); s.radial = settings.value("rgbSplitRadial").toBool(); s.reach = settings.value("rgbSplitReach").toDouble();
-            const auto p = settings.value("rgbSplitCenter").toArray(); s.center = QPointF(p[0].toDouble(), p[1].toDouble()); session_.applyRgbSplit(s);
-        }
+        else if (kind == "RGB Split") session_.applyRgbSplit(rgbSplit());
     };
-    const auto preview = [&] { session_.rollbackLayer(id, original); if (enabled->isChecked()) apply(); canvas_->invalidateDocument(); };
+    const auto preview = [&] {
+        if (!enabled->isChecked()) session_.rollbackLayer(id, original);
+        else if (!live && kind == "RGB Split") previewFilter(&dialog, id, original, [value = rgbSplit()](EditorSession &s) { return s.applyRgbSplit(value); });
+        else { session_.rollbackLayer(id, original); apply(); }
+        canvas_->invalidateDocument();
+    };
     connect(timer, &QTimer::timeout, &dialog, preview); connect(enabled, &QCheckBox::toggled, timer, qOverload<>(&QTimer::start));
     preview();
     const int result = runPortDialog(dialog);
