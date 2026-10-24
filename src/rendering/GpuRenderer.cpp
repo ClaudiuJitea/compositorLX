@@ -43,7 +43,9 @@ QString summary(const std::vector<GpuNode> &nodes, int output) {
     static const char *names[] = {"Source", "Copy", "Invert", "Exposure", "Lookup", "Cube", "BoxBlur", "Gaussian",
                                   "Mask", "Bloom", "MotionBlur", "ProgressiveMix", "Composite", "Transform",
                                   "GradientMap", "Morphology", "RgbSplit", "Mix", "HueSaturation", "BlackWhite",
-                                  "ColorBalance", "Clear", "MorphologyStep", "MorphologyCombine", "Bokeh"};
+                                  "ColorBalance", "Clear", "MorphologyStep", "MorphologyCombine", "Bokeh",
+                                  "LensPoint", "LensCombine", "LensSqueeze", "LensStretch", "LensStreakBack",
+                                  "LensResample", "LensPrism", "LensReduce"};
     static_assert(std::size(names) == gpuOperationCount);
     std::map<QString, int> counts;
     for (int i = 0; i <= output && i < int(nodes.size()); ++i)
@@ -196,6 +198,10 @@ int GpuGraph::channel(std::shared_ptr<const std::vector<float>> values, QSize si
     nodes_.push_back(node);
     return int(nodes_.size()) - 1;
 }
+void GpuGraph::transient(int source) {
+    if (source >= 0 && source < int(nodes_.size()) && nodes_[source].operation == GpuOp::Source)
+        nodes_[source].transient = true;
+}
 int GpuGraph::clear(QSize size) {
     if (size.isEmpty())
         return -1;
@@ -218,6 +224,19 @@ int GpuGraph::pass(GpuOp op, int input, int auxiliary, const GpuParameters &para
     node.quantization = quantization;
     nodes_.push_back(node);
     return int(nodes_.size()) - 1;
+}
+int GpuGraph::update(GpuOp op, int input, int auxiliary, const GpuParameters &parameters, QRect area) {
+    if (input < 0 || input >= int(nodes_.size()))
+        return -1;
+    area &= QRect(QPoint(), nodes_[input].size);
+    if (area.isEmpty())
+        return input;
+    const int node = pass(op, input, auxiliary, parameters);
+    if (node >= 0) {
+        nodes_[node].inPlace = true;
+        nodes_[node].region = area;
+    }
+    return node;
 }
 int GpuGraph::boxBlur(int input, int reach, int axis, unsigned quantization) {
     if (input < 0 || reach <= 0)
@@ -266,39 +285,40 @@ int GpuGraph::gaussian(int input, double radius, bool bytes) {
     return input;
 }
 int GpuGraph::morphology(int input, int radius, bool erode) {
+    for (int axis = 0; axis < 2; ++axis)
+        input = morphologyAxis(input, radius, axis, erode);
+    return input;
+}
+int GpuGraph::morphologyAxis(int input, int radius, int axis, bool erode) {
     if (input < 0 || radius <= 0)
         return input;
-    for (int axis = 0; axis < 2; ++axis) {
-        const QSize size = nodes_[input].size;
-        if (radius <= 6) {
-            GpuParameters p{};
-            p[GpuParam::Morphology::radius] = radius;
-            p[GpuParam::Morphology::axis] = axis;
-            p[GpuParam::Morphology::erode] = erode ? 1 : 0;
-            input = pass(GpuOp::Morphology, input, -1, p);
-            continue;
-        }
-        // Sparse table: each pass multiplies the run by up to 8 (fewer full-image passes); runs never exceed r + 1,
-        // so the combine's lookups stay inside the window even where the line clips it.
-        int run = 1;
-        while (run * 2 <= radius + 1) {
-            const int count = std::min(8, (radius + 1) / run);
-            GpuParameters p{};
-            p[GpuParam::MorphologyStep::step] = run;
-            p[GpuParam::MorphologyStep::axis] = axis;
-            p[GpuParam::MorphologyStep::erode] = erode ? 1 : 0;
-            p[GpuParam::MorphologyStep::count] = count;
-            input = pass(GpuOp::MorphologyStep, input, -1, p);
-            run *= count;
-        }
-        GpuParameters c{};
-        c[GpuParam::MorphologyCombine::radius] = radius;
-        c[GpuParam::MorphologyCombine::axis] = axis;
-        c[GpuParam::MorphologyCombine::erode] = erode ? 1 : 0;
-        c[GpuParam::MorphologyCombine::run] = run;
-        input = pass(GpuOp::MorphologyCombine, input, -1, c, 0, size);
+    const QSize size = nodes_[input].size;
+    if (radius <= 6) {
+        GpuParameters p{};
+        p[GpuParam::Morphology::radius] = radius;
+        p[GpuParam::Morphology::axis] = axis;
+        p[GpuParam::Morphology::erode] = erode ? 1 : 0;
+        return pass(GpuOp::Morphology, input, -1, p);
     }
-    return input;
+    // Sparse table: each pass multiplies the run by up to 8 (fewer full-image passes); runs never exceed r + 1,
+    // so the combine's lookups stay inside the window even where the line clips it.
+    int run = 1;
+    while (run * 2 <= radius + 1) {
+        const int count = std::min(8, (radius + 1) / run);
+        GpuParameters p{};
+        p[GpuParam::MorphologyStep::step] = run;
+        p[GpuParam::MorphologyStep::axis] = axis;
+        p[GpuParam::MorphologyStep::erode] = erode ? 1 : 0;
+        p[GpuParam::MorphologyStep::count] = count;
+        input = pass(GpuOp::MorphologyStep, input, -1, p);
+        run *= count;
+    }
+    GpuParameters c{};
+    c[GpuParam::MorphologyCombine::radius] = radius;
+    c[GpuParam::MorphologyCombine::axis] = axis;
+    c[GpuParam::MorphologyCombine::erode] = erode ? 1 : 0;
+    c[GpuParam::MorphologyCombine::run] = run;
+    return pass(GpuOp::MorphologyCombine, input, -1, c, 0, size);
 }
 QImage GpuGraph::execute(int output, QImage::Format format, RenderBackend requested, GpuExecution *report) const {
     GpuExecution r;

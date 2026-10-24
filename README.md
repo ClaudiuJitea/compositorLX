@@ -57,7 +57,8 @@ Synced with macOS Compositor 1.5.8.
   <img src="docs/screenshots/lens-effects-gallery.jpg" alt="The five Lens Effects next to the original photo: anamorphic flare, starburst, mist, prism and hexagonal bokeh" width="920">
 </p>
 
-- **Filter › Lens Effects**: anamorphic flare, starburst, mist, prism, and bokeh in round, hexagon, oval or cat's-eye shapes, all made from the picture's own light. Bokeh uses Vulkan compute when available.
+- **Filter › Lens Effects**: anamorphic flare, starburst, mist, prism, and bokeh in round, hexagon, oval or cat's-eye shapes, all made from the picture's own light. All five run on the GPU (Vulkan compute) when available, 2.2–5.7× faster than before on a 24-megapixel photo (Intel Iris Xe), with the CPU as fallback ([details](docs/LENS_EFFECTS_GPU.md)).
+- **Remove Background** no longer stays stuck on "Detecting foreground subjects…", and Select Subject and Object Selection apply their result again.
 - **GIFs play at their real speed**, on each frame's saved delay. The delay control shows the GIF's own milliseconds.
 - **RGB Split**'s blur smears both ways, so the image no longer shifts.
 - **Projects** in format version 27, written by builds of the macOS GIF branch, now open.
@@ -116,7 +117,7 @@ ctest --test-dir build
 
 ## Version history
 
-- **0.5.8**: macOS 1.5.8 sync. Lens Effects, GIF playback on saved delays, RGB Split smears both ways, format 27 opens.
+- **0.5.8**: macOS 1.5.8 sync. Lens Effects, GIF playback on saved delays, RGB Split smears both ways, format 27 opens. Refreshed: all Lens Effects on the GPU, and the Remove Background, Select Subject and Object Selection progress fix.
 - **0.5.6**: macOS 1.5.6 sync. GIF timeline redesign, Layers search and kind filter, Canvas Size keeps the zoom.
 - **0.5.5**: GIF layers and export, PDF import, RGB Split, Channel Pack, filter layers, styled lines, pen pressure, and the shared Vulkan renderer.
 - **0.5.3**: macOS 1.5.3 sync. 16-bit and HDR, CMYK, Export As, Progressive Blur, Scanlines, Last Filter, Search Commands.

@@ -24,7 +24,7 @@ OPERATIONS = [
     ('Lookup', []),
     ('Cube', ['grid', 'clipping']),
     ('BoxBlur', ['radius', 'axis', 'span']),
-    ('Gaussian', ['reach', 'axis']),
+    ('Gaussian', ['reach', 'axis', 'clear']),
     ('Mask', ['useAlpha', 'factor']),
     ('Bloom', ['amount', 'deep']),
     ('MotionBlur', ['horizontal', 'slope', 'reach']),
@@ -46,7 +46,35 @@ OPERATIONS = [
     ('MorphologyCombine', ['radius', 'axis', 'erode', 'run']),
     # Lens Effects' Bokeh (macOS MetalBokeh): every pixel gathers the light within the aperture's shape.
     ('Bokeh', ['radius', 'shape', 'ring']),
+    # The rest of Lens Effects (macOS LensEffects.swift), on one color channel at a time (Red32 planes).
+    # A point operation: to linear light, to gamma, a CIToneCurve spline (up to five points), the flare's power.
+    ('LensPoint', ['mode', 'inScale', 'outScale', 'count', 'x0', 'x1', 'x2', 'x3', 'x4', 'y0', 'y1', 'y2', 'y3', 'y4',
+                   'm0', 'm1', 'm2', 'm3', 'm4']),
+    # Two planes into one (sum, brighter, difference), the auxiliary read at an offset into a wider plane.
+    ('LensCombine', ['mode', 'a', 'b', 'offsetX', 'offsetY', 'auxWidth']),
+    # A streak's squeeze along the rows (each pixel averages the source pixels it covers) and stretch back. The
+    # squeeze first draws each light out along the row (the maximum within `radius`), read from a MorphologyStep
+    # table of runs of `run` pixels.
+    ('LensSqueeze', ['squeeze', 'pad', 'sourceWidth', 'radius', 'run']),
+    ('LensStretch', ['squeeze', 'pad', 'smallWidth', 'gain', 'accumulate']),
+    # Starburst's rays turned back onto the frame in one pass: four squeezed ray planes side by side (at `offset0`
+    # … `offset3`, the last ending at packedWidth), each stretched by its squeeze and added times its gain.
+    ('LensStreakBack', ['ux', 'uy', 'vx', 'vy', 'cx', 'cy', 'umin', 'vmin', 'turnedWidth', 'turnedHeight', 'pad',
+                        'packedWidth', 'squeeze0', 'squeeze1', 'squeeze2', 'squeeze3', 'gain0', 'gain1', 'gain2',
+                        'gain3', 'offset0', 'offset1', 'offset2', 'offset3']),
+    # Bilinear resampling through an affine map, clear outside the source or (clamp) its edges carried on; `channel`
+    # picks which of an RGBA source's channels.
+    ('LensResample', ['m11', 'm12', 'dx', 'm21', 'm22', 'dy', 'sourceWidth', 'sourceHeight', 'clamp', 'channel']),
+    # Prism's copy of the picture, shifted one way or both.
+    ('LensPrism', ['dx', 'dy', 'along0', 'along1', 'ways', 'margin', 'left', 'top', 'right', 'bottom', 'sourceWidth',
+                   'sourceHeight']),
+    # A wide blur's smaller copy: each pixel the average of a factor × factor block (clear outside, or only the
+    # pixels inside counted).
+    ('LensReduce', ['factor', 'sourceWidth', 'sourceHeight', 'clear']),
 ]
+# Lens operations can update their input in place over a region (GpuGraph::update); the region (x, y, width, height)
+# is passed in the last four parameter slots, which those operations leave free.
+REGION_SLOTS = (24, 25, 26, 27)
 # Must match compositor::BlendMode (core/Document.h); GpuContract.cpp static_asserts each value.
 BLEND_MODES = ['Normal', 'Darken', 'Multiply', 'ColorBurn', 'LinearBurn', 'Lighten', 'Screen', 'ColorDodge',
                'LinearDodge', 'Overlay', 'SoftLight', 'HardLight', 'VividLight', 'LinearLight', 'PinLight', 'HardMix',
@@ -79,13 +107,16 @@ def contract_cpp():
     lines += ['};', '', '// Intermediate rounding that emulates the CPU pipeline (and selects compact storage).',
               'enum class GpuQuantization : unsigned {']
     lines += [f'    {name} = {i},' for i, name in enumerate(QUANTIZATION)]
-    lines += ['};', f'inline constexpr int gpuParameterSlots = {PARAMETER_SLOTS};', '',
+    lines += ['};', f'inline constexpr int gpuParameterSlots = {PARAMETER_SLOTS};',
+              '// Where a region pass (GpuGraph::update) passes its rectangle.',
+              f'inline constexpr int gpuRegionX = {REGION_SLOTS[0]}, gpuRegionY = {REGION_SLOTS[1]}, '
+              f'gpuRegionWidth = {REGION_SLOTS[2]}, gpuRegionHeight = {REGION_SLOTS[3]};', '',
               '// Blend IDs used by GpuOp::Composite (parameter "mode").', 'namespace GpuBlend {']
     lines += [f'inline constexpr int {name} = {i};' for i, name in enumerate(BLEND_MODES)]
     lines += ['} // namespace GpuBlend', '', '// Named parameter slots per operation.', 'namespace GpuParam {']
     for name, params in OPERATIONS:
         if params:
-            assert len(params) <= PARAMETER_SLOTS
+            assert len(params) <= (REGION_SLOTS[0] if name.startswith('Lens') else PARAMETER_SLOTS)
             body = ' '.join(f'{p} = {i},' for i, p in enumerate(params))
             lines.append(f'struct {name} {{ enum : int {{ {body} }}; }};')
     lines += ['} // namespace GpuParam', '} // namespace compositor', '']
@@ -99,6 +130,8 @@ def contract_glsl():
     lines += [f'const uint QUANTIZE_{snake(name)} = {i}u;' for i, name in enumerate(QUANTIZATION)]
     lines += [f'const int BLEND_{snake(name)} = {i};' for i, name in enumerate(BLEND_MODES)]
     lines.append(f'#define PARAMETER_SLOTS {PARAMETER_SLOTS}')
+    for name, slot in zip(['X', 'Y', 'WIDTH', 'HEIGHT'], REGION_SLOTS):
+        lines.append(f'const int REGION_{name} = {slot};')
     for name, params in OPERATIONS:
         lines += [f'const int {snake(name)}_{snake(p)} = {i};' for i, p in enumerate(params)]
     return '\n'.join(lines) + '\n'

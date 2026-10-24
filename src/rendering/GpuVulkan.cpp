@@ -199,6 +199,9 @@ GpuFormat passFormat(const GpuNode &node, GpuFormat input) {
     case GpuQuantization::Half:
         return GpuFormat::Half;
     default:
+        // The Lens operations make one channel whatever they read (LensResample can pick it out of an RGBA source).
+        if (node.operation >= GpuOp::LensPoint)
+            return GpuFormat::Red32;
         return input == GpuFormat::Red32 && singleChannelOperation(node.operation) ? GpuFormat::Red32
                                                                                    : GpuFormat::Float32;
     }
@@ -376,7 +379,7 @@ class Context {
     VkPipelineCache pipelineCache = VK_NULL_HANDLE;
     std::array<VkPipeline, gpuOperationCount> pipelines{};
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-    std::array<VkDescriptorSet, 512> descriptorSets{};
+    std::array<VkDescriptorSet, 2048> descriptorSets{};
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
@@ -647,7 +650,7 @@ void Context::initialize() {
     check(CreateDescriptorPool(device, &dp, nullptr, &descriptorPool), "create descriptor pool");
     VkDescriptorSetAllocateInfo set{};
     set.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    std::array<VkDescriptorSetLayout, 512> layouts;
+    std::array<VkDescriptorSetLayout, 2048> layouts;
     layouts.fill(descriptorLayout);
     set.descriptorPool = descriptorPool;
     set.descriptorSetCount = layouts.size();
@@ -754,7 +757,7 @@ bool Context::render(const GpuGraph &graph, int output, GpuFormat outputFormat, 
     std::vector<VkDeviceSize> sizes(count);
     std::vector<int> sources, passes;
     try {
-        if (count > 2048)
+        if (count > 4096)
             throw std::runtime_error("GPU graph exceeds the node limit");
         used[output] = true;
         last[output] = count;
@@ -786,6 +789,11 @@ bool Context::render(const GpuGraph &graph, int output, GpuFormat outputFormat, 
             } else {
                 formats[i] = i == output ? outputFormat
                                          : passFormat(n, n.input >= 0 ? formats[n.input] : GpuFormat::Float32);
+                // An update writes into its input, so the input must be a pass of its kind that nothing else reads.
+                if (n.inPlace && (n.input < 0 || nodes[n.input].operation == GpuOp::Source || last[n.input] != i ||
+                                  nodes[n.input].size != n.size || formats[n.input] != formats[i] ||
+                                  n.operation < GpuOp::LensPoint))
+                    throw std::runtime_error("Invalid in-place GPU pass");
                 passes.push_back(i);
             }
             sizes[i] = storageBytes(formats[i], n.size);
@@ -815,30 +823,64 @@ bool Context::render(const GpuGraph &graph, int output, GpuFormat outputFormat, 
         };
         std::vector<VkDeviceSize> offsets(count);
         VkDeviceSize total = 0;
-        for (int i : sources) {
-            offsets[i] = total;
-            total += align(sizes[i]);
-        }
-        // Reuse intermediate allocations once their final consumer has completed.
+        // Reuse allocations once their final consumer has completed, and transient sources' too (uploaded again next
+        // time; the others stay resident for the next graph). The slots tile the buffer in offset order: neighbors
+        // that are both free merge, a free slot larger than a pass needs is split, and a free slot at the end grows, so
+        // small passes never strand a large one.
         struct Slot {
             VkDeviceSize offset, size;
             int until;
         };
         std::vector<Slot> allocations;
+        for (int i : sources) {
+            offsets[i] = total;
+            allocations.push_back({total, align(sizes[i]), nodes[i].transient ? last[i] : count});
+            total += align(sizes[i]);
+        }
         for (int i : passes) {
+            if (nodes[i].inPlace) {
+                offsets[i] = offsets[nodes[i].input];
+                for (auto &slot : allocations)
+                    if (slot.offset == offsets[i])
+                        slot.until = last[i];
+                continue;
+            }
+            for (size_t slot = 0; slot + 1 < allocations.size();)
+                if (allocations[slot].until < i && allocations[slot + 1].until < i) {
+                    allocations[slot].size += allocations[slot + 1].size;
+                    allocations.erase(allocations.begin() + std::ptrdiff_t(slot) + 1);
+                } else
+                    ++slot;
+            const VkDeviceSize needed = align(sizes[i]);
             auto free = allocations.end();
             for (auto slot = allocations.begin(); slot != allocations.end(); ++slot)
-                if (slot->until < i && slot->size >= sizes[i] && (free == allocations.end() || slot->size < free->size))
+                if (slot->until < i && slot->size >= needed && (free == allocations.end() || slot->size < free->size))
                     free = slot;
+            if (free == allocations.end() && !allocations.empty() && allocations.back().until < i) {
+                // The free slot at the end grows to fit.
+                total += needed - allocations.back().size;
+                allocations.back().size = needed;
+                free = allocations.end() - 1;
+            }
             if (free != allocations.end()) {
+                if (free->size > needed) {
+                    const Slot rest{free->offset + needed, free->size - needed, -1};
+                    free->size = needed;
+                    free = allocations.insert(free + 1, rest) - 1;
+                }
                 offsets[i] = free->offset;
                 free->until = last[i];
             } else {
                 offsets[i] = total;
-                allocations.push_back({total, align(sizes[i]), last[i]});
-                total += align(sizes[i]);
+                allocations.push_back({total, needed, last[i]});
+                total += needed;
             }
         }
+        std::vector<bool> overwritten(sources.size(), false);
+        for (size_t root = 0; root < sources.size(); ++root)
+            for (int i : passes)
+                if (offsets[i] < offsets[sources[root]] + sizes[sources[root]] && offsets[sources[root]] < offsets[i] + sizes[i])
+                    overwritten[root] = true;
         const VkDeviceSize budget = GpuRenderer::memoryBudgetBytes();
         const bool forceStaging = qEnvironmentVariableIsSet("COMPOSITOR_GPU_FORCE_STAGING");
         if (total > budget)
@@ -930,8 +972,14 @@ bool Context::render(const GpuGraph &graph, int output, GpuFormat outputFormat, 
             const int in = n.input < 0 ? i : n.input, aux = n.auxiliary < 0 ? in : n.auxiliary;
             const uint32_t flags = (n.quantization & 15u) | (uint32_t(formats[in]) << 4) |
                                    (uint32_t(formats[aux]) << 8) | (uint32_t(formats[i]) << 12);
-            const Parameters params{uint32_t(n.size.width()), uint32_t(n.size.height()), uint32_t(n.operation), flags,
-                                    n.parameters};
+            Parameters params{uint32_t(n.size.width()), uint32_t(n.size.height()), uint32_t(n.operation), flags,
+                              n.parameters};
+            if (!n.region.isEmpty()) {
+                params.values[gpuRegionX] = float(n.region.x());
+                params.values[gpuRegionY] = float(n.region.y());
+                params.values[gpuRegionWidth] = float(n.region.width());
+                params.values[gpuRegionHeight] = float(n.region.height());
+            }
             if (const VkPipeline pipeline = pipelineFor(n.operation); pipeline != bound) {
                 CmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
                 bound = pipeline;
@@ -940,6 +988,10 @@ bool Context::render(const GpuGraph &graph, int output, GpuFormat outputFormat, 
                                   0, nullptr);
             CmdPushConstants(command, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(params), &params);
             uint32_t workWidth = params.width, workHeight = params.height;
+            if (!n.region.isEmpty()) {
+                workWidth = uint32_t(n.region.width());
+                workHeight = uint32_t(n.region.height());
+            }
             if (n.operation == GpuOp::BoxBlur) {
                 const bool horizontal = n.parameters[GpuParam::BoxBlur::axis] == 0;
                 const uint32_t span = uint32_t(std::max(1.f, n.parameters[GpuParam::BoxBlur::span]));
@@ -971,7 +1023,7 @@ bool Context::render(const GpuGraph &graph, int output, GpuFormat outputFormat, 
         check(WaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "wait for graph");
         host.synchronize(false);
         for (size_t root = 0; root < sources.size(); ++root)
-            sourceKeys[root] = nodes[sources[root]].key;
+            sourceKeys[root] = overwritten[root] ? 0 : nodes[sources[root]].key;
         consume(mapped + offsets[output], formats[output]);
         report.accelerated = true;
         report.downloadedBytes = sizes[output];
@@ -1071,8 +1123,8 @@ std::vector<float> executeVulkanChannel(const GpuGraph &graph, int output, GpuEx
     const bool ok = ctx->render(
         graph, output, GpuFormat::Red32,
         [&](const unsigned char *data, GpuFormat) {
-            result.resize(size_t(size.width()) * size.height());
-            std::memcpy(result.data(), data, result.size() * sizeof(float));
+            const auto *values = reinterpret_cast<const float *>(data);
+            result.assign(values, values + size_t(size.width()) * size.height());
         },
         report);
     afterRender(ctx);

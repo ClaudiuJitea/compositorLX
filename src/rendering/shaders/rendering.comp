@@ -245,10 +245,172 @@ float aperture(vec2 o, int shape, vec2 outward) {
     if (shape == 3) return max(length(o), length(o + outward * 1.25));
     return length(o);
 }
+// ---- Lens Effects (single-channel planes: the value is in .r) ------------------------------
+// The planes these read can differ in size from the output, so each one bounds its own reads.
+float lensLinear(float c) {
+    float a = abs(c), l = a <= .04045 ? a / 12.92 : pow((a + .055) / 1.055, 2.4);
+    return c < 0 ? -l : l;
+}
+float lensGamma(float l) {
+    float a = abs(l), c = a <= .0031308 ? a * 12.92 : 1.055 * pow(a, 1 / 2.4) - .055;
+    return l < 0 ? -c : c;
+}
+// CIToneCurve's natural cubic spline (the points and second derivatives worked out on the host), on square roots of
+// the values and squared back.
+float lensSpline(float x) {
+    int n = int(p.v[LENS_POINT_COUNT]);
+    x = clamp(x, 0, 1);
+    if (x <= p.v[LENS_POINT_X0]) return clamp(p.v[LENS_POINT_Y0], 0, 1);
+    if (x >= p.v[LENS_POINT_X0 + n - 1]) return clamp(p.v[LENS_POINT_Y0 + n - 1], 0, 1);
+    int i = 0;
+    while (i + 2 < n && x > p.v[LENS_POINT_X0 + i + 1]) ++i;
+    float x0 = p.v[LENS_POINT_X0 + i], x1 = p.v[LENS_POINT_X0 + i + 1], h = x1 - x0, a = (x1 - x) / h, b = (x - x0) / h;
+    float y = a * p.v[LENS_POINT_Y0 + i] + b * p.v[LENS_POINT_Y0 + i + 1] +
+              ((a * a * a - a) * p.v[LENS_POINT_M0 + i] + (b * b * b - b) * p.v[LENS_POINT_M0 + i + 1]) * h * h / 6;
+    return clamp(y, 0, 1);
+}
+float lensCurve(float x) {
+    if (isnan(x) || isinf(x)) x = 0;
+    float y = lensSpline(sqrt(clamp(x, 0, 1)));
+    return y * y;
+}
+// A plane's value at x, y in pixel coordinates (centers at .5), bilinear, clear outside. `lensChannel` picks the
+// channel of an RGBA source (LensResample's).
+int lensChannel = 0;
+float lensTap(ivec2 q, ivec2 size) {
+    return all(greaterThanEqual(q, ivec2(0))) && q.x < size.x && q.y < size.y ? loadSource(uint(q.y * size.x + q.x))[lensChannel] : 0;
+}
+float lensSample(vec2 at, ivec2 size) {
+    at -= .5;
+    ivec2 a = ivec2(floor(at));
+    vec2 f = at - vec2(a);
+    return mix(mix(lensTap(a, size), lensTap(a + ivec2(1, 0), size), f.x),
+               mix(lensTap(a + ivec2(0, 1), size), lensTap(a + ivec2(1, 1), size), f.x), f.y);
+}
+// The same with the edge pixels carried on outward.
+float lensEdgeTap(ivec2 q, ivec2 size) {
+    q = clamp(q, ivec2(0), size - 1);
+    return loadSource(uint(q.y * size.x + q.x))[lensChannel];
+}
+float lensSampleClamped(vec2 at, ivec2 size) {
+    at -= .5;
+    ivec2 a = ivec2(floor(at));
+    vec2 f = at - vec2(a);
+    return mix(mix(lensEdgeTap(a, size), lensEdgeTap(a + ivec2(1, 0), size), f.x),
+               mix(lensEdgeTap(a + ivec2(0, 1), size), lensEdgeTap(a + ivec2(1, 1), size), f.x), f.y);
+}
+// Starburst: the turned frame's rays at column i of row j, each of the four stretched back out of its squeezed rows.
+float lensRay(int i, int j) {
+    if (i < 0 || i >= int(p.v[LENS_STREAK_BACK_TURNED_WIDTH]) || j < 0 || j >= int(p.v[LENS_STREAK_BACK_TURNED_HEIGHT]))
+        return 0;
+    float ray = 0, pad = p.v[LENS_STREAK_BACK_PAD];
+    uint row = uint(j) * uint(p.v[LENS_STREAK_BACK_PACKED_WIDTH]);
+    for (int f = 0; f < 4; ++f) {
+        float gain = p.v[LENS_STREAK_BACK_GAIN0 + f];
+        if (gain == 0) continue;
+        int offset = int(p.v[LENS_STREAK_BACK_OFFSET0 + f]);
+        int width = int(f == 3 ? p.v[LENS_STREAK_BACK_PACKED_WIDTH] : p.v[LENS_STREAK_BACK_OFFSET0 + f + 1]) - offset;
+        float at = (i + .5) / p.v[LENS_STREAK_BACK_SQUEEZE0 + f] - .5 + pad;
+        int k = int(floor(at));
+        float w = at - k;
+        float v0 = k >= 0 && k < width ? loadAux(row + uint(offset + k)).r : 0;
+        float v1 = k + 1 >= 0 && k + 1 < width ? loadAux(row + uint(offset + k + 1)).r : 0;
+        ray += gain * (v0 * (1 - w) + v1 * w);
+    }
+    return ray;
+}
+void lens(ivec2 xy, uint operation) {
+    // A region pass covers only its rectangle (the workgroups round it up).
+    if (p.v[REGION_WIDTH] > 0 && (xy.x >= int(p.v[REGION_WIDTH]) || xy.y >= int(p.v[REGION_HEIGHT]))) return;
+    xy += ivec2(p.v[REGION_X], p.v[REGION_Y]);
+    if (xy.x >= p.width || xy.y >= p.height) return;
+    uint index = uint(xy.y) * p.width + uint(xy.x);
+    float o = 0;
+    if (operation == OP_LENS_POINT) {
+        float a = loadSource(index).r;
+        int mode = int(p.v[LENS_POINT_MODE]);
+        if (mode == 0) o = lensLinear(a);
+        else if (mode == 1) o = lensGamma(a);
+        else if (mode == 2) o = lensCurve(a * p.v[LENS_POINT_IN_SCALE]) * p.v[LENS_POINT_OUT_SCALE];
+        else if (mode == 3) o = 1.6 * a * (a + .12);
+        else if (mode == 4) o = lensLinear(a) * loadAux(index).r;
+        else o = lensGamma(lensLinear(a) + loadAux(index).r);
+    } else if (operation == OP_LENS_COMBINE) {
+        float a = loadSource(index).r * p.v[LENS_COMBINE_A];
+        int width = p.v[LENS_COMBINE_AUX_WIDTH] > 0 ? int(p.v[LENS_COMBINE_AUX_WIDTH]) : int(p.width);
+        ivec2 q = xy + ivec2(p.v[LENS_COMBINE_OFFSET_X], p.v[LENS_COMBINE_OFFSET_Y]);
+        float b = loadAux(uint(q.y * width + q.x)).r * p.v[LENS_COMBINE_B];
+        int mode = int(p.v[LENS_COMBINE_MODE]);
+        o = mode == 0 ? a + b : mode == 1 ? max(a, b) : max(0, a - b);
+    } else if (operation == OP_LENS_SQUEEZE) {
+        float squeeze = p.v[LENS_SQUEEZE_SQUEEZE];
+        int pad = int(p.v[LENS_SQUEEZE_PAD]), width = int(p.v[LENS_SQUEEZE_SOURCE_WIDTH]), k = xy.x - pad;
+        int radius = int(p.v[LENS_SQUEEZE_RADIUS]), run = max(1, int(p.v[LENS_SQUEEZE_RUN]));
+        if (k >= 0 && k < int(p.width) - 2 * pad) {
+            float from = k * squeeze, to = min(float(width), (k + 1) * squeeze), sum = 0;
+            uint row = uint(xy.y) * uint(width);
+            for (int x = int(floor(from)); x < int(ceil(to)) && x < width; ++x) {
+                // MorphologyCombine's window: runs inside [x − r, x + r], clipped to the row, cover it exactly.
+                int first = max(0, x - radius), last = min(width - 1, x + radius);
+                float value = loadSource(row + uint(last - run + 1)).r;
+                for (int start = first; start <= last - run; start += run) value = max(value, loadSource(row + uint(start)).r);
+                sum += value * (min(to, x + 1.0) - max(from, float(x)));
+            }
+            o = sum / squeeze;
+        }
+    } else if (operation == OP_LENS_STRETCH) {
+        // Accumulating, the input is the sum (so it can be updated in place) and the squeezed rows are the auxiliary.
+        bool accumulate = p.v[LENS_STRETCH_ACCUMULATE] != 0;
+        float at = (xy.x + .5) / p.v[LENS_STRETCH_SQUEEZE] - .5 + p.v[LENS_STRETCH_PAD];
+        int k = int(floor(at)), width = int(p.v[LENS_STRETCH_SMALL_WIDTH]);
+        float f = at - k;
+        uint row = uint(xy.y) * uint(width);
+        float v0 = k >= 0 && k < width ? (accumulate ? loadAux(row + uint(k)) : loadSource(row + uint(k))).r : 0;
+        float v1 = k + 1 >= 0 && k + 1 < width ? (accumulate ? loadAux(row + uint(k + 1)) : loadSource(row + uint(k + 1))).r : 0;
+        o = (accumulate ? loadSource(index).r : 0) + p.v[LENS_STRETCH_GAIN] * (v0 * (1 - f) + v1 * f);
+    } else if (operation == OP_LENS_STREAK_BACK) {
+        vec2 at = vec2(xy) + .5 - vec2(p.v[LENS_STREAK_BACK_CX], p.v[LENS_STREAK_BACK_CY]);
+        vec2 q = vec2(at.x * p.v[LENS_STREAK_BACK_UX] + at.y * p.v[LENS_STREAK_BACK_UY] - p.v[LENS_STREAK_BACK_UMIN],
+                      at.x * p.v[LENS_STREAK_BACK_VX] + at.y * p.v[LENS_STREAK_BACK_VY] - p.v[LENS_STREAK_BACK_VMIN]) - .5;
+        ivec2 a = ivec2(floor(q));
+        vec2 f = q - vec2(a);
+        float ray = mix(mix(lensRay(a.x, a.y), lensRay(a.x + 1, a.y), f.x),
+                        mix(lensRay(a.x, a.y + 1), lensRay(a.x + 1, a.y + 1), f.x), f.y);
+        o = loadSource(index).r + ray;
+    } else if (operation == OP_LENS_RESAMPLE) {
+        vec2 at = vec2(xy) + .5;
+        vec2 q = vec2(p.v[LENS_RESAMPLE_M11] * at.x + p.v[LENS_RESAMPLE_M12] * at.y + p.v[LENS_RESAMPLE_DX],
+                      p.v[LENS_RESAMPLE_M21] * at.x + p.v[LENS_RESAMPLE_M22] * at.y + p.v[LENS_RESAMPLE_DY]);
+        ivec2 size = ivec2(p.v[LENS_RESAMPLE_SOURCE_WIDTH], p.v[LENS_RESAMPLE_SOURCE_HEIGHT]);
+        lensChannel = int(p.v[LENS_RESAMPLE_CHANNEL]);
+        o = p.v[LENS_RESAMPLE_CLAMP] != 0 ? lensSampleClamped(q, size) : lensSample(q, size);
+    } else if (operation == OP_LENS_PRISM) {
+        float margin = p.v[LENS_PRISM_MARGIN];
+        vec2 at = vec2(xy) - margin + .5;
+        // Unblurred, a copy is clear past its edge; blurred, its edge carries on (clampedToExtent).
+        if (margin > 0)
+            at = clamp(at, vec2(p.v[LENS_PRISM_LEFT], p.v[LENS_PRISM_TOP]) + .5,
+                       vec2(p.v[LENS_PRISM_RIGHT], p.v[LENS_PRISM_BOTTOM]) - .5);
+        vec2 direction = vec2(p.v[LENS_PRISM_DX], p.v[LENS_PRISM_DY]);
+        ivec2 size = ivec2(p.v[LENS_PRISM_SOURCE_WIDTH], p.v[LENS_PRISM_SOURCE_HEIGHT]);
+        for (int way = 0; way < int(p.v[LENS_PRISM_WAYS]); ++way)
+            o = max(o, lensSample(at - direction * p.v[way == 0 ? LENS_PRISM_ALONG0 : LENS_PRISM_ALONG1], size));
+    } else if (operation == OP_LENS_REDUCE) {
+        int factor = int(p.v[LENS_REDUCE_FACTOR]);
+        ivec2 size = ivec2(p.v[LENS_REDUCE_SOURCE_WIDTH], p.v[LENS_REDUCE_SOURCE_HEIGHT]);
+        ivec2 start = xy * factor, end = min(start + factor, size);
+        for (int y = start.y; y < end.y; ++y)
+            for (int x = start.x; x < end.x; ++x) o += loadSource(uint(y * size.x + x)).r;
+        o /= p.v[LENS_REDUCE_CLEAR] != 0 ? float(factor * factor) : float((end.x - start.x) * (end.y - start.y));
+    }
+    store(index, vec4(o, 0, 0, 1));
+}
+
 void main() {
     ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
     uint operation = op();
     if (operation == OP_BOX_BLUR) { boxBlur(xy); return; }
+    if (operation >= OP_LENS_POINT) { lens(xy, operation); return; }
     if (xy.x >= p.width || xy.y >= p.height) return;
     uint index = uint(xy.y) * p.width + uint(xy.x);
     vec4 a = (operation == OP_TRANSFORM || operation == OP_CLEAR) ? vec4(0) : loadSource(index);
@@ -283,8 +445,14 @@ void main() {
     } else if (operation == OP_GAUSSIAN) {
         int reach = int(p.v[GAUSSIAN_REACH]);
         ivec2 axis = p.v[GAUSSIAN_AXIS] == 0 ? ivec2(1, 0) : ivec2(0, 1);
+        // `clear`: the outside is empty rather than the edge pixels carried on.
+        bool clear = p.v[GAUSSIAN_CLEAR] != 0;
         o = vec4(0);
-        for (int i = -reach; i <= reach; ++i) o += fetch(xy + axis * i) * loadAux(uint(i + reach)).r;
+        for (int i = -reach; i <= reach; ++i) {
+            ivec2 q = xy + axis * i;
+            if (clear && (any(lessThan(q, ivec2(0))) || q.x >= p.width || q.y >= p.height)) continue;
+            o += fetch(q) * loadAux(uint(i + reach)).r;
+        }
     } else if (operation == OP_MORPHOLOGY) {
         // Direct min/max for small radii; erosion treats samples beyond the edge as empty.
         int radius = int(p.v[MORPHOLOGY_RADIUS]);

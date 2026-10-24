@@ -76,7 +76,7 @@ Reference: local Compositor `c9c7531` ("Publish update feed for Compositor 1.5.8
 
 ## Linux differences
 
-- **Lens Effects on the CPU.** Lens Effects runs on the CPU with OpenMP, except Bokeh's disc gather, which is a Vulkan compute op (`GpuOp::Bokeh`) with the same loop as its CPU fallback. Core Image runs the whole chain on the GPU in half floats, while LX works in 32-bit floats, so results can differ by a level or so. `CILanczosScaleTransform`'s squeeze is an area average here.
+- **Lens Effects on the GPU.** In the first 0.5.8 assets, Lens Effects ran on the CPU with OpenMP, except Bokeh's disc gather (`GpuOp::Bokeh`). In the refreshed assets, all five effects run as Vulkan compute, with the CPU as reference and fallback; see [LENS_EFFECTS_GPU.md](LENS_EFFECTS_GPU.md). Core Image runs the whole chain on the GPU in half floats, while LX works in 32-bit floats, so results can differ by a level or so. `CILanczosScaleTransform`'s squeeze is an area average here.
 - **Previews.** Like every LX filter panel, Lens Effects previews at the layer's full size; large layers render off the GUI thread. On a 3840 × 2160 or 4000 × 3000 layer (12 threads), a result takes about 1.2–3.5 s, or about 5.4 s for Starburst at 14 points or Bokeh at its smallest size with no GPU. macOS works out its preview from a smaller copy on the GPU.
 - **Mac-only.** The appcast and Sparkle build numbers are macOS-only.
 - **Pre-existing gap.** Export As › GIF has no animated preview in LX, so the macOS `GIFPreviewPlayback` use there has no counterpart. The scheduler is in `core/GifPlayback.h`, ready for it.

@@ -170,6 +170,13 @@ add_test(NAME rgb_split_gpu_tests COMMAND rgb_split_gpu_tests)
 add_test(NAME rgb_split_no_driver_tests COMMAND rgb_split_gpu_tests --fallback)
 set_tests_properties(rgb_split_no_driver_tests PROPERTIES ENVIRONMENT
     "VK_DRIVER_FILES=/nonexistent/compositor-vulkan-icd.json;VK_ICD_FILENAMES=/nonexistent/compositor-vulkan-icd.json")
+
+add_executable(lens_effects_gpu_tests TestLensEffectsGpu.cpp)
+target_link_libraries(lens_effects_gpu_tests PRIVATE compositor_core Qt6::Test)
+add_test(NAME lens_effects_gpu_tests COMMAND lens_effects_gpu_tests)
+add_test(NAME lens_effects_no_driver_tests COMMAND lens_effects_gpu_tests --fallback)
+set_tests_properties(lens_effects_no_driver_tests PROPERTIES ENVIRONMENT
+    "VK_DRIVER_FILES=/nonexistent/compositor-vulkan-icd.json;VK_ICD_FILENAMES=/nonexistent/compositor-vulkan-icd.json")
 find_package(Python3 QUIET COMPONENTS Interpreter)
 
 add_executable(gpu_renderer_tests TestGpuRenderer.cpp)
@@ -192,3 +199,6 @@ add_test(NAME gpu_document_tests COMMAND gpu_document_tests)
 add_executable(gpu_ui_tests TestGpuUi.cpp)
 target_link_libraries(gpu_ui_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME gpu_ui_tests COMMAND gpu_ui_tests -platform offscreen)
+
+add_executable(lens_benchmark ../tools/LensBenchmark.cpp)
+target_link_libraries(lens_benchmark PRIVATE compositor_core)

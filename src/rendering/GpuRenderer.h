@@ -31,18 +31,30 @@ struct GpuNode {
     int input = -1, auxiliary = -1;
     unsigned quantization = 0; // GpuQuantization; also selects compact storage for the result.
     GpuParameters parameters{};
+    // GpuGraph::update: the pass writes into its input's storage, over `region` only.
+    bool inPlace = false;
+    // A source used only by this graph: once read, its memory may hold later passes (it is uploaded again next time).
+    bool transient = false;
+    QRect region;
 };
 class GpuGraph {
   public:
     int source(const QImage &image);
     int channel(std::shared_ptr<const std::vector<float>> values, QSize size);
+    // Marks a source as used only by this graph (GpuNode::transient), so its memory is not held for the next one.
+    void transient(int source);
     int clear(QSize size);
     int pass(GpuOp op, int input, int auxiliary = -1, const GpuParameters &parameters = {}, unsigned quantization = 0,
              QSize size = {});
+    // A Lens pass that updates `input` in place over `area` only, the rest left as it is. `input` must be a pass of
+    // the same size that nothing after this reads.
+    int update(GpuOp op, int input, int auxiliary, const GpuParameters &parameters, QRect area);
     int boxBlur(int input, int reach, int axis, unsigned quantization = 0);
     int gaussian(int input, double radius, bool byteAlgorithm = false);
     // Separable min (erode) or max over a square of side 2r+1; erosion treats the outside as empty.
     int morphology(int input, int radius, bool erode);
+    // The same along one axis only (0 rows, 1 columns).
+    int morphologyAxis(int input, int radius, int axis, bool erode);
     QImage execute(int output, QImage::Format format, RenderBackend backend = RenderBackend::Auto,
                    GpuExecution *report = nullptr) const;
     std::vector<float> executeChannel(int output, RenderBackend backend = RenderBackend::Auto,

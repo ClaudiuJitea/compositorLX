@@ -47,8 +47,10 @@ struct LensEffectSettings {
     [[nodiscard]] bool isIdentity() const;
     [[nodiscard]] LensEffectSettings normalized() const;
     // The effect on an 8-bit, 16-bit or HDR layer's pixels, returned in the layer's canonical format. Sizes are
-    // proportions of the image, so a smaller preview looks as the result will.
-    [[nodiscard]] QImage apply(const QImage &image) const;
+    // proportions of the image, so a smaller preview looks as the result will. Vulkan compute when the renderer allows
+    // it (Automatic: a large enough picture), otherwise the CPU, which draws the same; `accelerated` reports the GPU.
+    [[nodiscard]] QImage apply(const QImage &image, RenderBackend backend = RenderBackend::Auto,
+                               bool *accelerated = nullptr) const;
     bool operator==(const LensEffectSettings &) const = default;
 
     static QString effectName(LensEffect effect);

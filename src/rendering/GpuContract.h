@@ -30,8 +30,16 @@ enum class GpuOp : unsigned {
     MorphologyStep = 22,
     MorphologyCombine = 23,
     Bokeh = 24,
+    LensPoint = 25,
+    LensCombine = 26,
+    LensSqueeze = 27,
+    LensStretch = 28,
+    LensStreakBack = 29,
+    LensResample = 30,
+    LensPrism = 31,
+    LensReduce = 32,
 };
-inline constexpr unsigned gpuOperationCount = 25;
+inline constexpr unsigned gpuOperationCount = 33;
 
 enum class GpuFormat : unsigned {
     Float32 = 0,
@@ -50,6 +58,8 @@ enum class GpuQuantization : unsigned {
     Half = 3,
 };
 inline constexpr int gpuParameterSlots = 28;
+// Where a region pass (GpuGraph::update) passes its rectangle.
+inline constexpr int gpuRegionX = 24, gpuRegionY = 25, gpuRegionWidth = 26, gpuRegionHeight = 27;
 
 // Blend IDs used by GpuOp::Composite (parameter "mode").
 namespace GpuBlend {
@@ -84,7 +94,7 @@ namespace GpuParam {
 struct Exposure { enum : int { multiplier = 0, offset = 1, inverseGamma = 2, linear = 3, }; };
 struct Cube { enum : int { grid = 0, clipping = 1, }; };
 struct BoxBlur { enum : int { radius = 0, axis = 1, span = 2, }; };
-struct Gaussian { enum : int { reach = 0, axis = 1, }; };
+struct Gaussian { enum : int { reach = 0, axis = 1, clear = 2, }; };
 struct Mask { enum : int { useAlpha = 0, factor = 1, }; };
 struct Bloom { enum : int { amount = 0, deep = 1, }; };
 struct MotionBlur { enum : int { horizontal = 0, slope = 1, reach = 2, }; };
@@ -100,5 +110,13 @@ struct ColorBalance { enum : int { shadowRed = 0, shadowGreen = 1, shadowBlue = 
 struct MorphologyStep { enum : int { step = 0, axis = 1, erode = 2, count = 3, }; };
 struct MorphologyCombine { enum : int { radius = 0, axis = 1, erode = 2, run = 3, }; };
 struct Bokeh { enum : int { radius = 0, shape = 1, ring = 2, }; };
+struct LensPoint { enum : int { mode = 0, inScale = 1, outScale = 2, count = 3, x0 = 4, x1 = 5, x2 = 6, x3 = 7, x4 = 8, y0 = 9, y1 = 10, y2 = 11, y3 = 12, y4 = 13, m0 = 14, m1 = 15, m2 = 16, m3 = 17, m4 = 18, }; };
+struct LensCombine { enum : int { mode = 0, a = 1, b = 2, offsetX = 3, offsetY = 4, auxWidth = 5, }; };
+struct LensSqueeze { enum : int { squeeze = 0, pad = 1, sourceWidth = 2, radius = 3, run = 4, }; };
+struct LensStretch { enum : int { squeeze = 0, pad = 1, smallWidth = 2, gain = 3, accumulate = 4, }; };
+struct LensStreakBack { enum : int { ux = 0, uy = 1, vx = 2, vy = 3, cx = 4, cy = 5, umin = 6, vmin = 7, turnedWidth = 8, turnedHeight = 9, pad = 10, packedWidth = 11, squeeze0 = 12, squeeze1 = 13, squeeze2 = 14, squeeze3 = 15, gain0 = 16, gain1 = 17, gain2 = 18, gain3 = 19, offset0 = 20, offset1 = 21, offset2 = 22, offset3 = 23, }; };
+struct LensResample { enum : int { m11 = 0, m12 = 1, dx = 2, m21 = 3, m22 = 4, dy = 5, sourceWidth = 6, sourceHeight = 7, clamp = 8, channel = 9, }; };
+struct LensPrism { enum : int { dx = 0, dy = 1, along0 = 2, along1 = 3, ways = 4, margin = 5, left = 6, top = 7, right = 8, bottom = 9, sourceWidth = 10, sourceHeight = 11, }; };
+struct LensReduce { enum : int { factor = 0, sourceWidth = 1, sourceHeight = 2, clear = 3, }; };
 } // namespace GpuParam
 } // namespace compositor
