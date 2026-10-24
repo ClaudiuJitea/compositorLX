@@ -26,6 +26,7 @@ void boxPass1D(const float *src, float *dst, int lines, int count, int lineStep,
         return;
     }
     const float scale = 1.0f / float(2 * r + 1);
+    #pragma omp parallel for schedule(static)
     for (int l = 0; l < lines; ++l) {
         const int base = l * lineStep;
         double sum = 0.0;
@@ -72,6 +73,7 @@ void gaussianBlurFloats(std::vector<float> &buffer, int width, int height, doubl
         for (float &k : kernel) k = float(k / total);
         std::vector<float> temp(buffer.size());
         const auto sweep = [&](const float *src, float *dst, int lines, int count, int lineStep, int elementStep) {
+            #pragma omp parallel for schedule(static)
             for (int l = 0; l < lines; ++l) {
                 const int base = l * lineStep;
                 for (int i = 0; i < count; ++i) {
@@ -101,6 +103,10 @@ void gaussianBlurFloats(std::vector<float> &buffer, int width, int height, doubl
         boxPass1D(temp.data(), buffer.data(), width, height, 1, width, boxRadius);
     }
 }
+
+// The last sharp coverage worked out on this thread, for the length of one render() (see coverage()).
+struct CoverageMemo { qint64 key = 0; QRectF rect; QSize size; std::vector<float> levels; };
+thread_local CoverageMemo coverageMemo;
 
 struct CacheEntry {
     qint64 imageKey = 0;
@@ -161,7 +167,10 @@ std::vector<float> LayerEffectsRenderer::extreme(const std::vector<float> &sourc
     std::vector<float> result(source.size(), 0.0f);
 
     const auto sweep = [radius, smallest](const float *input, float *output, int lines, int count, int lineStep, int elementStep) {
+        #pragma omp parallel
+        {
         std::vector<int> queue(count);
+        #pragma omp for schedule(static)
         for (int line = 0; line < lines; ++line) {
             const int base = line * lineStep;
             int head = 0, tail = 0, next = 0;
@@ -182,6 +191,7 @@ std::vector<float> LayerEffectsRenderer::extreme(const std::vector<float> &sourc
                 output[base + center * elementStep] = (smallest && outside) ? 0.0f : input[base + queue[head] * elementStep];
             }
         }
+        }
     };
 
     sweep(source.data(), pass.data(), height, width, width, 1);
@@ -198,19 +208,27 @@ std::vector<float> LayerEffectsRenderer::coverage(const QImage &image, const QRe
     std::vector<float> levels(width * height, 0.0f);
     if (image.isNull()) return levels;
 
-    QImage sharp(canvasSize, QImage::Format_ARGB32_Premultiplied);
-    sharp.fill(Qt::transparent);
-    {
-        QPainter p(&sharp);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        p.drawImage(rect, image);
-    }
-
-    for (int y = 0; y < height; ++y) {
-        const QRgb *line = reinterpret_cast<const QRgb *>(sharp.constScanLine(y));
-        for (int x = 0; x < width; ++x) {
-            levels[y * width + x] = qAlpha(line[x]) / 255.0f;
+    // A render asks for the same placed alpha several times (each effect starts from it): it is kept for that render.
+    CoverageMemo &last = coverageMemo;
+    if (last.key == image.cacheKey() && last.rect == rect && last.size == canvasSize) {
+        levels = last.levels;
+    } else {
+        QImage sharp(canvasSize, QImage::Format_ARGB32_Premultiplied);
+        sharp.fill(Qt::transparent);
+        {
+            QPainter p(&sharp);
+            p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            p.drawImage(rect, image);
         }
+
+        #pragma omp parallel for schedule(static)
+        for (int y = 0; y < height; ++y) {
+            const QRgb *line = reinterpret_cast<const QRgb *>(sharp.constScanLine(y));
+            for (int x = 0; x < width; ++x) {
+                levels[y * width + x] = qAlpha(line[x]) / 255.0f;
+            }
+        }
+        last = {image.cacheKey(), rect, canvasSize, levels};
     }
 
     if (blur > 0.0) {
@@ -227,6 +245,7 @@ std::vector<float> LayerEffectsRenderer::outerGlowCoverage(const QImage &image, 
     const auto shape = coverage(image, placed, canvasSize, 0.0);
     auto soft = coverage(image, placed, canvasSize, glow.size);
     const int total = width * height;
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < total; ++i) {
         soft[i] = std::clamp(soft[i] * (1.0f - shape[i]), 0.0f, 1.0f);
     }
@@ -240,6 +259,7 @@ std::vector<float> LayerEffectsRenderer::innerGlowCoverage(const QImage &image, 
     auto shape = coverage(image, placed, canvasSize, 0.0);
     const auto blurred = coverage(image, placed, canvasSize, glow.size);
     const int total = width * height;
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < total; ++i) {
         shape[i] = std::clamp(shape[i] * (1.0f - blurred[i]), 0.0f, 1.0f);
     }
@@ -254,6 +274,7 @@ std::vector<float> LayerEffectsRenderer::strokeCoverage(const QImage &image, con
     const int reach = std::max(1, int(std::round(stroke.size)));
     const auto moved = extreme(shape, width, height, reach, stroke.inside);
     const int total = width * height;
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < total; ++i) {
         shape[i] = stroke.inside ? std::max(0.0f, shape[i] - moved[i])
                                  : std::max(0.0f, moved[i] - shape[i]);
@@ -277,6 +298,7 @@ std::vector<float> LayerEffectsRenderer::innerCoverage(const QImage &image, cons
     const QRectF offsetRect = placed.translated(offset);
     const auto moved = coverage(image, offsetRect, canvasSize, shadow.blur);
     const int total = width * height;
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < total; ++i) {
         shape[i] = std::clamp(shape[i] * (1.0f - moved[i]), 0.0f, 1.0f);
     }
@@ -298,6 +320,7 @@ std::pair<QImage, double> LayerEffectsRenderer::render(const QImage &image, cons
 
     const QRectF placedRect(inset, inset, image.width(), image.height());
     const QSize canvasSize(width, height);
+    struct Forget { ~Forget() { coverageMemo = {}; } } forget; // the coverage memo lasts for this render only
 
     QImage shown = image;
     if (!mask.isNull()) {
@@ -308,7 +331,9 @@ std::pair<QImage, double> LayerEffectsRenderer::render(const QImage &image, cons
         QImage own(canvasSize,outside.format());own.fill(Qt::transparent);{QPainter p(&own);p.drawImage(placedRect,shown);}
         const auto shape=coverage(shown,placedRect,canvasSize,0);
         const auto fill=[&](QImage &target,double red,double green,double blue,double opacity,const std::vector<float> &cov,bool inside){
-            for(int y=0;y<height;++y){auto *row=reinterpret_cast<float *>(target.scanLine(y));for(int x=0;x<width;++x){const int i=y*width+x;if(cov[i]<=0)continue;const double t=std::clamp(opacity*cov[i]/(inside&&shape[i]>0?shape[i]:1),0.0,1.0);float *p=row+x*4;
+            uchar *bits=target.bits();const qsizetype stride=target.bytesPerLine();
+            #pragma omp parallel for schedule(static)
+            for(int y=0;y<height;++y){auto *row=reinterpret_cast<float *>(bits+y*stride);for(int x=0;x<width;++x){const int i=y*width+x;if(cov[i]<=0)continue;const double t=std::clamp(opacity*cov[i]/(inside&&shape[i]>0?shape[i]:1),0.0,1.0);float *p=row+x*4;
                 if(inside){p[0]=float(p[0]*(1-t)+red*p[3]*t);p[1]=float(p[1]*(1-t)+green*p[3]*t);p[2]=float(p[2]*(1-t)+blue*p[3]*t);}
                 else{p[0]=float(red*t+p[0]*(1-t));p[1]=float(green*t+p[1]*(1-t));p[2]=float(blue*t+p[2]*(1-t));p[3]=float(t+p[3]*(1-t));}
             }}
@@ -332,8 +357,11 @@ std::pair<QImage, double> LayerEffectsRenderer::render(const QImage &image, cons
         const double r = color.redF();
         const double g = color.greenF();
         const double b = color.blueF();
+        uchar *bits = context.bits(); // writable here, on one thread; the rows run on all cores
+        const qsizetype stride = context.bytesPerLine();
+        #pragma omp parallel for schedule(static)
         for (int y = 0; y < height; ++y) {
-            QRgb *dst = reinterpret_cast<QRgb *>(context.scanLine(y));
+            QRgb *dst = reinterpret_cast<QRgb *>(bits + y * stride);
             for (int x = 0; x < width; ++x) {
                 const float c = cov[y * width + x];
                 if (c <= 0.0f) continue;
@@ -388,8 +416,11 @@ std::pair<QImage, double> LayerEffectsRenderer::render(const QImage &image, cons
     { QPainter p(&context); p.drawImage(placedRect, shown); }
     const auto recolor = [&](const QColor &color, double opacity, const std::vector<float> &cov) {
         const auto shape = coverage(shown, placedRect, canvasSize, 0.0);
+        uchar *bits = context.bits(); // writable here, on one thread; the rows run on all cores
+        const qsizetype stride = context.bytesPerLine();
+        #pragma omp parallel for schedule(static)
         for (int y=0; y<height; ++y) {
-            auto *row = reinterpret_cast<QRgb *>(context.scanLine(y));
+            auto *row = reinterpret_cast<QRgb *>(bits + y * stride);
             for (int x=0; x<width; ++x) {
                 const int i=y*width+x;
                 if (shape[i]<=0) continue;

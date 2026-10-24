@@ -6,13 +6,16 @@
 #include "core/EditorSession.h"
 #include "rendering/Dither.h"
 #include "rendering/RasterOperations.h"
+#include "rendering/SubjectRemoval.h"
 #include "rendering/Scanlines.h"
 #include "rendering/GpuRenderer.h"
+#include "rendering/LayerEffectsRenderer.h"
 #include "rendering/LayerRenderer.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QJsonObject>
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstdio>
 #include <functional>
@@ -108,8 +111,56 @@ int main(int argc, char **argv)
     hue.adjustment = QJsonObject{{"kind", "Hue/Saturation"}, {"hsvSettings", QJsonObject{{"hue", 20}, {"saturation", 15}}}};
     toned.layers.push_back(hue);
     cases.push_back({QStringLiteral("Canvas: two layers and Hue/Saturation"), [&] { return LayerRenderer::flattened(toned, RenderPurpose::Display); }});
+    // Layer effects on a large cut-out: a disc with a stroke, a drop shadow and both glows.
+    QImage cutout(w / 2, h / 2, QImage::Format_RGBA8888_Premultiplied);
+    cutout.fill(Qt::transparent);
+    for (int y = 0; y < cutout.height(); ++y)
+        for (int x = 0; x < cutout.width(); ++x)
+            if (std::hypot(x - cutout.width() / 2.0, y - cutout.height() / 2.0) < cutout.height() * .4) {
+                uchar *p = cutout.scanLine(y) + x * 4; p[0] = 200; p[1] = uchar(x % 256); p[2] = 90; p[3] = 255;
+            }
+    LayerEffects effects;
+    effects.stroke = StrokeEffect{}; effects.stroke->size = 12;
+    effects.shadow = ShadowEffect{}; effects.shadow->blur = 40;
+    effects.outerGlow = OuterGlowEffect{};
+    effects.innerGlow = InnerGlowEffect{};
+    cases.push_back({QStringLiteral("Layer effects (stroke, shadow, glows)"), [&] { return LayerEffectsRenderer::render(cutout, {}, effects).first; }});
     cases.push_back({QStringLiteral("Canvas: two layers and Levels"), [&] { return LayerRenderer::flattened(adjusted, RenderPurpose::Display); }});
 
+    // --subject: Remove Background's detection on a large photo.
+    if (app.arguments().contains(QStringLiteral("--subject"))) {
+        const QImage image = photo(w, h, 4);
+        for (int i = 0; i < 3; ++i) {
+            QElapsedTimer t;
+            t.start();
+            QString error;
+            const QImage mask = SubjectRemoval::rawMask(image, &error);
+            std::printf("rawMask: %.0f ms %s\n", t.nsecsElapsed() / 1e6, qPrintable(error));
+        }
+        const QImage mask = SubjectRemoval::rawMask(image);
+        for (const auto &[name, settings] : std::vector<std::pair<const char *, SubjectRemovalSettings>>{
+                 {"Basic", SubjectRemovalSettings{false, 12, 25, 0}}, {"Advanced, refine 12", SubjectRemovalSettings{true, 12, 25, 0}},
+                 {"Advanced, refine 40, shift 4", SubjectRemovalSettings{true, 40, 25, 4}}}) {
+            QImage out;
+            for (double limit : {1e9, 1400.0}) {
+                const double ms = timed([&] { return SubjectRemoval::refined(mask, image, settings, limit); }, &out, nullptr);
+                quint64 hash = 1469598103934665603ull;
+                for (int y = 0; y < out.height(); ++y)
+                    for (const uchar *p = out.constScanLine(y), *e = p + out.width(); p < e; ++p) hash = (hash ^ *p) * 1099511628211ull;
+                std::printf("refined (%s, %s): %.0f ms, %016llx\n", name, limit < 1e9 ? "preview" : "full size", ms,
+                            static_cast<unsigned long long>(hash));
+            }
+        }
+        QElapsedTimer t;
+        t.start();
+        const QImage small = image.scaled(320, 320, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        std::printf("  scaling down: %.0f ms\n", t.nsecsElapsed() / 1e6);
+        t.restart();
+        const QImage gray(320, 320, QImage::Format_Grayscale8);
+        const QImage up = gray.scaled(image.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        std::printf("  scaling the mask up: %.0f ms\n", t.nsecsElapsed() / 1e6);
+        return 0;
+    }
     // --strokes: what one pointer move of Liquify and Smudge costs with a large brush (the dabs, not the canvas).
     if (app.arguments().contains(QStringLiteral("--strokes"))) {
         for (int mode : {0, 1, 2, 3})
@@ -175,6 +226,21 @@ int main(int argc, char **argv)
             {"Feather mask", [&] { return RasterOperations::featherMask(spot, 30); }},
             {"Content-Aware Fill (120 px)", [&] { return RasterOperations::contentAwareFill(image, spot).value_or(QImage()); }},
             {"Spot heal (120 px)", [&] { return RasterOperations::spotHeal(image, spot, 1, 0, 3).value_or(QImage()); }},
+            {"Layer effects", [&] {
+                 QImage cutout(w / 2, h / 2, QImage::Format_RGBA8888_Premultiplied);
+                 cutout.fill(Qt::transparent);
+                 for (int y = 0; y < cutout.height(); ++y)
+                     for (int x = 0; x < cutout.width(); ++x)
+                         if (std::hypot(x - cutout.width() / 2.0, y - cutout.height() / 2.0) < cutout.height() * .4) {
+                             uchar *p = cutout.scanLine(y) + x * 4; p[0] = 200; p[1] = uchar(x % 256); p[2] = 90; p[3] = 255;
+                         }
+                 LayerEffects all;
+                 all.stroke = StrokeEffect{}; all.stroke->size = 12;
+                 all.shadow = ShadowEffect{}; all.shadow->blur = 40;
+                 all.outerGlow = OuterGlowEffect{}; all.innerGlow = InnerGlowEffect{};
+                 all.innerShadow = InnerShadowEffect{}; all.colorOverlay = ColorOverlayEffect{}; all.colorOverlay->opacity = .3;
+                 return LayerEffectsRenderer::render(cutout, {}, all).first;
+             }},
         };
         std::printf("| Filter (CPU, %d × %d) | ms | Output checksum |\n|---|---:|---|\n", w, h);
         for (const auto &[name, run] : survey) {

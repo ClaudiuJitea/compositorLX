@@ -2,10 +2,12 @@
 #include "rendering/GpuOperations.h"
 #include "rendering/GpuRenderer.h"
 #include "rendering/RasterOperations.h"
+#include "rendering/SubjectRemoval.h"
 #include "NoisePixels.h"
 #include <QCoreApplication>
 #include <QTest>
 #include <algorithm>
+#include <cmath>
 using namespace compositor;
 
 // The features moved to the GPU after Lens Effects, against their CPU kernels: Camera Raw's color table (exact, as
@@ -100,6 +102,34 @@ private slots:
         QImage copy = image;
         QVERIFY(!GpuOperations::cameraRawLookup(copy, table.data(), 33, RenderBackend::Vulkan));
         QCOMPARE(copy, image);
+    }
+
+    // Remove Background's preview refines a copy at most 1400 long (macOS GuidedMatte.refine's limit), then scales
+    // it back: the layer's size, and close to the full-size refinement the commit makes.
+    void removeBackgroundPreviewLimit()
+    {
+        const QSize size(3000, 2000);
+        QImage guide(size, QImage::Format_RGBA8888_Premultiplied), mask(size, QImage::Format_Grayscale8);
+        for (int y = 0; y < size.height(); ++y) {
+            uchar *g = guide.scanLine(y), *m = mask.scanLine(y);
+            for (int x = 0; x < size.width(); ++x) {
+                const double d = std::hypot(x - 1500.0, y - 1000.0);
+                const uchar v = d < 700 ? 230 : 40;
+                g[x * 4] = g[x * 4 + 1] = g[x * 4 + 2] = v; g[x * 4 + 3] = 255;
+                m[x] = uchar(std::clamp(int((760 - d) * 2), 0, 255)); // a soft, slightly wrong edge
+            }
+        }
+        const SubjectRemovalSettings settings{true, 20, 0, 0};
+        const QImage full = SubjectRemoval::refined(mask, guide, settings);
+        const QImage preview = SubjectRemoval::refined(mask, guide, settings, 1400);
+        QCOMPARE(preview.size(), size);
+        double total = 0;
+        for (int y = 0; y < size.height(); ++y)
+            for (int x = 0; x < size.width(); ++x) total += std::abs(int(full.constScanLine(y)[x]) - int(preview.constScanLine(y)[x]));
+        QVERIFY2(total / (size.width() * size.height()) < 1.0, qPrintable(QString::number(total / (size.width() * size.height()))));
+        // Within the limit already, the preview is the commit's result exactly.
+        const QImage small = mask.scaled(1200, 800), smallGuide = guide.scaled(1200, 800);
+        QCOMPARE(SubjectRemoval::refined(small, smallGuide, settings, 1400), SubjectRemoval::refined(small, smallGuide, settings));
     }
 
     // Add Noise and Grain as GPU passes against the shared CPU kernels, within a level (float log/cos, half-up).

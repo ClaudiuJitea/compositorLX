@@ -91,6 +91,8 @@ std::vector<float> boxFilter(const std::vector<float> &source, int width, int he
 {
     const float span = float(radius * 2 + 1);
     std::vector<float> pass(size_t(width) * height), result(size_t(width) * height);
+    // Rows, then columns, each its own: they run on all cores.
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < height; ++y) {
         const int row = y * width; float sum = 0;
         for (int x = -radius; x <= radius; ++x) sum += source[size_t(row + std::clamp(x, 0, width - 1))];
@@ -100,13 +102,22 @@ std::vector<float> boxFilter(const std::vector<float> &source, int width, int he
             sum += source[size_t(row + std::clamp(x + radius + 1, 0, width - 1))];
         }
     }
-    for (int x = 0; x < width; ++x) {
-        float sum = 0;
-        for (int y = -radius; y <= radius; ++y) sum += pass[size_t(std::clamp(y, 0, height - 1) * width + x)];
+    // Columns in strips of 64, walked row by row (each column adds and drops exactly what it did alone).
+    constexpr int strip = 64;
+    #pragma omp parallel for schedule(static)
+    for (int first = 0; first < width; first += strip) {
+        const int last = std::min(width, first + strip);
+        std::array<float, strip> sums{};
+        for (int x = first; x < last; ++x)
+            for (int y = -radius; y <= radius; ++y) sums[size_t(x - first)] += pass[size_t(std::clamp(y, 0, height - 1) * width + x)];
         for (int y = 0; y < height; ++y) {
-            result[size_t(y * width + x)] = sum / span;
-            sum -= pass[size_t(std::clamp(y - radius, 0, height - 1) * width + x)];
-            sum += pass[size_t(std::clamp(y + radius + 1, 0, height - 1) * width + x)];
+            const size_t leaving = size_t(std::clamp(y - radius, 0, height - 1) * width), entering = size_t(std::clamp(y + radius + 1, 0, height - 1) * width);
+            for (int x = first; x < last; ++x) {
+                float &sum = sums[size_t(x - first)];
+                result[size_t(y * width + x)] = sum / span;
+                sum -= pass[leaving + size_t(x)];
+                sum += pass[entering + size_t(x)];
+            }
         }
     }
     return result;
@@ -116,6 +127,7 @@ std::vector<float> grayLevels(const QImage &source, const QSize &size)
 {
     const QImage image = source.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation).convertToFormat(QImage::Format_Grayscale8);
     std::vector<float> result(size_t(size.width()) * size.height());
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < size.height(); ++y) {
         const uchar *row = image.constScanLine(y);
         for (int x = 0; x < size.width(); ++x) result[size_t(y * size.width() + x)] = row[x] / 255.0f;
@@ -126,8 +138,10 @@ std::vector<float> grayLevels(const QImage &source, const QSize &size)
 QImage levelsImage(const std::vector<float> &levels, const QSize &size)
 {
     QImage result(size, QImage::Format_Grayscale8);
+    uchar *bits = result.bits(); const qsizetype stride = result.bytesPerLine();
+    #pragma omp parallel for schedule(static)
     for (int y = 0; y < size.height(); ++y) {
-        uchar *row = result.scanLine(y);
+        uchar *row = bits + y * stride;
         for (int x = 0; x < size.width(); ++x)
             row[x] = uchar(std::clamp(qRound(levels[size_t(y * size.width() + x)] * 255), 0, 255));
     }
@@ -364,38 +378,52 @@ QImage SubjectRemoval::smoothBinaryMask(const QImage &mask)
     return softened;
 }
 
-QImage SubjectRemoval::refined(const QImage &inputMask, const QImage &guide, const SubjectRemovalSettings &settings)
+QImage SubjectRemoval::refined(const QImage &inputMask, const QImage &guide, const SubjectRemovalSettings &settings, double limit)
 {
     if (inputMask.isNull() || guide.isNull()) return {};
     QImage mask = inputMask.scaled(guide.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation).convertToFormat(QImage::Format_Grayscale8);
     if (!settings.advanced) return mask;
     const int width = mask.width(), height = mask.height(), count = width * height;
     if (settings.refineEdges > 0) {
-        const int radius = std::max(1, qRound(std::clamp(settings.refineEdges, 0.0, 40.0)));
-        const std::vector<float> matte = grayLevels(mask, mask.size()), gray = grayLevels(guide, mask.size());
+        // macOS GuidedMatte.refine: on a copy at most `limit` on its longest side, the radius scaled to match.
+        const double factor = std::min(1.0, limit / std::max(width, height));
+        const QSize small(std::max(1, qRound(width * factor)), std::max(1, qRound(height * factor)));
+        const int radius = std::max(1, qRound(std::clamp(settings.refineEdges, 0.0, 40.0) * factor));
+        const int width = small.width(), height = small.height(), count = width * height;
+        const std::vector<float> matte = grayLevels(mask, small), gray = grayLevels(guide, small);
         const auto meanGray = boxFilter(gray, width, height, radius), meanMask = boxFilter(matte, width, height, radius);
         std::vector<float> squares(static_cast<size_t>(count)), products(static_cast<size_t>(count));
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < count; ++i) { squares[size_t(i)] = gray[size_t(i)] * gray[size_t(i)]; products[size_t(i)] = gray[size_t(i)] * matte[size_t(i)]; }
         const auto meanSquares = boxFilter(squares, width, height, radius), meanProducts = boxFilter(products, width, height, radius);
         std::vector<float> slope(static_cast<size_t>(count)), offset(static_cast<size_t>(count));
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < count; ++i) { const float variance = meanSquares[size_t(i)] - meanGray[size_t(i)] * meanGray[size_t(i)]; const float covariance = meanProducts[size_t(i)] - meanGray[size_t(i)] * meanMask[size_t(i)]; slope[size_t(i)] = covariance / (variance + 1e-4f); offset[size_t(i)] = meanMask[size_t(i)] - slope[size_t(i)] * meanGray[size_t(i)]; }
         const auto meanSlope = boxFilter(slope, width, height, radius), meanOffset = boxFilter(offset, width, height, radius);
         std::vector<float> result(static_cast<size_t>(count));
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < count; ++i) result[size_t(i)] = std::clamp(meanSlope[size_t(i)] * gray[size_t(i)] + meanOffset[size_t(i)], 0.0f, 1.0f);
-        mask = levelsImage(result, mask.size());
+        mask = levelsImage(result, small);
+        if (small != guide.size()) mask = mask.scaled(guide.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     }
     if (settings.shiftEdge != 0) {
         const double reach = std::abs(std::clamp(settings.shiftEdge, -10.0, 10.0));
         QImage rgba(mask.size(), QImage::Format_RGBA8888_Premultiplied);
-        for (int y = 0; y < height; ++y) { const uchar *in = mask.constScanLine(y); uchar *out = rgba.scanLine(y); for (int x = 0; x < width; ++x) out[x*4]=out[x*4+1]=out[x*4+2]=out[x*4+3]=in[x]; }
+        uchar *rgbaBits = rgba.bits(); const qsizetype rgbaStride = rgba.bytesPerLine();
+        #pragma omp parallel for schedule(static)
+        for (int y = 0; y < height; ++y) { const uchar *in = mask.constScanLine(y); uchar *out = rgbaBits + y * rgbaStride; for (int x = 0; x < width; ++x) out[x*4]=out[x*4+1]=out[x*4+2]=out[x*4+3]=in[x]; }
         const QImage blurred = RasterOperations::gaussianBlur(rgba, reach / 2).convertToFormat(QImage::Format_RGBA8888);
         const int threshold = settings.shiftEdge < 0 ? 191 : 64;
-        for (int y = 0; y < height; ++y) { uchar *out = mask.scanLine(y); const uchar *in = blurred.constScanLine(y); for (int x = 0; x < width; ++x) out[x] = in[x*4] <= threshold ? 0 : 255; }
+        uchar *maskBits = mask.bits(); const qsizetype maskStride = mask.bytesPerLine();
+        #pragma omp parallel for schedule(static)
+        for (int y = 0; y < height; ++y) { uchar *out = maskBits + y * maskStride; const uchar *in = blurred.constScanLine(y); for (int x = 0; x < width; ++x) out[x] = in[x*4] <= threshold ? 0 : 255; }
     }
     if (settings.matteContrast > 0) {
         const double strength = std::clamp(settings.matteContrast, 0.0, 100.0) / 100.0;
         const double slope = 1 / std::max(.02, 1 - strength * .98);
-        for (int y = 0; y < height; ++y) { uchar *row = mask.scanLine(y); for (int x = 0; x < width; ++x)
+        uchar *maskBits = mask.bits(); const qsizetype maskStride = mask.bytesPerLine();
+        #pragma omp parallel for schedule(static)
+        for (int y = 0; y < height; ++y) { uchar *row = maskBits + y * maskStride; for (int x = 0; x < width; ++x)
             row[x] = uchar(std::clamp(qRound(((row[x] / 255.0 - .5) * slope + .5) * 255), 0, 255)); }
     }
     return mask;

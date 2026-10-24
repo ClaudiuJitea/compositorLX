@@ -2143,7 +2143,7 @@ static QImage selectionCoverageForLayer(const Layer &layer, const QSize &size, c
     return selectionCoverageForPlacement(layer.transform, size, selection);
 }
 
-bool EditorSession::removeBackground(const SubjectRemovalSettings &settings, const QImage &preparedMask, QString *error)
+bool EditorSession::removeBackground(const SubjectRemovalSettings &settings, const QImage &preparedMask, QString *error, bool preview)
 {
     const Layer *layer = activeLayer();
     if (!document_ || !layer || layer->group || layer->image.isNull()
@@ -2153,7 +2153,7 @@ bool EditorSession::removeBackground(const SubjectRemovalSettings &settings, con
     const QUuid id = layer->id; const QSize size = layer->image.size();
     const QImage raw = preparedMask.isNull() ? SubjectRemoval::rawMask(layer->image, error) : preparedMask;
     if (raw.isNull()) return false;
-    QImage subject = SubjectRemoval::refined(raw, layer->image, settings);
+    QImage subject = SubjectRemoval::refined(raw, layer->image, settings, preview ? 1400 : 1e9);
     if (subject.isNull()) return false;
     subject = subject.convertToFormat(QImage::Format_Grayscale8);
 

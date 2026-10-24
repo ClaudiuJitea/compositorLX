@@ -5709,7 +5709,7 @@ void MainWindow::removeBackgroundDialog()
     };
     const auto preview = [this, restore, settings, previewEnabled, raw = detected.first] {
         restore();
-        if (previewEnabled->isChecked()) session_.removeBackground(settings(), raw);
+        if (previewEnabled->isChecked()) session_.removeBackground(settings(), raw, nullptr, true);
         canvas_->invalidateDocument();
     };
     const auto qualityChanged = [=](int index) { const bool advanced = index == 1; refine->setEnabled(advanced); contrast->setEnabled(advanced); shift->setEnabled(advanced); preview(); };

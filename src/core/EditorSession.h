@@ -238,7 +238,9 @@ public:
     bool applyCameraRaw(const QUuid &id, const CameraRawSettings &settings);
     bool contentAwareFill();
 
-    bool removeBackground(const SubjectRemovalSettings &settings = {}, const QImage &preparedMask = {}, QString *error = nullptr);
+    // `preview`: refined on a copy at most 1400 pixels long, as the macOS panel's preview is; the commit is full size.
+    bool removeBackground(const SubjectRemovalSettings &settings = {}, const QImage &preparedMask = {}, QString *error = nullptr,
+                          bool preview = false);
     bool beginBrushStroke(const QPointF &documentPoint, const QColor &color, double diameter = 40,
                           double hardness = 1, double opacity = 1, bool erasing = false,
                           const std::optional<QPointF> &cloneSource = std::nullopt,

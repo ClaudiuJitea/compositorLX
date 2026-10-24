@@ -25,8 +25,10 @@ public:
     /// cancellation takes effect immediately after Run() completes or at stage boundaries,
     /// safely discarding results before mask creation or document application.
     [[nodiscard]] static QImage rawMask(const QImage &image, QString *error = nullptr, std::atomic<bool> *cancelled = nullptr);
+    // `limit`: the guided filter works on a copy no longer than this on its longest side (its radius scaled to suit)
+    // and the refined mask is scaled back up, as the macOS preview does (GuidedMatte.refine), so a slider stays quick.
     [[nodiscard]] static QImage refined(const QImage &mask, const QImage &guide,
-                                        const SubjectRemovalSettings &settings);
+                                        const SubjectRemovalSettings &settings, double limit = 1e9);
     [[nodiscard]] static QImage connectedInstance(const QImage &mask, const QPoint &clickPoint, std::atomic<bool> *cancelled = nullptr);
     [[nodiscard]] static QImage adjustEdgeOffset(const QImage &mask, int edgeOffset);
     [[nodiscard]] static QImage smoothBinaryMask(const QImage &mask);

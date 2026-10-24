@@ -772,12 +772,15 @@ QImage RasterOperations::gaussianBlur(const QImage &image, double radius)
         if (boxRadius <= 0) return input;
         QImage output(input.size(), input.format()); const int divisor = boxRadius * 2 + 1;
         const int lines = horizontal ? input.height() : input.width(), length = horizontal ? input.width() : input.height();
+        // Every line is its own: they run on all cores, through pointers taken here.
+        const uchar *in = input.constBits(); uchar *bits = output.bits(); const qsizetype stride = input.bytesPerLine(), outStride = output.bytesPerLine();
+        #pragma omp parallel for schedule(static)
         for (int line = 0; line < lines; ++line) {
             qint64 sums[4]{};
-            const auto pixel = [&](int position) { const int p = std::clamp(position, 0, length - 1); return horizontal ? input.constScanLine(line) + p * 4 : input.constScanLine(p) + line * 4; };
+            const auto pixel = [&](int position) { const int p = std::clamp(position, 0, length - 1); return horizontal ? in + line * stride + p * 4 : in + p * stride + line * 4; };
             for (int position = -boxRadius; position <= boxRadius; ++position) { const uchar *value = pixel(position); for (int c = 0; c < 4; ++c) sums[c] += value[c]; }
             for (int position = 0; position < length; ++position) {
-                uchar *out = horizontal ? output.scanLine(line) + position * 4 : output.scanLine(position) + line * 4;
+                uchar *out = horizontal ? bits + line * outStride + position * 4 : bits + position * outStride + line * 4;
                 for (int c = 0; c < 4; ++c) out[c] = uchar((sums[c] + divisor / 2) / divisor);
                 const uchar *leaving = pixel(position - boxRadius), *entering = pixel(position + boxRadius + 1);
                 for (int c = 0; c < 4; ++c) sums[c] += int(entering[c]) - int(leaving[c]);
@@ -810,16 +813,19 @@ QImage RasterOperations::featherMask(const QImage &image, double amount)
         const int divisor = boxRadius * 2 + 1;
         const int lines = horizontal ? input.height() : input.width();
         const int length = horizontal ? input.width() : input.height();
+        // Every line is its own: they run on all cores, through pointers taken here.
+        const uchar *in = input.constBits(); uchar *bits = output.bits(); const qsizetype stride = input.bytesPerLine(), outStride = output.bytesPerLine();
+        #pragma omp parallel for schedule(static)
         for (int line = 0; line < lines; ++line) {
             int sum = 0;
             const auto pixel = [&](int position) {
                 const int p = std::clamp(position, 0, length - 1);
-                return int(horizontal ? input.constScanLine(line)[p] : input.constScanLine(p)[line]);
+                return int(horizontal ? in[line * stride + p] : in[p * stride + line]);
             };
             for (int position = -boxRadius; position <= boxRadius; ++position)
                 sum += pixel(position);
             for (int position = 0; position < length; ++position) {
-                uchar *out = horizontal ? output.scanLine(line) + position : output.scanLine(position) + line;
+                uchar *out = horizontal ? bits + line * outStride + position : bits + position * outStride + line;
                 *out = uchar((sum + divisor / 2) / divisor);
                 const int leaving = pixel(position - boxRadius);
                 const int entering = pixel(position + boxRadius + 1);
