@@ -13,6 +13,19 @@
 #include <cmath>
 
 namespace compositor {
+struct GifFrameReader {
+    QBuffer buffer;
+    QImageReader reader;
+    int index = -1; // the source frame `image` holds
+    QImage image;
+    explicit GifFrameReader(const QByteArray &data)
+    {
+        buffer.setData(data);
+        buffer.open(QIODevice::ReadOnly);
+        reader.setDevice(&buffer);
+        reader.setFormat("gif");
+    }
+};
 int GifAnimation::delay(int identity) const
 {
     if (sameDelay) return uniformDelay;
@@ -26,10 +39,19 @@ QImage GifAnimation::frame(int identity) const
     if (!source) return {};
     const auto it = std::find_if(frames.cbegin(), frames.cend(), [identity](const auto &f) { return f.index == identity; });
     if (it == frames.cend()) return {};
-    QBuffer buffer; buffer.setData(source->data); buffer.open(QIODevice::ReadOnly);
-    QImageReader reader(&buffer, "gif");
     QImage result;
-    for (int i = 0; i <= it->sourceIndex; ++i) { result = reader.read(); if (result.isNull()) return {}; }
+    {
+        std::lock_guard lock(source->readerLock);
+        auto &reader = source->reader;
+        // Frames decode in order, each over the last: an earlier frame starts again from the first.
+        if (!reader || reader->index > it->sourceIndex) reader = std::make_shared<GifFrameReader>(source->data);
+        while (reader->index < it->sourceIndex) {
+            reader->image = reader->reader.read();
+            if (reader->image.isNull()) { reader.reset(); return {}; }
+            ++reader->index;
+        }
+        result = reader->image;
+    }
     if (!geometry.isEmpty()) {
         QImage transformed(QSize(geometry.value("width").toInt(), geometry.value("height").toInt()), QImage::Format_RGBA8888_Premultiplied);
         if (transformed.isNull()) return {};

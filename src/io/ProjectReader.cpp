@@ -540,8 +540,10 @@ Document ProjectReader::load(const QString &projectDirectory)
 
     Document document;
     document.formatVersion = manifest.value(QStringLiteral("version")).toInt(-1);
-    if (document.formatVersion < 1 || document.formatVersion > 17) {
-        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–17.").arg(document.formatVersion));
+    // Every version a release has written (1 through 17), and 27 from the macOS GIF branch's own builds (macOS
+    // ProjectManifest.supported); 27 passes every later-version gate below.
+    if ((document.formatVersion < 1 || document.formatVersion > 17) && document.formatVersion != 27) {
+        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–17 and 27.").arg(document.formatVersion));
     }
     if (manifest.value(QStringLiteral("colorSpace")).toString() != QStringLiteral("sRGB")) {
         invalid(QStringLiteral("only the sRGB working space is supported"));
@@ -738,6 +740,8 @@ Document ProjectReader::load(const QString &projectDirectory)
         if (!found) invalid(QStringLiteral("active layer is missing"));
     }
 
+    // Saved again as the current format, as the macOS app writes every project it saves.
+    if (document.formatVersion == 27) document.formatVersion = 17;
     document.projectPath = root.absolutePath();
     return document;
 }

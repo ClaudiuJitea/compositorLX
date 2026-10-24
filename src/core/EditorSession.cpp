@@ -1798,6 +1798,23 @@ bool EditorSession::applyRgbSplit(const RgbSplitSettings &settings)
     return changed;
 }
 
+bool EditorSession::applyLensEffects(const LensEffectSettings &settings)
+{
+    // mac FilterEdit: with nothing to do (Amount 0), OK closes as Cancel does and leaves no undo step.
+    const LensEffectSettings s = settings.normalized();
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || layer->image.isNull() || maskSelected_ || s.isIdentity()) return false;
+    const int index = indexOf(layer->id);
+    const QImage result = clippedPixels(layer->image, s.apply(layer->image), *layer, document_->selection);
+    if (result.isNull() || result == layer->image) return false;
+    beginEdit(QStringLiteral("Lens Effects"));
+    document_->layers[index].image = result;
+    rasterizeLayer(document_->layers[index]);
+    pendingFilter_ = [s](EditorSession &session) { return session.applyLensEffects(s); };
+    endEdit();
+    return true;
+}
+
 bool EditorSession::splitChannels()
 {
     const Layer *active = activeLayer();

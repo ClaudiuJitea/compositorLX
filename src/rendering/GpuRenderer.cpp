@@ -43,7 +43,7 @@ QString summary(const std::vector<GpuNode> &nodes, int output) {
     static const char *names[] = {"Source", "Copy", "Invert", "Exposure", "Lookup", "Cube", "BoxBlur", "Gaussian",
                                   "Mask", "Bloom", "MotionBlur", "ProgressiveMix", "Composite", "Transform",
                                   "GradientMap", "Morphology", "RgbSplit", "Mix", "HueSaturation", "BlackWhite",
-                                  "ColorBalance", "Clear", "MorphologyStep", "MorphologyCombine"};
+                                  "ColorBalance", "Clear", "MorphologyStep", "MorphologyCombine", "Bokeh"};
     static_assert(std::size(names) == gpuOperationCount);
     std::map<QString, int> counts;
     for (int i = 0; i <= output && i < int(nodes.size()); ++i)

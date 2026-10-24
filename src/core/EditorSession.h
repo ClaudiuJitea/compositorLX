@@ -1,5 +1,6 @@
 #pragma once
 #include "rendering/RgbSplit.h"
+#include "rendering/LensEffects.h"
 #include "rendering/Scanlines.h"
 #include "rendering/ProgressiveBlur.h"
 
@@ -48,6 +49,7 @@ public:
     CameraRawSettings lastCameraRaw;
     QVariantMap filterMemory;
     DitherSettings lastDither;
+    LensEffectSettings lastLensEffects;
 
     [[nodiscard]] const std::shared_ptr<Document> &document() const { return document_; }
     [[nodiscard]] std::shared_ptr<Document> &document() { return document_; }
@@ -208,6 +210,7 @@ public:
     bool applyProgressiveBlur(const ProgressiveBlurSettings &settings);
     bool convertDepth(bool sixteenBit);
     bool applyRgbSplit(const RgbSplitSettings &settings);
+    bool applyLensEffects(const LensEffectSettings &settings);
     bool splitChannels();
     bool applyLastFilter();
     bool hasLastFilter() const { return bool(lastFilter_); }

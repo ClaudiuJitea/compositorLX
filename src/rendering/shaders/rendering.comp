@@ -234,6 +234,17 @@ void boxBlur(ivec2 xy) {
         }
     }
 }
+// Lens Effects' Bokeh, as macOS MetalBokeh: how far `o` (in disc radii) is toward the aperture's edge, 1 on it.
+float aperture(vec2 o, int shape, vec2 outward) {
+    if (shape == 1) {
+        vec2 q = abs(o);
+        return max(q.x * .866025 + q.y * .5, q.y) / .866025 * .93;
+    }
+    if (shape == 2) return length(o * vec2(1, .62));
+    // The disc clipped by a second one shifted toward the frame's middle, more so farther out.
+    if (shape == 3) return max(length(o), length(o + outward * 1.25));
+    return length(o);
+}
 void main() {
     ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
     uint operation = op();
@@ -382,7 +393,8 @@ void main() {
             float t = spectral == 1 ? 0 : (float(i) + noise) / spectral * 2 - 1;
             vec3 weight = vec3(smoothstep(-.3, 1, t), 1 - smoothstep(0, 1, abs(t)) + .05, smoothstep(-.3, 1, -t));
             for (int j = 0; j < smear; ++j) {
-                float u = smear == 1 ? 0 : (float(j) + noise) / smear;
+                // Both ways along the split, centered on the pixel, so the image does not shift one way.
+                float u = smear == 1 ? 0 : (float(j) + noise) / smear - .5;
                 vec2 q = at - axis * (p.v[RGB_SPLIT_DISTANCE] * t + p.v[RGB_SPLIT_BLUR] * u);
                 vec4 value = vec4(0);
                 if (!((q.x < 0 && (edges & 1) == 0) || (q.x > p.width && (edges & 2) == 0) ||
@@ -395,6 +407,28 @@ void main() {
         }
         alpha /= total;
         o = vec4(color / total, max(max(alpha.r, alpha.g), alpha.b));
+    } else if (operation == OP_BOKEH) {
+        vec2 at = vec2(xy) + .5;
+        vec2 fromMiddle = (at - vec2(p.width, p.height) * .5) / (max(float(p.width), float(p.height)) * .5);
+        vec2 outward = fromMiddle * min(1, length(fromMiddle));
+        int shape = int(p.v[BOKEH_SHAPE]);
+        float radius = max(p.v[BOKEH_RADIUS], .5), ring = p.v[BOKEH_RING];
+        int reachX = int(ceil(radius)), reachY = int(ceil(radius * (shape == 2 ? 1.62 : 1)));
+        float soft = 1 / radius;
+        vec4 sum = vec4(0);
+        float total = 0;
+        for (int dy = -reachY; dy <= reachY; dy++) {
+            for (int dx = -reachX; dx <= reachX; dx++) {
+                float d = aperture(vec2(dx, dy) / radius, shape, outward);
+                float inside = 1 - smoothstep(1 - soft, 1, d);
+                if (inside <= 0) continue;
+                // A lens that draws its discs with a bright rim, as many fast ones do.
+                float weight = inside * (1 + ring * 2.5 * smoothstep(.6, .97, d));
+                sum += fetch(xy + ivec2(dx, dy)) * weight;
+                total += weight;
+            }
+        }
+        o = sum / max(total, 1e-5);
     } else if (operation == OP_MIX) {
         float amount = p.v[MIX_AMOUNT];
         o = amount < 0 ? a + loadAux(index) : mix(a, loadAux(index), amount);

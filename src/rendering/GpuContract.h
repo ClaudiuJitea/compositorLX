@@ -29,8 +29,9 @@ enum class GpuOp : unsigned {
     Clear = 21,
     MorphologyStep = 22,
     MorphologyCombine = 23,
+    Bokeh = 24,
 };
-inline constexpr unsigned gpuOperationCount = 24;
+inline constexpr unsigned gpuOperationCount = 25;
 
 enum class GpuFormat : unsigned {
     Float32 = 0,
@@ -98,5 +99,6 @@ struct BlackWhite { enum : int { red = 0, yellow = 1, green = 2, cyan = 3, blue 
 struct ColorBalance { enum : int { shadowRed = 0, shadowGreen = 1, shadowBlue = 2, midRed = 3, midGreen = 4, midBlue = 5, highlightRed = 6, highlightGreen = 7, highlightBlue = 8, preserveLuminosity = 9, }; };
 struct MorphologyStep { enum : int { step = 0, axis = 1, erode = 2, count = 3, }; };
 struct MorphologyCombine { enum : int { radius = 0, axis = 1, erode = 2, run = 3, }; };
+struct Bokeh { enum : int { radius = 0, shape = 1, ring = 2, }; };
 } // namespace GpuParam
 } // namespace compositor

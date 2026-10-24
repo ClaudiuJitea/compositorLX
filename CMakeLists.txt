@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CompositorLX VERSION 0.5.6 LANGUAGES C CXX)
+project(CompositorLX VERSION 0.5.8 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(FetchContent)
@@ -155,6 +155,8 @@ add_library(compositor_core
     src/rendering/RendererSelfCheck.cpp
     src/rendering/RgbSplitVulkan.cpp
     src/rendering/RgbSplit.cpp
+    src/rendering/LensEffects.cpp
+    src/rendering/LensEffects.h
     src/rendering/ProgressiveBlur.cpp
     src/rendering/DeepImage.cpp
     src/rendering/Scanlines.cpp

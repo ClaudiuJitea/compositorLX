@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.5.6-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.5.8-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -29,7 +29,7 @@ CompositorLX has a shared Vulkan renderer, introduced in the refreshed 0.5.5 rel
 
 - **The canvas** renders the whole document on the GPU (in canvas tiles for large documents): all 24 blend modes, masks, folders, transformed layers, layer effects and the common filter layers. After an edit, only the edited layer and the ones above it are re-rendered.
 - **Exports are identical everywhere.** In Automatic mode, export, merge, flatten, GIF frames and project previews always use the CPU reference, so a file renders byte-identically on any machine. Choose GPU explicitly to accelerate them too.
-- **Filters** run on the GPU from 512 × 512 pixels when measured faster there: Gaussian, Motion and Progressive Blur, Bloom, RGB Split, Exposure, Hue/Saturation, Levels, Curves, Gradient Map, Black & White and Color Balance. Previews of large layers render in the background and never block the dialog; Camera RAW also computes its histogram in the background.
+- **Filters** run on the GPU from 512 × 512 pixels when measured faster there: Gaussian, Motion and Progressive Blur, Bloom, RGB Split, Lens Effects' Bokeh, Exposure, Hue/Saturation, Levels, Curves, Gradient Map, Black & White and Color Balance. Previews of large layers render in the background and never block the dialog; Camera RAW also computes its histogram in the background.
 - **View › Rendering…** chooses Automatic, CPU or GPU, the GPU working memory, the canvas presentation (OpenGL is automatic on Mesa and Intel drivers) and, on multi-GPU systems, the device. It shows diagnostics and a log of recent GPU work, and runs a self-check.
 
 Measured on Intel Iris Xe at 1920 × 1080, including uploads (cold) or with the image already on the GPU (warm, as during slider previews):
@@ -45,6 +45,17 @@ Measured on Intel Iris Xe at 1920 × 1080, including uploads (cold) or with the 
 | Exposure | 9.3 ms | 8.6 ms | 2.9 ms |
 
 A 4000 × 3000 document with five layers, a rotated and a masked one, and two filter layers renders on the canvas in 238 ms instead of 1254 ms; a 6000 × 4000 document with ten layers and effects in 838 ms instead of 3120 ms. The CPU paths got faster too: Exposure (37×) and Hue/Saturation (5.5×). These numbers come from one machine; AMD and NVIDIA GPUs have not been tested on hardware. Remove Background runs on the CPU in the released builds. See [GPU rendering notes](docs/GPU_ROLLOUT.md) for coverage, accuracy, controls and the full benchmark.
+
+## What's new in version 0.5.8
+
+Synced with macOS Compositor 1.5.8 (including 1.5.7):
+
+- **Filter › Lens Effects**: anamorphic flare, starburst, mist, prism, and bokeh in round, hexagon, oval or cat's-eye shapes, all made from the picture's own light. Prism's copies stay crisp and echo into the shadows, one way or both, with Blur to soften them. Threshold goes to 100%, where only the biggest, brightest one or two lights flare. Bokeh uses Vulkan compute when available.
+- **GIFs play at their real speed**: playback follows each frame's saved delay however long a frame takes to decode, skipping frames it has fallen behind on, and frames decode from one reader kept open instead of from the first frame each time. The delay button and menu show the GIF's own milliseconds (for example *40–120ms*) instead of *Original*.
+- **RGB Split**: the blur smears both ways along the split, so the image no longer looks shifted.
+- **Projects**: format version 27, written by the macOS GIF branch's builds, opens (and saves again as version 17). Projects saved by 1.5.4 and 1.5.5 (versions 15 and 16) already opened in CompositorLX.
+
+See [the port audit and verification notes](docs/UPSTREAM_SYNC_1.5.8.md) for implementation details and platform differences.
 
 ## What's new in version 0.5.6
 
@@ -203,19 +214,19 @@ Not ported (macOS-only): the Metal GPU canvas, Quick Look thumbnails and the Spa
 
 ## Install
 
-The 0.5.6 binaries were built on Ubuntu 26.04 and require glibc 2.43 or newer. The Debian package uses system dependencies; the AppImage bundles its other runtime libraries. Build from source for older distributions.
+The 0.5.8 binaries were built on Ubuntu 26.04 and require glibc 2.43 or newer. The Debian package uses system dependencies; the AppImage bundles its other runtime libraries. Build from source for older distributions.
 
 Download an [AppImage or Debian package](https://github.com/ClaudiuJitea/compositorLX/releases) and run:
 
 ```sh
-chmod +x CompositorLX-0.5.6-x86_64.AppImage
-./CompositorLX-0.5.6-x86_64.AppImage
+chmod +x CompositorLX-0.5.8-x86_64.AppImage
+./CompositorLX-0.5.8-x86_64.AppImage
 ```
 
 Or install the `.deb` on Debian/Ubuntu:
 
 ```sh
-sudo apt install ./compositorlx_0.5.6_amd64.deb
+sudo apt install ./compositorlx_0.5.8_amd64.deb
 compositor-lx
 ```
 
@@ -272,6 +283,7 @@ The original macOS app remains the behavior and file-format reference. Linux-spe
 
 ## Version history
 
+- **v0.5.8**: Sync with macOS Compositor 1.5.8: Filter › Lens Effects (anamorphic flare, starburst, mist, prism, shaped bokeh); GIF playback on the saved delays with millisecond labels; RGB Split smears both ways; format 27 opens.
 - **v0.5.6**: Sync with macOS Compositor 1.5.6: GIF timeline with play button, delay presets and per-frame menu; Layers search field and multi-kind filter menu; Canvas/Image Size keep the zoom and recenter.
 - **v0.5.5**: Editable GIF layers and export, PDF import, RGB Split and channel packing, new filter layers, styled lines, pen pressure, search, adaptive tools, PSD artboards, and project formats 15–17.
 

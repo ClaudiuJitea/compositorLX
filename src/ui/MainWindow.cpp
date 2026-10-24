@@ -24,6 +24,7 @@
 #include "ui/ToolOptionsLayout.h"
 #include "ui/EditorIcons.h"
 #include "ui/SegmentedControl.h"
+#include "rendering/LensEffects.h"
 #include "ui/EffectsDialog.h"
 #include "ui/CameraRawDialog.h"
 #include "ui/RawDevelopDialog.h"
@@ -3479,6 +3480,10 @@ void MainWindow::createActions()
     auto *rgbSplitAction = filterMenu->addAction(tr("RGB Split…"));
     rgbSplitAction->setObjectName("cmdRgbSplit");
     connect(rgbSplitAction, &QAction::triggered, this, [this] { filterLayerDialog("RGB Split"); });
+    // mac FilterKind order: Lens Effects follows RGB Split.
+    auto *lensEffectsAction = filterMenu->addAction(tr("Lens Effects…"));
+    lensEffectsAction->setObjectName(QStringLiteral("cmdLensEffects"));
+    connect(lensEffectsAction, &QAction::triggered, this, &MainWindow::lensEffectsDialog);
     auto *bloomGlowAction = filterMenu->addAction(tr("Bloom / Glow…"));
     auto *ditherAction = filterMenu->addAction(tr("Dither…"));
     auto *tonalContrastAction = filterMenu->addAction(tr("Tonal Contrast…"));
@@ -3502,7 +3507,7 @@ void MainWindow::createActions()
     for (QAction *item : {levels, exposure, hueSaturation, curves, gradientMap, grain, invert, blackWhite, colorBalance, noise, lens}) item->setProperty("needsCommittedText", true);
     // mac canAdjustColors: an unhidden pixel layer, no mask targeted, one layer selected, a selection that isn't empty.
     for (QAction *item : {levels, exposure, hueSaturation, curves, gradientMap, grain, blackWhite, colorBalance, noise, lens,
-                          cameraRaw, gaussianBlur, motionBlur, bloomGlowAction, ditherAction, tonalContrastAction})
+                          cameraRaw, gaussianBlur, motionBlur, bloomGlowAction, ditherAction, tonalContrastAction, lensEffectsAction})
         item->setProperty("needsPixelLayer", true);
     vignetteAction->setProperty("needsPixelLayer", true);
     vignetteAction->setProperty("allowsEmptyLayer", true);   // mac canVignette: Vignette can also start an empty layer
@@ -5218,6 +5223,168 @@ void MainWindow::tonalContrastDialog()
     preview();
 
     if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        previewEnabled->setChecked(true);
+        preview();
+    } else {
+        restoreLayer(document_.get(), session_, target, original);
+    }
+    session_.endEdit();
+    syncDocumentViews();
+}
+
+// mac FilterSheet.lensEffectsControls: which effect, then its own settings, each slider with its unit and help.
+void MainWindow::lensEffectsDialog()
+{
+    Layer *active = session_.activeLayer();
+    if (!active || active->group || active->image.isNull() || session_.isMaskSelected()) return;
+    const QUuid target = active->id;
+    const Layer original = *active;
+
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("lensEffectsDialog"));
+    dialog.setWindowTitle(tr("Lens Effects"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto settings = std::make_shared<LensEffectSettings>(session_.lastLensEffects.normalized());
+    std::vector<std::pair<int, std::function<bool()>>> rows;  // form row, visibility rule
+    const auto showsFor = [settings](std::initializer_list<LensEffect> effects) {
+        const std::vector<LensEffect> list(effects);
+        return [settings, list] { return std::find(list.begin(), list.end(), settings->effect) != list.end(); };
+    };
+    const auto track = [&](std::function<bool()> visible) { rows.emplace_back(form->rowCount() - 1, std::move(visible)); };
+
+    auto *effect = new QComboBox(&dialog);
+    effect->setObjectName(QStringLiteral("lensEffect"));
+    for (LensEffect value : LensEffectSettings::effects) effect->addItem(LensEffectSettings::effectName(value), int(value));
+    effect->setCurrentIndex(std::max(0, effect->findData(int(settings->effect))));
+    form->addRow(tr("Effect"), effect);
+
+    const auto spin = [&](const QString &name, const QString &label, double min, double max, int decimals, const QString &suffix,
+                          double LensEffectSettings::*field, std::function<bool()> visible, const QString &help = {}) {
+        auto *box = new QDoubleSpinBox(&dialog);
+        box->setObjectName(name);
+        box->setDecimals(decimals);
+        box->setRange(min, max);
+        box->setValue((*settings).*field);
+        box->setSuffix(suffix);
+        box->setToolTip(help);
+        box->setFixedWidth(92); // one width for every field, so every slider starts and ends in the same place (mac)
+        addScrubRow(form, label, box)->setToolTip(help);
+        if (!help.isEmpty()) form->itemAt(form->rowCount() - 1, QFormLayout::FieldRole)->widget()->setToolTip(help);
+        track(std::move(visible));
+        connect(box, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, [settings, field](double v) { (*settings).*field = v; });
+        return box;
+    };
+    const QString percent = tr("%"), degrees = QString::fromUtf8("\xc2\xb0");
+    const auto flare = showsFor({LensEffect::AnamorphicFlare}), star = showsFor({LensEffect::Starburst});
+    const auto mist = showsFor({LensEffect::Mist}), prism = showsFor({LensEffect::Prism}), bokeh = showsFor({LensEffect::Bokeh});
+    spin(QStringLiteral("lensFlareAmount"), tr("Amount"), 0, 100, 0, percent, &LensEffectSettings::flareAmount, flare);
+    spin(QStringLiteral("lensFlareLength"), tr("Length"), 1, 100, 0, percent, &LensEffectSettings::flareLength, flare,
+         tr("How far the streaks reach across the picture"));
+    spin(QStringLiteral("lensFlareThreshold"), tr("Threshold"), 50, 100, 0, percent, &LensEffectSettings::threshold, flare,
+         tr("How bright a light has to be to flare; near 100, only the biggest, brightest spots"));
+    spin(QStringLiteral("lensFlareBlue"), tr("Blue"), 0, 100, 0, percent, &LensEffectSettings::flareBlue, flare,
+         tr("How far the lens's coatings turn each streak blue along its length; none keeps the light's own color"));
+    spin(QStringLiteral("lensStarAmount"), tr("Amount"), 0, 100, 0, percent, &LensEffectSettings::starAmount, star);
+    spin(QStringLiteral("lensStarLength"), tr("Length"), 2, 40, 0, percent, &LensEffectSettings::starLength, star,
+         tr("How far the spikes reach"));
+    spin(QStringLiteral("lensStarThreshold"), tr("Threshold"), 50, 100, 0, percent, &LensEffectSettings::threshold, star,
+         tr("How bright a light has to be to sparkle; near 100, only the biggest, brightest spots"));
+    spin(QStringLiteral("lensStarAngle"), tr("Angle"), -180, 180, 0, degrees, &LensEffectSettings::starAngle, star);
+    QStringList pointNames;
+    for (int points : LensEffectSettings::starPointChoices) pointNames << QString::number(points);
+    auto *points = new SegmentedControl(pointNames, &dialog);
+    points->setObjectName(QStringLiteral("lensStarPoints"));
+    points->setToolTip(tr("How many spikes each light has, as the lens's aperture blades make them"));
+    const auto *pointChoice = std::find(LensEffectSettings::starPointChoices.begin(), LensEffectSettings::starPointChoices.end(), settings->starPoints);
+    points->setCurrentIndex(int(pointChoice - LensEffectSettings::starPointChoices.begin()));
+    form->addRow(tr("Points"), points);
+    track(star);
+    spin(QStringLiteral("lensMistStrength"), tr("Strength"), 0, 100, 0, percent, &LensEffectSettings::mistStrength, mist,
+         tr("How much light scatters: a soft halo around bright areas, and gently lifted shadows"));
+    spin(QStringLiteral("lensMistSize"), tr("Size"), 0, 100, 0, percent, &LensEffectSettings::mistSize, mist, tr("How far the light spreads"));
+    spin(QStringLiteral("lensPrismAmount"), tr("Amount"), 0, 100, 0, percent, &LensEffectSettings::prismAmount, prism);
+    spin(QStringLiteral("lensPrismCopies"), tr("Copies"), 1, 8, 0, {}, &LensEffectSettings::prismCopies, prism,
+         tr("How many times the picture echoes, each fainter"));
+    spin(QStringLiteral("lensPrismOffset"), tr("Offset"), 0, 50, 0, percent, &LensEffectSettings::prismOffset, prism,
+         tr("How far apart the copies are"));
+    spin(QStringLiteral("lensPrismAngle"), tr("Angle"), -180, 180, 0, degrees, &LensEffectSettings::prismAngle, prism,
+         tr("Which way the copies step"));
+    spin(QStringLiteral("lensPrismBlur"), tr("Blur"), 0, 100, 0, percent, &LensEffectSettings::prismBlur, prism,
+         tr("Soften the copies, more the farther they're pushed"));
+    auto *direction = new SegmentedControl({tr("One Way"), tr("Both Ways")}, &dialog);
+    direction->setObjectName(QStringLiteral("lensPrismDirection"));
+    direction->setToolTip(tr("Copies to one side of the picture, or out to both"));
+    direction->setCurrentIndex(settings->prismBothWays ? 1 : 0);
+    form->addRow(tr("Direction"), direction);
+    track(prism);
+    spin(QStringLiteral("lensBokehSize"), tr("Size"), LensEffectSettings::bokehSizeMin, LensEffectSettings::bokehSizeMax, 1, percent,
+         &LensEffectSettings::bokehRadius, bokeh, tr("How far out of focus: the size of each disc"));
+    spin(QStringLiteral("lensBokehBrightness"), tr("Brightness"), 0, 100, 0, percent, &LensEffectSettings::bokehBrightness, bokeh,
+         tr("How brightly lights open into discs"));
+    spin(QStringLiteral("lensBokehRing"), tr("Ring"), 0, 100, 0, percent, &LensEffectSettings::bokehRing, bokeh,
+         tr("Light gathered at each disc's rim, as some lenses draw it"));
+    auto *shape = new QComboBox(&dialog);
+    shape->setObjectName(QStringLiteral("lensBokehShape"));
+    shape->setToolTip(tr("The aperture's shape: round wide open, a hexagon of blades, an anamorphic oval, or a cat's eye toward the edges"));
+    for (BokehShape value : LensEffectSettings::shapes) shape->addItem(LensEffectSettings::shapeName(value), int(value));
+    shape->setCurrentIndex(std::max(0, shape->findData(int(settings->bokehShape))));
+    form->addRow(tr("Shape"), shape);
+    track(bokeh);
+    layout->addLayout(form);
+
+    auto *previewEnabled = new QCheckBox(tr("Preview"), &dialog);
+    previewEnabled->setChecked(true);
+    previewEnabled->setObjectName(QStringLiteral("filterPreview"));
+    layout->addWidget(previewEnabled);
+    if (session_.document()->selection) {
+        auto *limited = new QLabel(tr("Limited to the selection"), &dialog);
+        limited->setEnabled(false);
+        layout->addWidget(limited);
+    }
+
+    session_.beginEdit(QStringLiteral("Lens Effects"));
+    const auto updateRows = [form, rows] {
+        for (const auto &[row, visible] : rows) form->setRowVisible(row, visible());
+    };
+    // Large layers preview off the GUI thread (previewFilter), the newest settings replacing any still waiting.
+    const auto preview = [this, &dialog, target, original, settings, previewEnabled] {
+        if (previewEnabled->isChecked()) previewFilter(&dialog, target, original, [value = *settings](EditorSession &s) { return s.applyLensEffects(value); });
+        else restoreLayer(document_.get(), session_, target, original);
+        canvas_->invalidateDocument();
+    };
+    const auto refresh = preview;
+    for (auto *box : dialog.findChildren<QDoubleSpinBox *>()) connect(box, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, refresh);
+    connect(previewEnabled, &QCheckBox::toggled, &dialog, refresh);
+    connect(effect, &QComboBox::currentIndexChanged, &dialog, [&dialog, effect, settings, updateRows, refresh] {
+        settings->effect = LensEffect(effect->currentData().toInt());
+        updateRows();
+        dialog.adjustSize();
+        refresh();
+    });
+    connect(points, &SegmentedControl::currentIndexChanged, &dialog, [settings, refresh](int index) {
+        settings->starPoints = LensEffectSettings::starPointChoices[size_t(std::clamp(index, 0, 4))];
+        refresh();
+    });
+    connect(direction, &SegmentedControl::currentIndexChanged, &dialog, [settings, refresh](int index) {
+        settings->prismBothWays = index == 1;
+        refresh();
+    });
+    connect(shape, &QComboBox::currentIndexChanged, &dialog, [shape, settings, refresh] {
+        settings->bokehShape = BokehShape(shape->currentData().toInt());
+        refresh();
+    });
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    updateRows();
+    preview();
+
+    if (runFloatingDialog(dialog) == QDialog::Accepted) {
+        session_.lastLensEffects = settings->normalized();
         previewEnabled->setChecked(true);
         preview();
     } else {
@@ -7540,7 +7707,7 @@ void MainWindow::updateCommandStates()
         for (const char *name : {"cmdExpand", "cmdContract", "commandFeatherSelection"}) enabled(name, hasSelection);
         for (const char *name : {"cmdLevels", "cmdHueSaturation", "cmdCurves"}) enabled(name, adjustableOrLive);
         for (const char *name : {"cmdExposure", "cmdGradientMap", "cmdGrain", "cmdBlackWhite", "cmdColorBalance", "cmdAddNoise", "cmdLens", "cmdCameraRaw",
-                                 "cmdRgbSplit", "cmdGaussianBlur", "cmdMotionBlur", "cmdProgressiveBlur", "cmdScanlines", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdRemoveBackground"}) enabled(name, adjustable);
+                                 "cmdRgbSplit", "cmdLensEffects", "cmdGaussianBlur", "cmdMotionBlur", "cmdProgressiveBlur", "cmdScanlines", "cmdBloom", "cmdDither", "cmdTonalContrast", "cmdRemoveBackground"}) enabled(name, adjustable);
         enabled("cmdVignette", vignetteOk);
         enabled("cmdLastFilter", session_.hasLastFilter() && (adjustable || (vignetteOk && session_.lastFilterName() == QStringLiteral("Vignette"))));
         const bool depthOk = paintOk && single && !maskTarget && !editingText && active && !active->text;

@@ -106,7 +106,7 @@ int main(int argc, char **argv)
     for (const Layer &layer : s.document()->layers) if (layer.name == QLatin1String("Sky")) { s.selectLayer(layer.id); s.selectMaskTarget(false); break; }
     s.deselect();
     window.syncDocumentViews();
-    const char *dialogs[] = {"commandGridSettings", "commandColorRange", "cmdDither", "cmdLevels", "cmdHueSaturation", "cmdGaussianBlur", "cmdCameraRaw", "cmdBlackWhite"};
+    const char *dialogs[] = {"commandGridSettings", "commandColorRange", "cmdDither", "cmdLensEffects", "cmdLevels", "cmdHueSaturation", "cmdGaussianBlur", "cmdCameraRaw", "cmdBlackWhite"};
     for (const char *name : dialogs) {
         QAction *action = window.findChild<QAction *>(QLatin1String(name));
         if (!action) { qWarning() << "no action" << name; continue; }

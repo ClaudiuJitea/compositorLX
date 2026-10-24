@@ -242,6 +242,7 @@ private:
     void vignetteDialog();
     void bloomGlowDialog();
     void ditherDialog();
+    void lensEffectsDialog();
     void scanlinesDialog();
     void progressiveBlurDialog();
     void filterLayerDialog(const QString &kind);

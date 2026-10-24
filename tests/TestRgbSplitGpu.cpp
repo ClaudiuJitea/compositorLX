@@ -1,5 +1,6 @@
 #include "rendering/DeepImage.h"
 #include "rendering/RgbSplit.h"
+#include "rendering/LensEffects.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QTest>
@@ -77,6 +78,33 @@ private slots:
         const double error = difference(s.applyCpu(image, edges), gpu);
         const double tolerance = format == QImage::Format_RGBA8888_Premultiplied ? 1.01/255 : 0.0001;
         QVERIFY2(error <= tolerance, qPrintable(QString("maximum channel error %1 > %2").arg(error,0,'g',10).arg(tolerance)));
+    }
+    // Lens Effects' Bokeh (macOS MetalBokeh): the Vulkan gather and the CPU loop agree for every shape and ring.
+    void bokehParity_data() {
+        QTest::addColumn<int>("shape"); QTest::addColumn<double>("radius"); QTest::addColumn<double>("ring");
+        for (int shape = 0; shape < 4; ++shape)
+            for (double radius : {.5, 3.5, 12.0})
+                for (double ring : {0.0, 1.0})
+                    QTest::newRow(qPrintable(QString("%1-%2-%3").arg(shape).arg(radius).arg(ring))) << shape << radius << ring;
+    }
+    void bokehParity() {
+        QFETCH(int, shape); QFETCH(double, radius); QFETCH(double, ring);
+        QImage image = fixture({41, 33}, QImage::Format_RGBA32FPx4_Premultiplied);
+        for (int y = 0; y < image.height(); ++y) {
+            auto *p = reinterpret_cast<float *>(image.scanLine(y));
+            for (int x = 0; x < image.width(); ++x) { p[4*x] *= 20; p[4*x+3] = 1; } // lights brighter than white
+        }
+        bool accelerated = false;
+        const QImage gpu = LensOptics::bokehKernel(image, radius, BokehShape(shape), ring, RenderBackend::Vulkan, &accelerated);
+        if (!accelerated) {
+            QVERIFY2(!qEnvironmentVariableIsSet("COMPOSITOR_REQUIRE_VULKAN_TESTS"), "Vulkan bokeh unavailable");
+            QSKIP("Vulkan bokeh unavailable");
+        }
+        bool cpuAccelerated = true;
+        const QImage cpu = LensOptics::bokehKernel(image, radius, BokehShape(shape), ring, RenderBackend::Cpu, &cpuAccelerated);
+        QVERIFY(!cpuAccelerated);
+        const double error = difference(cpu, gpu);
+        QVERIFY2(error <= 1e-4 * 20, qPrintable(QString("maximum channel error %1").arg(error, 0, 'g', 10)));
     }
     void largeCoordinates() {
         const auto image = fixture({2049,17}, QImage::Format_RGBA32FPx4_Premultiplied);

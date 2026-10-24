@@ -70,7 +70,9 @@ QImage RgbSplitSettings::applyCpu(const QImage &image, unsigned sides) const
                 const double t = spectral == 1 ? 0 : (i + jitter) / spectral * 2 - 1;
                 const std::array<double, 3> weight{smooth(-.3, 1, t), 1 - smooth(0, 1, std::abs(t)) + .05, smooth(-.3, 1, -t)};
                 for (int j = 0; j < smear; ++j) {
-                    const double u = smear == 1 ? 0 : (j + jitter) / smear;
+                    // Each streak runs both ways along the split, centered on the pixel, so the image smears out
+                    // without shifting one way (macOS MetalDispersion).
+                    const double u = smear == 1 ? 0 : (j + jitter) / smear - .5;
                     const QPointF q = at - axis * (distance * t + blur * u);
                     std::array<double, 4> sample{};
                     if (!((q.x() < 0 && !(sides & 1)) || (q.x() > width && !(sides & 2)) ||

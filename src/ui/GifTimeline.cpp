@@ -79,22 +79,15 @@ GifTimeline::GifTimeline(EditorSession &session, std::function<void()> changed, 
         menu.exec(frames_->viewport()->mapToGlobal(pos));
         duplicate_->setData({}); delete_->setData({});
     });
-    timer_ = new QTimer(this); timer_->setSingleShot(true);
+    timer_ = new QTimer(this); timer_->setSingleShot(true); timer_->setTimerType(Qt::PreciseTimer);
     connect(play_, &QToolButton::clicked, this, [this] {
-        if (timer_->isActive()) { stop(); return; }
+        if (playing_) { stop(); return; }
         const auto *l = session_.activeLayer(); if (!l || !l->gif || l->gif->frames.size() < 2) return;
+        playing_ = true;
         play_->setIcon(editorIcon(35)); play_->setToolTip(tr("Pause")); play_->setAccessibleName(tr("Pause"));
-        timer_->start(l->gif->delay(l->gif->selected));
+        startPlayback();
     });
-    // While playing, each frame shows for its delay and then the next, round and round.
-    connect(timer_, &QTimer::timeout, this, [this] {
-        const auto *l = session_.activeLayer(); if (!l || !l->gif || l->id != layerId_ || !isVisible() || l->gif->frames.size() < 2) { stop(); return; }
-        const auto &a = *l->gif;
-        int pos = 0; for (int i = 0; i < a.frames.size(); ++i) if (a.frames[i].index == a.selected) pos = i;
-        if (!session_.selectGifFrame(a.frames[(pos + 1) % a.frames.size()].index)) { stop(); return; }
-        changed_(); refresh();
-        l = session_.activeLayer(); if (l && l->gif) timer_->start(l->gif->delay(l->gif->selected));
-    });
+    connect(timer_, &QTimer::timeout, this, [this] { wake(); });
     connect(frames_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (refreshing_ || row < 0) return;
         stop(); if (session_.selectGifFrame(frames_->item(row)->data(Qt::UserRole).toInt())) { changed_(); refresh(); }
@@ -115,7 +108,51 @@ void GifTimeline::editFrame(QAction *action, bool duplicate)
 }
 void GifTimeline::stop()
 {
+    playing_ = false; playback_ = {};
     timer_->stop(); play_->setIcon(editorIcon(34)); play_->setToolTip(tr("Play")); play_->setAccessibleName(tr("Play"));
+}
+void GifTimeline::startPlayback()
+{
+    const auto *l = session_.activeLayer(); if (!l || !l->gif) { stop(); return; }
+    const auto &a = *l->gif;
+    playingFrames_.clear(); playingDurations_.clear();
+    int initial = 0;
+    for (int i = 0; i < a.frames.size(); ++i) {
+        playingFrames_.append(a.frames[i].index);
+        playingDurations_.append(qint64(std::max(20, a.delay(a.frames[i].index))) * 1000);
+        if (a.frames[i].index == a.selected) initial = i;
+    }
+    playback_ = GifPlayback(playingDurations_, initial);
+    if (!playback_.valid()) { stop(); return; }
+    clock_.start();
+    timer_->start(int((playback_.next() + 999) / 1000));
+}
+// While playing, each frame shows from its own start in the loop: decoding never lengthens the saved delays, and a
+// frame whose time passed while the last one decoded is skipped.
+void GifTimeline::wake()
+{
+    const auto *l = session_.activeLayer();
+    if (!playing_ || !l || !l->gif || l->id != layerId_ || !isVisible() || l->gif->frames.size() < 2) { stop(); return; }
+    const auto step = playback_.advance(clock_.nsecsElapsed() / 1000);
+    if (step.show >= 0) {
+        if (!session_.selectGifFrame(playingFrames_[step.show])) { stop(); return; }
+        changed_(); refresh();
+        if (!playing_) return;
+    }
+    timer_->start(int(std::max<qint64>(0, playback_.next() - clock_.nsecsElapsed() / 1000 + 999) / 1000));
+}
+QString GifTimeline::originalDelays(const GifAnimation &a, bool spaced)
+{
+    int shortest = 0, longest = 0;
+    for (int i = 0; i < a.frames.size(); ++i) {
+        const auto &f = a.frames[i];
+        const int delay = a.delays.contains(f.index) ? a.delays.value(f.index)
+                          : a.source && f.sourceIndex < a.source->delays.size() ? a.source->delays[f.sourceIndex] : 100;
+        shortest = i ? std::min(shortest, delay) : delay; longest = i ? std::max(longest, delay) : delay;
+    }
+    if (a.frames.isEmpty()) return {};
+    return (shortest == longest ? QString::number(shortest) : QStringLiteral("%1–%2").arg(shortest).arg(longest))
+           + (spaced ? QStringLiteral(" ms") : QStringLiteral("ms"));
 }
 void GifTimeline::refresh(bool canvasOnly)
 {
@@ -149,10 +186,17 @@ void GifTimeline::refresh(bool canvasOnly)
         if (f.index == a.selected) current = item;
     }
     if (current) { frames_->setCurrentItem(current); frames_->scrollToItem(current); }
-    delay_->setText(a.sameDelay ? tr("%1ms").arg(a.uniformDelay) : tr("Original"));
+    delay_->setText(a.sameDelay ? tr("%1ms").arg(a.uniformDelay) : originalDelays(a, false));
+    if (auto *original = delayMenu_->findChild<QAction *>("gifDelayOriginal", Qt::FindDirectChildrenOnly))
+        original->setText(tr("%1 · Original").arg(originalDelays(a)));
     for (auto *action : delayMenu_->actions())
         if (action->isCheckable()) action->setChecked(action->data().isValid() ? a.sameDelay && action->data().toInt() == a.uniformDelay : !a.sameDelay);
     play_->setEnabled(a.frames.size() > 1); if (a.frames.size() < 2) stop();
     refreshing_ = false;
+    if (playing_) {
+        QVector<int> identities; QVector<qint64> durations;
+        for (const auto &f : a.frames) { identities.append(f.index); durations.append(qint64(std::max(20, a.delay(f.index))) * 1000); }
+        if (identities != playingFrames_ || durations != playingDurations_) startPlayback();
+    }
 }
 }

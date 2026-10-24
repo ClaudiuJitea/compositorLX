@@ -2,7 +2,7 @@
 
 The schema reference is Compositor's `docs/project-format.md`. A `.comp` project is a directory containing `manifest.json` and `images/` assets. Layers are stored bottom to top. The working space is sRGB; layer transforms and optional text, shapes, effects, masks, and adjustment metadata stay separate from source pixels.
 
-CompositorLX reads versions 1–17. Existing projects keep their version until an edit requires a later feature. Version promotion belongs to the edit's undo step. Saving does not silently discard unsupported metadata.
+CompositorLX reads versions 1–17 and 27, as the macOS app does (27 was written by builds of the macOS GIF branch; it passes every later-version rule and is saved again as 17). Any other version is refused with "This project uses format version N. This app supports versions 1–17 and 27." Existing projects keep their version until an edit requires a later feature. Version promotion belongs to the edit's undo step. Saving does not silently discard unsupported metadata.
 
 | Version | Added capability |
 | --- | --- |

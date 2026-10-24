@@ -159,6 +159,11 @@ add_executable(upstream156_tests TestUpstream156.cpp)
 target_link_libraries(upstream156_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME upstream156_tests COMMAND upstream156_tests -platform offscreen -nocrashhandler)
 
+add_executable(upstream158_tests TestUpstream158.cpp)
+target_link_libraries(upstream158_tests PRIVATE compositor_ui Qt6::Test ${GIF_LIBRARY})
+target_include_directories(upstream158_tests PRIVATE ${GIF_INCLUDE_DIR})
+add_test(NAME upstream158_tests COMMAND upstream158_tests -platform offscreen -nocrashhandler)
+
 add_executable(rgb_split_gpu_tests TestRgbSplitGpu.cpp)
 target_link_libraries(rgb_split_gpu_tests PRIVATE compositor_core Qt6::Test)
 add_test(NAME rgb_split_gpu_tests COMMAND rgb_split_gpu_tests)

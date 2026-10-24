@@ -44,6 +44,8 @@ OPERATIONS = [
     # O(log r) morphology: each step multiplies the run by `count` (a sparse table), then the combine covers the window.
     ('MorphologyStep', ['step', 'axis', 'erode', 'count']),
     ('MorphologyCombine', ['radius', 'axis', 'erode', 'run']),
+    # Lens Effects' Bokeh (macOS MetalBokeh): every pixel gathers the light within the aperture's shape.
+    ('Bokeh', ['radius', 'shape', 'ring']),
 ]
 # Must match compositor::BlendMode (core/Document.h); GpuContract.cpp static_asserts each value.
 BLEND_MODES = ['Normal', 'Darken', 'Multiply', 'ColorBurn', 'LinearBurn', 'Lighten', 'Screen', 'ColorDodge',
