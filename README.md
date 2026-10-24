@@ -46,7 +46,7 @@ On distributions older than glibc 2.43, [build from source](#build-from-source).
 - **Animated GIFs**: one layer per GIF with a frame timeline. Play, paint, duplicate, delete and retime frames, then export animated GIFs.
 - **Deep color and print**: 16-bit and HDR layers (EXR, Radiance), CMYK proofing, and CMYK JPEG, TIFF and PDF export.
 - **Files**: `.comp` projects interchangeable with the macOS app (versions 1–17 and 27), PSD/PSB with artboards, SVG, PDF, Camera RAW, HEIC/HEIF, WebP, PNG, JPEG and TIFF.
-- **GPU rendering**: a shared Vulkan renderer for the canvas and filters, with the CPU as reference and fallback. Exports stay byte-identical on every machine. See the [GPU notes](docs/GPU_ROLLOUT.md).
+- **GPU rendering**: a shared Vulkan renderer for the canvas and filters, with the CPU as reference and fallback; the rest runs on every CPU core. Exports stay byte-identical on every machine. See the [GPU notes](docs/GPU_ROLLOUT.md) and [what 0.5.8 sped up](docs/PERFORMANCE_0.5.8.md).
 - **Linux-native**: light, dark or follow-system themes, system fonts, HiDPI, Wayland support, customizable shortcuts, Search Commands (Ctrl+F), and crash-safe atomic saves.
 
 ## New in 0.5.8
@@ -58,6 +58,7 @@ Synced with macOS Compositor 1.5.8.
 </p>
 
 - **Filter › Lens Effects**: anamorphic flare, starburst, mist, prism, and bokeh in round, hexagon, oval or cat's-eye shapes, all made from the picture's own light. All five run on the GPU (Vulkan compute) when available, 2.2–5.7× faster than before on a 24-megapixel photo (Intel Iris Xe), with the CPU as fallback ([details](docs/LENS_EFFECTS_GPU.md)).
+- **Faster everywhere else too**: large documents and the live Hue/Saturation, Black & White, Color Balance, Gradient Map, Motion Blur, Add Noise and Grain layers render on the GPU canvas, Camera RAW's color table runs on the GPU (byte for byte the CPU's), and filters, layer effects, brushes, Liquify and Smudge use every CPU core. Brush and Liquify moves are 3–5× faster with large brushes, and Remove Background's preview refines a smaller copy as on macOS ([measurements](docs/PERFORMANCE_0.5.8.md)).
 - **Remove Background** no longer stays stuck on "Detecting foreground subjects…", and Select Subject and Object Selection apply their result again.
 - **GIFs play at their real speed**, on each frame's saved delay. The delay control shows the GIF's own milliseconds.
 - **RGB Split**'s blur smears both ways, so the image no longer shifts.
@@ -117,7 +118,7 @@ ctest --test-dir build
 
 ## Version history
 
-- **0.5.8**: macOS 1.5.8 sync. Lens Effects, GIF playback on saved delays, RGB Split smears both ways, format 27 opens. Refreshed: all Lens Effects on the GPU, and the Remove Background, Select Subject and Object Selection progress fix.
+- **0.5.8**: macOS 1.5.8 sync. Lens Effects, GIF playback on saved delays, RGB Split smears both ways, format 27 opens. Refreshed: all Lens Effects on the GPU, more of the canvas and Camera RAW on the GPU, filters, brushes and Liquify on all cores, and the Remove Background, Select Subject and Object Selection progress fix.
 - **0.5.6**: macOS 1.5.6 sync. GIF timeline redesign, Layers search and kind filter, Canvas Size keeps the zoom.
 - **0.5.5**: GIF layers and export, PDF import, RGB Split, Channel Pack, filter layers, styled lines, pen pressure, and the shared Vulkan renderer.
 - **0.5.3**: macOS 1.5.3 sync. 16-bit and HDR, CMYK, Export As, Progressive Blur, Scanlines, Last Filter, Search Commands.

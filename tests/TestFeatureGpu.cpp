@@ -138,18 +138,16 @@ private slots:
         QTest::addColumn<int>("kind");
         QTest::addColumn<bool>("gaussian");
         QTest::addColumn<bool>("monochromatic");
-        for (int kind = 0; kind < 2; ++kind)
-            for (bool gaussian : {false, true})
-                for (bool monochromatic : {false, true})
-                    QTest::newRow(qPrintable(QStringLiteral("%1-%2-%3").arg(kind ? "grain" : "noise").arg(gaussian).arg(monochromatic)))
-                        << kind << gaussian << monochromatic;
+        for (bool gaussian : {false, true})
+            for (bool monochromatic : {false, true})
+                QTest::newRow(qPrintable(QStringLiteral("noise-%1-%2").arg(gaussian).arg(monochromatic))) << 0 << gaussian << monochromatic;
+        QTest::newRow("grain") << 1 << false << false;
     }
     void noiseAndGrain()
     {
         QFETCH(int, kind);
         QFETCH(bool, gaussian);
         QFETCH(bool, monochromatic);
-        if (kind == 1 && (gaussian || monochromatic)) QSKIP("Grain has no such options");
         QImage image(613, 409, QImage::Format_RGBA8888_Premultiplied);
         for (int y = 0; y < image.height(); ++y) {
             uchar *row = image.scanLine(y);
