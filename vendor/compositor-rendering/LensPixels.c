@@ -4,6 +4,7 @@
 void lens_distort(const uint8_t *source, uint8_t *destination, size_t width, size_t height, size_t stride, double k) {
     double cx = width * 0.5, cy = height * 0.5;
     double halfDiagonal2 = cx * cx + cy * cy;
+    _Pragma("omp parallel for schedule(static)")
     for (size_t y = 0; y < height; ++y) {
         double dy = y + 0.5 - cy;
         uint8_t *out = destination + y * stride;

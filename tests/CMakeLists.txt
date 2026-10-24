@@ -177,6 +177,10 @@ add_test(NAME lens_effects_gpu_tests COMMAND lens_effects_gpu_tests)
 add_test(NAME lens_effects_no_driver_tests COMMAND lens_effects_gpu_tests --fallback)
 set_tests_properties(lens_effects_no_driver_tests PROPERTIES ENVIRONMENT
     "VK_DRIVER_FILES=/nonexistent/compositor-vulkan-icd.json;VK_ICD_FILENAMES=/nonexistent/compositor-vulkan-icd.json")
+
+add_executable(feature_gpu_tests TestFeatureGpu.cpp)
+target_link_libraries(feature_gpu_tests PRIVATE compositor_core Qt6::Test)
+add_test(NAME feature_gpu_tests COMMAND feature_gpu_tests)
 find_package(Python3 QUIET COMPONENTS Interpreter)
 
 add_executable(gpu_renderer_tests TestGpuRenderer.cpp)
@@ -204,4 +208,4 @@ add_executable(lens_benchmark ../tools/LensBenchmark.cpp)
 target_link_libraries(lens_benchmark PRIVATE compositor_core)
 
 add_executable(feature_benchmark ../tools/FeatureBenchmark.cpp)
-target_link_libraries(feature_benchmark PRIVATE compositor_core)
+target_link_libraries(feature_benchmark PRIVATE compositor_ui)

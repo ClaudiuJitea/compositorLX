@@ -8,6 +8,7 @@
 
 
 void adjust_gradient_map(uint8_t *rgba, size_t width, size_t height, size_t stride, const uint8_t *table) {
+    _Pragma("omp parallel for schedule(static)")
     for (size_t y = 0; y < height; y++) {
         uint8_t *p = rgba + y * stride;
         for (size_t x = 0; x < width; x++, p += 4) {
@@ -74,6 +75,7 @@ void adjust_grain(uint8_t *rgba, size_t width, size_t height, size_t stride, dou
     // Roughness adds smaller, less regular particles, as in Photoshop, but their size remains
     // proportional to the Size control instead of collapsing to fixed one-pixel noise.
     double detailSize = fmax(0.5, size * 0.35);
+    _Pragma("omp parallel for schedule(static)")
     for (size_t y = 0; y < height; y++) {
         double v = originY + ((double)y + 0.5) * unitsPerPixel;
         uint8_t *p = rgba + y * stride;
@@ -112,6 +114,7 @@ void rgba_clamp_premultiplied(uint8_t *rgba, size_t count) {
 /// plus (max-mid) of the primary of its brightest — so the weights below are exactly Photoshop's.
 void adjust_black_white(uint8_t *rgba, size_t width, size_t height, size_t stride, const float *weights,
                         int tint, double tintHue, double tintSaturation) {
+    _Pragma("omp parallel for schedule(static)")
     for (size_t y = 0; y < height; ++y) {
         uint8_t *row = rgba + y * stride;
         for (size_t x = 0; x < width; ++x) {
@@ -171,6 +174,7 @@ static void tonal_weights(float v, float *shadow, float *mid, float *highlight) 
 
 void adjust_color_balance(uint8_t *rgba, size_t width, size_t height, size_t stride, const float *shadows,
                           const float *midtones, const float *highlights, int preserveLuminosity) {
+    _Pragma("omp parallel for schedule(static)")
     for (size_t y = 0; y < height; ++y) {
         uint8_t *row = rgba + y * stride;
         for (size_t x = 0; x < width; ++x) {
@@ -893,6 +897,7 @@ void adjust_colored_vignette(uint8_t *rgba, size_t width, size_t height, size_t 
     if (!rgba || amount <= 0 || width == 0 || height == 0 || frameWidth <= 0 || frameHeight <= 0) return;
     double strength = camera_clamp(amount / 100.0);
     red = camera_clamp(red); green = camera_clamp(green); blue = camera_clamp(blue);
+    _Pragma("omp parallel for schedule(static)")
     for (size_t y = 0; y < height; ++y) {
         uint8_t *row = rgba + y * stride;
         for (size_t x = 0; x < width; ++x) {
@@ -1093,6 +1098,7 @@ void adjust_tonal_contrast(uint8_t *rgba, const uint8_t *blurred, size_t width, 
                            double shadows, double midtones, double highlights) {
     if (amount <= 0 || (shadows == 0 && midtones == 0 && highlights == 0)) return;
     double strength = amount / 50.0;
+    _Pragma("omp parallel for schedule(static)")
     for (size_t y = 0; y < height; ++y) {
         uint8_t *row = rgba + y * stride;
         const uint8_t *baseRow = blurred + y * blurredStride;

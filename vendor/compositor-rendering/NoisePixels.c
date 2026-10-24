@@ -21,6 +21,7 @@ void noise_add_at(uint8_t *rgba, size_t width, size_t height, size_t stride,
                   float amount, int gaussian, int monochromatic, uint32_t seed,
                   int64_t origin_x, int64_t origin_y) {
     float spread = amount / 100.0f * 127.5f;
+    _Pragma("omp parallel for schedule(static)")
     for (size_t y = 0; y < height; ++y) {
         uint8_t *row = rgba + y * stride;
         for (size_t x = 0; x < width; ++x) {

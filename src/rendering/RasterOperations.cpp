@@ -1066,7 +1066,8 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
     const Brightness measured = (settings.contrast != 0 || settings.highlights != 0) ? brightness(source) : Brightness{};
     if (settings.shadows != 0) {
         const auto before = compose(stages(settings, measured, Part::BeforeShadows));
-        if (!before.empty()) adjust_camera_raw(pixels, width, height, stride, before.data(), grid, 0);
+        if (!before.empty() && !GpuOperations::cameraRawLookup(result, before.data(), grid))
+            adjust_camera_raw(result.bits(), width, height, stride, before.data(), grid, 0);
         applyShadows(result, settings.shadows, pixelScale);
         pixels = result.bits();
     }
@@ -1083,10 +1084,12 @@ QImage RasterOperations::cameraRaw(const QImage &image, const CameraRawSettings 
         colorStages.insert(colorStages.end(), grading.begin(), grading.end());
         camera_raw_compose_onto(table.data(), grid, colorStages.data(), int(colorStages.size()), size);
     }
+    // macOS: the table on Metal (MetalCameraRawLookup) when it can, byte for byte the CPU's; the clipping overlay
+    // stays on the CPU.
     if (!table.empty() || mode != 0) {
-        const QImage gpu=GpuOperations::cube(result,table.empty()?nullptr:table.data(),grid,mode);
-        if (!gpu.isNull()) { result=gpu; pixels=result.bits(); }
-        else adjust_camera_raw(pixels,width,height,stride,table.empty()?nullptr:table.data(),grid,mode);
+        if (mode != 0 || table.empty() || !GpuOperations::cameraRawLookup(result, table.data(), grid))
+            adjust_camera_raw(result.bits(), width, height, stride, table.empty() ? nullptr : table.data(), grid, mode);
+        pixels = result.bits();
     }
 
     // 3. Curve, Mixer, Grading

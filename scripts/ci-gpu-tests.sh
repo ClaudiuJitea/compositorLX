@@ -12,7 +12,7 @@ export COMPOSITOR_GPU_ALLOW_SOFTWARE=1 COMPOSITOR_REQUIRE_VULKAN_TESTS=1 VK_DRIV
 export COMPOSITOR_GPU_NO_PIPELINE_CACHE=1 QT_QPA_PLATFORM=offscreen
 run() {
     echo "== $*"
-    for suite in gpu_renderer_tests gpu_document_tests rgb_split_gpu_tests lens_effects_gpu_tests; do
+    for suite in gpu_renderer_tests gpu_document_tests rgb_split_gpu_tests lens_effects_gpu_tests feature_gpu_tests; do
         "$build/tests/$suite" 2>&1 | tee -a "$log" | grep -E '^Totals' | sed "s/^/$suite: /"
     done
 }

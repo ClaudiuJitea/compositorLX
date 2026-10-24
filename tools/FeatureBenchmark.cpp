@@ -3,6 +3,7 @@
 // One Markdown row per case: the median of three end-to-end runs on each backend and the largest channel difference.
 #include "core/CameraRaw.h"
 #include "core/Document.h"
+#include "core/EditorSession.h"
 #include "rendering/Dither.h"
 #include "rendering/RasterOperations.h"
 #include "rendering/Scanlines.h"
@@ -12,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QJsonObject>
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <functional>
 #include <vector>
@@ -89,8 +91,60 @@ int main(int argc, char **argv)
     levels.id = QUuid::createUuid();
     levels.adjustment = QJsonObject{{"kind", "Levels"}, {"inputBlack", 20}, {"inputWhite", 230}, {"gamma", 1.2}};
     adjusted.layers.push_back(levels);
+    const QImage picture = photo(w, h, 2);
+    CameraRawSettings develop; develop.exposure = .5; develop.contrast = 20; develop.temperature = 10; develop.vibrance = 20;
+    cases.push_back({QStringLiteral("Camera RAW (Light and Color)"), [&] { return RasterOperations::cameraRaw(picture, develop); }});
+    CameraRawSettings shadowsDevelop = develop; shadowsDevelop.shadows = 40;
+    cases.push_back({QStringLiteral("Camera RAW (with Shadows)"), [&] { return RasterOperations::cameraRaw(picture, shadowsDevelop); }});
+    Document noisy = document;
+    Layer noise;
+    noise.id = QUuid::createUuid();
+    noise.adjustment = QJsonObject{{"kind", "Add Noise"}, {"noiseAmount", 20}, {"noiseSeed", 9}};
+    noisy.layers.push_back(noise);
+    cases.push_back({QStringLiteral("Canvas: two layers and Add Noise"), [&] { return LayerRenderer::flattened(noisy, RenderPurpose::Display); }});
+    Document toned = document;
+    Layer hue;
+    hue.id = QUuid::createUuid();
+    hue.adjustment = QJsonObject{{"kind", "Hue/Saturation"}, {"hsvSettings", QJsonObject{{"hue", 20}, {"saturation", 15}}}};
+    toned.layers.push_back(hue);
+    cases.push_back({QStringLiteral("Canvas: two layers and Hue/Saturation"), [&] { return LayerRenderer::flattened(toned, RenderPurpose::Display); }});
     cases.push_back({QStringLiteral("Canvas: two layers and Levels"), [&] { return LayerRenderer::flattened(adjusted, RenderPurpose::Display); }});
 
+    // --strokes: what one pointer move of Liquify and Smudge costs with a large brush (the dabs, not the canvas).
+    if (app.arguments().contains(QStringLiteral("--strokes"))) {
+        for (int mode : {0, 1, 2, 3})
+            for (double diameter : {100.0, 400.0, 1000.0}) {
+                EditorSession session;
+                session.createDocument(w, h);
+                session.insertImage(photo(w, h, 3), QStringLiteral("Photo"));
+                QElapsedTimer t;
+                t.start();
+                // 0 Liquify, 1 Smudge, 2 a soft brush, 3 a hard one.
+                if (mode < 2) session.beginWarpStroke(QPointF(w / 3.0, h / 2.0), mode, diameter, .5, .8);
+                else session.beginBrushStroke(QPointF(w / 3.0, h / 2.0), QColor(200, 40, 30), diameter, mode == 2 ? .3 : 1, .8);
+                const double begin = t.nsecsElapsed() / 1e6;
+                std::vector<double> moves;
+                for (int i = 1; i <= 40; ++i) {
+                    t.restart();
+                    session.continueBrushStroke(QPointF(w / 3.0 + i * diameter / 20, h / 2.0 + i * diameter / 40));
+                    moves.push_back(t.nsecsElapsed() / 1e6);
+                }
+                t.restart();
+                session.endBrushStroke();
+                const double end = t.nsecsElapsed() / 1e6;
+                quint64 hash = 1469598103934665603ull;
+                const QImage &result = session.activeLayer()->image;
+                for (int y = 0; y < result.height(); ++y)
+                    for (const uchar *p = result.constScanLine(y), *e = p + result.width() * result.depth() / 8; p < e; ++p)
+                        hash = (hash ^ *p) * 1099511628211ull;
+                std::sort(moves.begin(), moves.end());
+                std::printf("%s, %.0f px brush: begin %.0f ms, pointer move median %.1f ms (max %.1f), end %.0f ms, result %016llx\n",
+                            std::array{"Liquify", "Smudge", "Soft brush", "Hard brush"}[size_t(mode)], diameter, begin, moves[moves.size() / 2], moves.back(), end,
+                            static_cast<unsigned long long>(hash));
+                std::fflush(stdout);
+            }
+        return 0;
+    }
     // --survey: CPU times of the other filters, to see which are worth moving.
     if (app.arguments().contains(QStringLiteral("--survey"))) {
         qputenv("COMPOSITOR_RENDER_BACKEND", "cpu");
@@ -122,10 +176,16 @@ int main(int argc, char **argv)
             {"Content-Aware Fill (120 px)", [&] { return RasterOperations::contentAwareFill(image, spot).value_or(QImage()); }},
             {"Spot heal (120 px)", [&] { return RasterOperations::spotHeal(image, spot, 1, 0, 3).value_or(QImage()); }},
         };
-        std::printf("| Filter (CPU, %d × %d) | ms |\n|---|---:|\n", w, h);
+        std::printf("| Filter (CPU, %d × %d) | ms | Output checksum |\n|---|---:|---|\n", w, h);
         for (const auto &[name, run] : survey) {
             QImage out;
-            std::printf("| %s | %.0f |\n", name, timed(run, &out, nullptr));
+            const double ms = timed(run, &out, nullptr);
+            // A checksum, so runs with different thread counts (OMP_NUM_THREADS) can be compared for identical output.
+            quint64 hash = 1469598103934665603ull;
+            for (int y = 0; y < out.height(); ++y)
+                for (const uchar *p = out.constScanLine(y), *end = p + out.width() * out.depth() / 8; p < end; ++p)
+                    hash = (hash ^ *p) * 1099511628211ull;
+            std::printf("| %s | %.0f | %016llx |\n", name, ms, static_cast<unsigned long long>(hash));
             std::fflush(stdout);
         }
         return 0;

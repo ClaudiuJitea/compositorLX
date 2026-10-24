@@ -658,6 +658,31 @@ void main() {
             float delta = noise * min(1.0, p.v[GRAIN_AMOUNT] / 100.0) * 0.35 * 255.0 * (0.4 + 2.4 * level * (1.0 - level));
             o.rgb = clamp(rgb + delta, 0.0, 255.0) / 255.0 * a.a;
         }
+    } else if (operation == OP_CAMERA_RAW_LOOKUP) {
+        // Integer cell selection, as the Metal kernel, so an exact lattice boundary never picks the wrong cell.
+        uvec4 pixel = bytesOf(a);
+        o = vec4(vec3(pixel.rgb) / 255.0, 1);
+        if (pixel.a != 0u) {
+            uint grid = uint(p.v[CAMERA_RAW_LOOKUP_GRID]);
+            uvec3 numerator = min(pixel.rgb, uvec3(pixel.a)) * (grid - 1u);
+            uvec3 cell = min(numerator / pixel.a, uvec3(grid - 2u));
+            vec3 f = vec3(numerator - cell * pixel.a) / float(pixel.a);
+            vec3 color = vec3(0);
+            for (uint corner = 0u; corner < 8u; ++corner) {
+                uvec3 delta = uvec3(corner >> 2u, (corner >> 1u) & 1u, corner & 1u);
+                vec3 weights = mix(1.0 - f, f, notEqual(delta, uvec3(0)));
+                float w = weights.x * weights.y * weights.z;
+                if (w == 0.0) continue;
+                uvec3 node = cell + delta;
+                uint at = ((node.x * grid + node.y) * grid + node.z) * 3u;
+                color += w * vec3(loadAux(at).r, loadAux(at + 1u).r, loadAux(at + 2u).r);
+            }
+            vec3 scaled = clamp(color, 0.0, 1.0) * float(pixel.a);
+            bool repair = any(lessThanEqual(abs(scaled - (floor(scaled) + 0.5)), vec3(0.01)));
+            o = vec4(clamp(floor(scaled + 0.5), 0.0, float(pixel.a)) / 255.0, repair ? 0.0 : 1.0);
+        }
+        store(index, o);
+        return;
     } else if (operation == OP_MIX) {
         float amount = p.v[MIX_AMOUNT];
         o = amount < 0 ? a + loadAux(index) : mix(a, loadAux(index), amount);

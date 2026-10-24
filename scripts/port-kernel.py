@@ -6,7 +6,29 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 src = path.read_text()
+
+# Kernels the mac runs on one thread whose rows are independent: each row reads only the source and writes only its own
+# pixels, with nothing shared but read-only settings. Their outer row loop runs on every core here, which leaves every
+# pixel exactly as the single-threaded loop makes it.
+ROW_PARALLEL = {
+    'NoisePixels.c': ['noise_add_at'],
+    'LensPixels.c': ['lens_distort'],
+    'AdjustPixels.c': ['adjust_gradient_map', 'adjust_grain', 'adjust_black_white', 'adjust_color_balance',
+                       'adjust_colored_vignette', 'adjust_tonal_contrast'],
+}
+ROW_PRAGMA = '    _Pragma("omp parallel for schedule(static)")\n'
+for function in ROW_PARALLEL.get(path.name, []):
+    m = re.search(r'^void ' + function + r'\(', src, re.M)
+    if not m:
+        raise ValueError(f'{function} not found')
+    loop = re.compile(r'^    for \(size_t y = 0; y < height; (\+\+y|y\+\+)\) \{\n', re.M).search(src, m.end(), src.index('\n}\n', m.end()))
+    if not loop:
+        raise ValueError(f'{function}: no outer row loop')
+    if not src[:loop.start()].endswith(ROW_PRAGMA):
+        src = src[:loop.start()] + ROW_PRAGMA + src[loop.start():]
+
 if '#include <dispatch/dispatch.h>' not in src:
+    path.write_text(src)
     sys.exit(0)
 src = src.replace('#include <dispatch/dispatch.h>\n', '')
 

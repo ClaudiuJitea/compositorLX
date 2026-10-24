@@ -1,6 +1,7 @@
 #include "rendering/GpuOperations.h"
 #include "rendering/DeepImage.h"
 #include "rendering/ProgressiveBlur.h"
+#include "AdjustPixels.h"
 #include <QColorSpace>
 #include <algorithm>
 #include <cmath>
@@ -9,6 +10,8 @@
 
 namespace compositor::GpuOperations {
 namespace {
+// Automatic's cost for the Camera Raw table (tools/FeatureBenchmark); see cameraRawLookup.
+constexpr double cameraRawLookupCost = 8;
 QImage runLocal(const QImage &image, int halo, const std::function<QImage(const QImage &)> &run) {
     QImage result = run(image);
     if (!result.isNull())
@@ -145,6 +148,54 @@ QImage motion(const QImage &image, double angle, double distance) {
     GpuGraph graph;
     return graph.execute(appendMotion(graph, graph.source(image), angle, distance, image.depth() <= 32 ? 1 : 0),
                          image.format());
+}
+bool cameraRawLookup(QImage &pixels, const float *table, int grid, RenderBackend backend) {
+    if (pixels.format() != QImage::Format_RGBA8888_Premultiplied || pixels.isNull() || !table ||
+        !camera_raw_lookup_is_valid(table, grid))
+        return false;
+    if (backend == RenderBackend::Cpu ||
+        (backend == RenderBackend::Auto && !GpuRenderer::shouldAttempt(pixels.size(), cameraRawLookupCost)))
+        return false;
+    // The table as one float channel, kept for as long as the same table comes back (a slider held still).
+    static std::mutex mutex;
+    static std::shared_ptr<const std::vector<float>> cached;
+    const size_t count = size_t(grid) * grid * grid * 3;
+    std::shared_ptr<const std::vector<float>> values;
+    {
+        std::lock_guard lock(mutex);
+        if (!cached || cached->size() != count || !std::equal(cached->begin(), cached->end(), table))
+            cached = std::make_shared<const std::vector<float>>(table, table + count);
+        values = cached;
+    }
+    GpuGraph graph;
+    GpuParameters p{};
+    p[GpuParam::CameraRawLookup::grid] = float(grid);
+    const int lookup = graph.pass(GpuOp::CameraRawLookup, graph.source(pixels), graph.channel(values, QSize(int(count), 1)), p);
+    QImage result = graph.execute(lookup, QImage::Format_RGBA8888_Premultiplied, backend == RenderBackend::Vulkan ? RenderBackend::Vulkan : RenderBackend::Auto);
+    if (result.isNull() || result.size() != pixels.size())
+        return false;
+    // Alpha came back as the "redo" mark: the CPU redoes those pixels and every pixel gets its own alpha again.
+    const int width = pixels.width(), height = pixels.height();
+    std::vector<uint8_t> uncertain(size_t(width) * height);
+    #pragma omp parallel for schedule(static)
+    for (int y = 0; y < height; ++y) {
+        const uchar *source = pixels.constScanLine(y);
+        uchar *out = result.scanLine(y);
+        uint8_t *mark = uncertain.data() + size_t(y) * width;
+        for (int x = 0; x < width; ++x) {
+            mark[x] = out[x * 4 + 3] == 0 && source[x * 4 + 3] != 0;
+            out[x * 4 + 3] = source[x * 4 + 3];
+        }
+    }
+    camera_raw_repair_lookup(result.bits(), pixels.constBits(), uncertain.data(), size_t(width), size_t(height),
+                             size_t(result.bytesPerLine()), table, grid);
+    result.setColorSpace(pixels.colorSpace());
+    result.setDotsPerMeterX(pixels.dotsPerMeterX());
+    result.setDotsPerMeterY(pixels.dotsPerMeterY());
+    for (const auto &key : pixels.textKeys())
+        result.setText(key, pixels.text(key));
+    pixels = result;
+    return true;
 }
 int appendHueSaturation(GpuGraph &graph, int input, const HueSaturationSettings &settings, unsigned quantization) {
     const auto responses = RasterOperations::hueSaturationResponses(settings);

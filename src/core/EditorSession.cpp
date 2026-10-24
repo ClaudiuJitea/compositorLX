@@ -2607,11 +2607,16 @@ static void stampBrushCoverage(QImage &coverage, const QPointF &center, double r
     if (left > right || top > bottom) return;
     const double lookupScale = lookupSize / (radius * radius);
     const bool accumulate = hardness < 1;
-    for (int y = top; y <= bottom; ++y) { uchar *row = coverage.scanLine(y); for (int x = left; x <= right; ++x) {
+    // A large dab's rows run on all cores (each is its own); the coverage is made writable here, on one thread.
+    uchar *pixels = coverage.bits();
+    const qsizetype stride = coverage.bytesPerLine();
+    const FalloffLookup &values = lookup;
+    #pragma omp parallel for schedule(static) if(qint64(right - left + 1) * (bottom - top + 1) > 65536)
+    for (int y = top; y <= bottom; ++y) { uchar *row = pixels + y * stride; for (int x = left; x <= right; ++x) {
         const double dx = x + .5 - center.x(), dy = y + .5 - center.y();
         const int sample = int((dx * dx + dy * dy) * lookupScale);
         if (sample >= lookupSize) continue;
-        const int value = lookup.values[size_t(std::max(0, sample))];
+        const int value = values.values[size_t(std::max(0, sample))];
         if (accumulate) { const int old = row[x]; row[x] = uchar(old + value - (old * value + 127) / 255); }
         else row[x] = std::max(row[x], uchar(value));
     } }
@@ -2813,12 +2818,21 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
                 // What was under the brush at the last dab, laid down here at the smudge's strength, and carried on
                 // in turn: nothing older, which would stamp a ghost copy of it at every dab.
                 const qint64 side = radius * 2 + 1; const float strength = float(warp_->strength);
-                for (int dy = std::max(-radius, -cy); dy <= radius && cy + dy < bounds.height(); ++dy) {
-                    const int reach = span(dy); uchar *line = working.scanLine(cy + dy);
+                // Every pixel of a dab is its own: the rows run on all cores. The buffers are made writable here,
+                // on one thread, so the rows only ever write through plain pointers.
+                uchar *pixels = working.bits(); const qsizetype stride = working.bytesPerLine();
+                char *carried = warp_->carried.data();
+                const bool deep = !warp_->deepCarried.isEmpty();
+                uchar *deepPixels = deep ? warp_->deepWorking.bits() : nullptr; const qsizetype deepStride = deep ? warp_->deepWorking.bytesPerLine() : 0;
+                float *deepCarried = deep ? warp_->deepCarried.data() : nullptr;
+                const int firstRow = std::max(-radius, -cy), lastRow = std::min(radius, bounds.height() - 1 - cy);
+                #pragma omp parallel for schedule(dynamic, 4) if(radius > 32)
+                for (int dy = firstRow; dy <= lastRow; ++dy) {
+                    const int reach = span(dy); uchar *line = pixels + (cy + dy) * stride;
                     for (int dx = std::max(-reach, -cx); dx <= reach && cx + dx < bounds.width(); ++dx) {
                         const float w = falloff[std::min(falloffSize, int((dx * dx + dy * dy) * falloffScale))] * strength; if (w <= 0) continue;
-                        uchar *out = line + (cx + dx) * 4; char *held = warp_->carried.data() + ((dy + radius) * side + dx + radius) * 4;
-                        if(!warp_->deepCarried.isEmpty()){auto *p=reinterpret_cast<float *>(warp_->deepWorking.scanLine(cy+dy))+(cx+dx)*4;auto *h=warp_->deepCarried.data()+((dy+radius)*side+dx+radius)*4;for(int c=0;c<4;++c){p[c]+=(h[c]-p[c])*w;h[c]=p[c];}}
+                        uchar *out = line + (cx + dx) * 4; char *held = carried + ((dy + radius) * side + dx + radius) * 4;
+                        if(deep){auto *p=reinterpret_cast<float *>(deepPixels+(cy+dy)*deepStride)+(cx+dx)*4;auto *h=deepCarried+((dy+radius)*side+dx+radius)*4;for(int c=0;c<4;++c){p[c]+=(h[c]-p[c])*w;h[c]=p[c];}}
                         for (int c = 0; c < 4; ++c) { const float under = out[c], painted = under + (uchar(held[c]) - under) * w; out[c] = uchar(std::clamp(int(painted + .5f), 0, 255)); held[c] = char(out[c]); }
                     }
                 }
@@ -2839,9 +2853,26 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
                             std::copy_n(tile->constData() + ((y - ty * tileSide) * tileSide + part.left() - tx * tileSide) * 2, part.width() * 2,
                                         old.data() + (qsizetype(y - area.top()) * areaWidth + part.left() - area.left()) * 2);
                     }
+                    // The tiles the dab writes exist before its rows run on all cores, each writing only its own
+                    // pixels and offsets through plain pointers taken here, on one thread.
+                    const int tileLeft = box.left() / tileSide, tileTop = box.top() / tileSide;
+                    const int tileColumns = box.right() / tileSide - tileLeft + 1, tileRows = box.bottom() / tileSide - tileTop + 1;
+                    std::vector<float *> tiles(size_t(tileColumns) * tileRows, nullptr);
+                    for (int y = box.top(); y <= box.bottom(); ++y) {
+                        const int reach = span(y - cy), left = std::max(box.left(), cx - reach), right = std::min(box.right(), cx + reach);
+                        for (int tx = left / tileSide; left <= right && tx <= right / tileSide; ++tx) {
+                            float *&tile = tiles[size_t(y / tileSide - tileTop) * tileColumns + tx - tileLeft];
+                            if (tile) continue;
+                            QVector<float> &stored = warp_->offsets[(qint64(y / tileSide) << 32) | tx];
+                            if (stored.isEmpty()) stored.fill(0.0f, tileSide * tileSide * 2);
+                            tile = stored.data();
+                        }
+                    }
+                    uchar *pixels = working.bits(); const qsizetype stride = working.bytesPerLine();
+                    #pragma omp parallel for schedule(dynamic, 4) if(radius > 32)
                     for (int y = box.top(); y <= box.bottom(); ++y) {
                         const int dy = y - cy, reach = span(dy); float *store = nullptr; int storeTile = -1;
-                        uchar *out = working.scanLine(y);
+                        uchar *out = pixels + y * stride;
                         for (int x = std::max(box.left(), cx - reach); x <= std::min(box.right(), cx + reach); ++x) {
                             const double w = falloff[std::min(falloffSize, int(((x - cx) * (x - cx) + dy * dy) * falloffScale))]; if (w <= 0) continue;
                             const double qx = std::clamp(x - movement.x()*w, double(area.left()), double(area.right())), qy = std::clamp(y - movement.y()*w, double(area.top()), double(area.bottom()));
@@ -2853,9 +2884,8 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
                             offset[0] -= movement.x()*w; offset[1] -= movement.y()*w;
                             if (x / tileSide != storeTile) {
                                 storeTile = x / tileSide;
-                                QVector<float> &tile = warp_->offsets[(qint64(y / tileSide) << 32) | storeTile];
-                                if (tile.isEmpty()) tile.fill(0.0f, tileSide * tileSide * 2);
-                                store = tile.data() + (y % tileSide) * tileSide * 2 - storeTile * tileSide * 2;
+                                store = tiles[size_t(y / tileSide - tileTop) * tileColumns + storeTile - tileLeft]
+                                        + (y % tileSide) * tileSide * 2 - storeTile * tileSide * 2;
                             }
                             store[x * 2] = float(offset[0]); store[x * 2 + 1] = float(offset[1]);
                             const double sx = std::clamp(x + offset[0], 0.0, double(bounds.width()-1)), sy = std::clamp(y + offset[1], 0.0, double(bounds.height()-1));
@@ -2966,14 +2996,20 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
     bool changedPixels = false;
     if (brush_->mask) {
         QImage &result = layer.mask;
-        for (int y = dirty.top(); y <= dirty.bottom(); ++y) { uchar *out = result.scanLine(y); const uchar *coverage = brush_->coverage.constScanLine(y), *clip = selection.isNull() ? nullptr : selection.constScanLine(y); for (int x = dirty.left(); x <= dirty.right(); ++x) {
+        // The dirty rows run on all cores; the mask is made writable here, on one thread.
+        uchar *bits = result.bits(); const qsizetype stride = result.bytesPerLine();
+        #pragma omp parallel for schedule(static) reduction(||: changedPixels) if(qint64(dirty.width()) * dirty.height() > 65536)
+        for (int y = dirty.top(); y <= dirty.bottom(); ++y) { uchar *out = bits + y * stride; const uchar *coverage = brush_->coverage.constScanLine(y), *clip = selection.isNull() ? nullptr : selection.constScanLine(y); for (int x = dirty.left(); x <= dirty.right(); ++x) {
             const int alpha = qRound(coverage[x] * brush_->opacity * (clip ? clip[x] : 255) / 255.0);
             const uchar value = uchar((int(brush_->original.constScanLine(y)[x]) * (255 - alpha) + brush_->maskValue * alpha + 127) / 255);
             changedPixels |= value != brush_->original.constScanLine(y)[x]; out[x] = value;
         } }
     } else if (brush_->healMode < 0) {
         QImage &result = layer.image;
-        for (int y = dirty.top(); y <= dirty.bottom(); ++y) { uchar *out = result.scanLine(y); const uchar *original = brush_->original.constScanLine(y), *coverage = brush_->coverage.constScanLine(y), *clip = selection.isNull() ? nullptr : selection.constScanLine(y); for (int x = dirty.left(); x <= dirty.right(); ++x) {
+        // The dirty rows run on all cores; the layer is made writable here, on one thread.
+        uchar *bits = result.bits(); const qsizetype stride = result.bytesPerLine();
+        #pragma omp parallel for schedule(static) reduction(||: changedPixels) if(qint64(dirty.width()) * dirty.height() > 65536)
+        for (int y = dirty.top(); y <= dirty.bottom(); ++y) { uchar *out = bits + y * stride; const uchar *original = brush_->original.constScanLine(y), *coverage = brush_->coverage.constScanLine(y), *clip = selection.isNull() ? nullptr : selection.constScanLine(y); for (int x = dirty.left(); x <= dirty.right(); ++x) {
             const int alpha = qRound(coverage[x] * brush_->opacity * (clip ? clip[x] : 255) / 255.0), inverse = 255 - alpha; uchar *pixel = out + x * 4; const uchar *base = original + x * 4;
             if (brush_->erasing) for (int c = 0; c < 4; ++c) pixel[c] = uchar((int(base[c]) * inverse + 127) / 255);
             else if (brush_->clone) {
@@ -2998,6 +3034,8 @@ bool EditorSession::endBrushStroke()
         const int index = document_ ? indexOf(warp_->layerId) : -1;
         if (index >= 0) {
             Layer &layer = document_->layers[index]; const QImage selection = selectionCoverageForLayer(layer, warp_->original.size(), document_->selection); QImage result = warp_->original;
+            result.detach(); // Its rows are written from several threads.
+            #pragma omp parallel for schedule(static)
             for (int y=0;y<result.height();++y) { uchar *out=result.scanLine(y); const uchar *changed=layer.image.constScanLine(y),*coverage=warp_->coverage.constScanLine(y),*clip=selection.constScanLine(y); for(int x=0;x<result.width();++x) {
                 const int amount=(int(coverage[x])*clip[x]+127)/255, inverse=255-amount; for(int c=0;c<4;++c) out[x*4+c]=uchar((int(out[x*4+c])*inverse+int(changed[x*4+c])*amount+127)/255);
             } }
@@ -3005,8 +3043,12 @@ bool EditorSession::endBrushStroke()
             if(!warp_->deepBase.isNull()) {
                 const QImage source=warp_->deepBase.convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
                 QImage deep=warp_->mode==1?warp_->deepWorking:source;
-                if(warp_->mode==0)for(int y=0;y<deep.height();++y){auto *out=reinterpret_cast<float *>(deep.scanLine(y));for(int x=0;x<deep.width();++x){const auto tile=warp_->offsets.constFind((qint64(y/64)<<32)|(x/64));if(tile==warp_->offsets.constEnd())continue;const float *offset=tile->constData()+((y%64)*64+x%64)*2;const double sx=std::clamp(x+double(offset[0]),0.0,double(deep.width()-1)),sy=std::clamp(y+double(offset[1]),0.0,double(deep.height()-1));const int x0=qFloor(sx),y0=qFloor(sy),x1=std::min(x0+1,deep.width()-1),y1=std::min(y0+1,deep.height()-1);const double fx=sx-x0,fy=sy-y0;for(int c=0;c<4;++c){const auto p=[&](int xx,int yy){return reinterpret_cast<const float *>(source.constScanLine(yy))[xx*4+c];};out[x*4+c]=float((p(x0,y0)*(1-fx)+p(x1,y0)*fx)*(1-fy)+(p(x0,y1)*(1-fx)+p(x1,y1)*fx)*fy);}}}
+                deep.detach(); // Its rows are written from several threads.
+                if(warp_->mode==0)
+                #pragma omp parallel for schedule(static)
+                for(int y=0;y<deep.height();++y){auto *out=reinterpret_cast<float *>(deep.scanLine(y));for(int x=0;x<deep.width();++x){const auto tile=warp_->offsets.constFind((qint64(y/64)<<32)|(x/64));if(tile==warp_->offsets.constEnd())continue;const float *offset=tile->constData()+((y%64)*64+x%64)*2;const double sx=std::clamp(x+double(offset[0]),0.0,double(deep.width()-1)),sy=std::clamp(y+double(offset[1]),0.0,double(deep.height()-1));const int x0=qFloor(sx),y0=qFloor(sy),x1=std::min(x0+1,deep.width()-1),y1=std::min(y0+1,deep.height()-1);const double fx=sx-x0,fy=sy-y0;for(int c=0;c<4;++c){const auto p=[&](int xx,int yy){return reinterpret_cast<const float *>(source.constScanLine(yy))[xx*4+c];};out[x*4+c]=float((p(x0,y0)*(1-fx)+p(x1,y0)*fx)*(1-fy)+(p(x0,y1)*(1-fx)+p(x1,y1)*fx)*fy);}}}
                 const QImage selection=selectionCoverageForLayer(layer,deep.size(),document_->selection);
+                #pragma omp parallel for schedule(static)
                 for(int y=0;y<deep.height();++y){auto *out=reinterpret_cast<float *>(deep.scanLine(y));const auto *base=reinterpret_cast<const float *>(source.constScanLine(y));for(int x=0;x<deep.width();++x){const float t=warp_->coverage.constScanLine(y)[x]/255.0f*selection.constScanLine(y)[x]/255.0f;for(int c=0;c<4;++c)out[x*4+c]=base[x*4+c]*(1-t)+out[x*4+c]*t;}}
                 layer.image=deep.convertToFormat(warp_->deepBase.format());
             }

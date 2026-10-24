@@ -40,8 +40,9 @@ enum class GpuOp : unsigned {
     LensReduce = 32,
     Noise = 33,
     Grain = 34,
+    CameraRawLookup = 35,
 };
-inline constexpr unsigned gpuOperationCount = 35;
+inline constexpr unsigned gpuOperationCount = 36;
 
 enum class GpuFormat : unsigned {
     Float32 = 0,
@@ -122,5 +123,6 @@ struct LensPrism { enum : int { dx = 0, dy = 1, along0 = 2, along1 = 3, ways = 4
 struct LensReduce { enum : int { factor = 0, sourceWidth = 1, sourceHeight = 2, clear = 3, }; };
 struct Noise { enum : int { amount = 0, gaussian = 1, monochromatic = 2, seedLow = 3, seedHigh = 4, originX = 5, originY = 6, }; };
 struct Grain { enum : int { amount = 0, size = 1, roughness = 2, seedLow = 3, seedHigh = 4, originX = 5, originY = 6, unitsPerPixel = 7, }; };
+struct CameraRawLookup { enum : int { grid = 0, }; };
 } // namespace GpuParam
 } // namespace compositor

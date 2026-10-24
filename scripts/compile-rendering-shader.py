@@ -76,6 +76,9 @@ OPERATIONS = [
     # come in 16-bit halves, as parameters are floats; the origin places the pixels in the document.
     ('Noise', ['amount', 'gaussian', 'monochromatic', 'seedLow', 'seedHigh', 'originX', 'originY']),
     ('Grain', ['amount', 'size', 'roughness', 'seedLow', 'seedHigh', 'originX', 'originY', 'unitsPerPixel']),
+    # Camera Raw's composed color table on 8-bit pixels (macOS MetalCameraRawLookup.swift). Alpha comes back 0 where the
+    # result lies within 0.01 of a rounding boundary, for the CPU to redo in double precision; else 1.
+    ('CameraRawLookup', ['grid']),
 ]
 # Lens operations can update their input in place over a region (GpuGraph::update); the region (x, y, width, height)
 # is passed in the last four parameter slots, which those operations leave free.
