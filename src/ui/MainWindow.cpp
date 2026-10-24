@@ -411,6 +411,9 @@ public:
         content()->addWidget(bar);
         if (cancel_) addButtons(QDialogButtonBox::Cancel, QDialogButtonBox::Cancel);
     }
+    // The job is over: put the panel away. Not close(), whose closeEvent goes through reject() and would either be
+    // refused (nothing to stop) or report a cancel the person never asked for.
+    void finish() { done_ = true; QDialog::done(QDialog::Accepted); }
     void reject() override
     {
         if (!cancel_ || done_) return;   // nothing to stop: Escape does nothing
@@ -5678,7 +5681,7 @@ void MainWindow::removeBackgroundDialog()
     watcher.setFuture(QtConcurrent::run([image = original.image] {
         QString error; QImage mask = SubjectRemoval::rawMask(image, &error); return qMakePair(mask, error);
     }));
-    progress.show(); if (!watcher.isFinished()) wait.exec(); progress.close();
+    progress.show(); if (!watcher.isFinished()) wait.exec(); progress.finish();
     const auto detected = watcher.result();
     if (detected.first.isNull()) {
         showMessage(this, tr("Remove Background"), detected.second.isEmpty()
@@ -5761,7 +5764,7 @@ void MainWindow::selectSubjectAction()
     }));
 
     if (!watcher.isFinished()) loop.exec();
-    progress.close();
+    progress.finish();
 
     if (cancelToken->load()) return;
     if (requestId != currentSelectionRequestId_) return;
@@ -5809,7 +5812,7 @@ void MainWindow::selectObjectRequested(const QPoint &point, int mode, int edgeOf
     }));
 
     if (!watcher.isFinished()) loop.exec();
-    progress.close();
+    progress.finish();
 
     if (cancelToken->load()) return;
     if (requestId != currentSelectionRequestId_) return;
