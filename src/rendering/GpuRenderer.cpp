@@ -45,7 +45,7 @@ QString summary(const std::vector<GpuNode> &nodes, int output) {
                                   "GradientMap", "Morphology", "RgbSplit", "Mix", "HueSaturation", "BlackWhite",
                                   "ColorBalance", "Clear", "MorphologyStep", "MorphologyCombine", "Bokeh",
                                   "LensPoint", "LensCombine", "LensSqueeze", "LensStretch", "LensStreakBack",
-                                  "LensResample", "LensPrism", "LensReduce"};
+                                  "LensResample", "LensPrism", "LensReduce", "Noise", "Grain"};
     static_assert(std::size(names) == gpuOperationCount);
     std::map<QString, int> counts;
     for (int i = 0; i <= output && i < int(nodes.size()); ++i)
@@ -202,12 +202,13 @@ void GpuGraph::transient(int source) {
     if (source >= 0 && source < int(nodes_.size()) && nodes_[source].operation == GpuOp::Source)
         nodes_[source].transient = true;
 }
-int GpuGraph::clear(QSize size) {
+int GpuGraph::clear(QSize size, unsigned quantization) {
     if (size.isEmpty())
         return -1;
     GpuNode node;
     node.operation = GpuOp::Clear;
     node.size = size;
+    node.quantization = quantization;
     nodes_.push_back(node);
     return int(nodes_.size()) - 1;
 }

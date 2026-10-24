@@ -3,6 +3,7 @@
 #include <cmath>
 #include <algorithm>
 
+#include <QColor>
 #include <QImage>
 #include <QPoint>
 #include <QJsonObject>
@@ -133,6 +134,23 @@ public:
     [[nodiscard]] static LevelsSettings levelsFromJson(const QJsonObject &adjustment);
     [[nodiscard]] static CurvesSettings curvesFromJson(const QJsonObject &adjustment);
     [[nodiscard]] static ExposureSettings exposureFromJson(const QJsonObject &adjustment);
+    struct NoiseSettings { float amount = 10; bool gaussian = false, monochromatic = false; quint32 seed = 0; };
+    struct GrainSettings { double amount = 25, size = 1.5, roughness = 50; quint32 seed = 0; };
+    struct BlackWhiteSettings { std::array<float, 6> weights{.4f, .6f, .4f, .6f, .2f, .8f}; bool tint = false; double tintHue = 40, tintSaturation = .2; };
+    struct ColorBalanceSettings { std::array<float, 3> shadows{}, midtones{}, highlights{}; bool preserveLuminosity = true; };
+    struct GradientMapSettings { QColor shadows = Qt::black, highlights = Qt::white; bool reversed = false; };
+    struct MotionSettings { double angle = 0, distance = 10; };
+    [[nodiscard]] static HueSaturationSettings hueSaturationFromJson(const QJsonObject &adjustment);
+    [[nodiscard]] static NoiseSettings noiseFromJson(const QJsonObject &adjustment);
+    [[nodiscard]] static GrainSettings grainFromJson(const QJsonObject &adjustment);
+    [[nodiscard]] static BlackWhiteSettings blackWhiteFromJson(const QJsonObject &adjustment);
+    [[nodiscard]] static ColorBalanceSettings colorBalanceFromJson(const QJsonObject &adjustment);
+    [[nodiscard]] static GradientMapSettings gradientMapFromJson(const QJsonObject &adjustment);
+    [[nodiscard]] static MotionSettings motionFromJson(const QJsonObject &adjustment);
+    // Gradient Map's ramp: the color for each 8-bit luma (red, green, blue).
+    [[nodiscard]] static std::array<uint8_t, 768> gradientMapTable(const GradientMapSettings &settings);
+    // Hue/Saturation's hue, saturation and lightness change for each whole hue degree, 0–360.
+    [[nodiscard]] static std::array<std::array<double, 3>, 361> hueSaturationResponses(const HueSaturationSettings &settings);
     // Per-channel 8-bit lookup tables (red, green, blue; 256 entries each) applied by levels() and curves().
     [[nodiscard]] static std::array<float, 768> levelsTables(const LevelsSettings &settings);
     [[nodiscard]] static std::array<float, 768> curvesTables(const CurvesSettings &settings);

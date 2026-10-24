@@ -245,6 +245,30 @@ float aperture(vec2 o, int shape, vec2 outward) {
     if (shape == 3) return max(length(o), length(o + outward * 1.25));
     return length(o);
 }
+// ---- Add Noise and Grain (macOS GPUNoise.swift) ---------------------------------------------
+uint mix32(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+float unitHash(uint key) { return float(mix32(key) >> 8) * (1.0 / 16777216.0); }
+float lattice(int ix, int iy, uint seed) {
+    uint h = mix32(uint(ix) * 0x9E3779B1u ^ mix32(uint(iy) * 0x85EBCA77u ^ seed));
+    return float(h & 0xFFFFu) / 65535.0 + float(h >> 16) / 65535.0 - 1.0;
+}
+float grainField(float u, float v, float scale, uint seed) {
+    float cellX = floor(u / scale), cellY = floor(v / scale);
+    float tx = u / scale - cellX, ty = v / scale - cellY;
+    tx = tx * tx * (3.0 - 2.0 * tx);
+    ty = ty * ty * (3.0 - 2.0 * ty);
+    int ix = int(cellX), iy = int(cellY);
+    float n00 = lattice(ix, iy, seed), n10 = lattice(ix + 1, iy, seed);
+    float n01 = lattice(ix, iy + 1, seed), n11 = lattice(ix + 1, iy + 1, seed);
+    float top = n00 + (n10 - n00) * tx, bottom = n01 + (n11 - n01) * tx;
+    return (top + (bottom - top) * ty) * 1.6;
+}
+
 // ---- Lens Effects (single-channel planes: the value is in .r) ------------------------------
 // The planes these read can differ in size from the output, so each one bounds its own reads.
 float lensLinear(float c) {
@@ -410,7 +434,7 @@ void main() {
     ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
     uint operation = op();
     if (operation == OP_BOX_BLUR) { boxBlur(xy); return; }
-    if (operation >= OP_LENS_POINT) { lens(xy, operation); return; }
+    if (operation >= OP_LENS_POINT && operation <= OP_LENS_REDUCE) { lens(xy, operation); return; }
     if (xy.x >= p.width || xy.y >= p.height) return;
     uint index = uint(xy.y) * p.width + uint(xy.x);
     vec4 a = (operation == OP_TRANSFORM || operation == OP_CLEAR) ? vec4(0) : loadSource(index);
@@ -502,10 +526,13 @@ void main() {
         bool horizontal = p.v[MOTION_BLUR_HORIZONTAL] != 0;
         int x = horizontal ? xy.x : xy.y, y = horizontal ? xy.y : xy.x, reach = int(p.v[MOTION_BLUR_REACH]);
         float slope = p.v[MOTION_BLUR_SLOPE];
-        int base = int(round(slope * x));
+        // The CPU's shear: lround(slope · u) at the document column u (half away from zero).
+        int origin = int(p.v[MOTION_BLUR_ORIGIN]);
+        int base = int(sign(slope * (x + origin)) * floor(abs(slope * (x + origin)) + .5));
         o = vec4(0);
         for (int i = -reach; i <= reach; ++i) {
-            int sx = x + i, sy = y + int(round(slope * sx)) - base;
+            float shear = slope * (x + i + origin);
+            int sx = x + i, sy = y + int(sign(shear) * floor(abs(shear) + .5)) - base;
             ivec2 q = horizontal ? ivec2(sx, sy) : ivec2(sy, sx);
             if (all(greaterThanEqual(q, ivec2(0))) && q.x < p.width && q.y < p.height)
                 o += loadSource(uint(q.y) * p.width + uint(q.x));
@@ -597,6 +624,40 @@ void main() {
             }
         }
         o = sum / max(total, 1e-5);
+    } else if (operation == OP_NOISE) {
+        if (a.a > 0) {
+            uint px = uint(xy.x + int(p.v[NOISE_ORIGIN_X])), py = uint(xy.y + int(p.v[NOISE_ORIGIN_Y]));
+            uint seed = uint(p.v[NOISE_SEED_LOW]) | (uint(p.v[NOISE_SEED_HIGH]) << 16);
+            uint base = mix32(seed ^ mix32(px * 0x9e3779b9u ^ mix32(py * 0x85ebca6bu)));
+            float spread = p.v[NOISE_AMOUNT] / 100.0 * 127.5;
+            for (int c = 0; c < 3; ++c) {
+                uint key = p.v[NOISE_MONOCHROMATIC] != 0 ? base : base + uint(c) * 0x9e3779b9u;
+                float n;
+                if (p.v[NOISE_GAUSSIAN] != 0) {
+                    // Box–Muller: two uniform values make one normally distributed one.
+                    float u1 = unitHash(key), u2 = unitHash(key ^ 0x68e31da4u);
+                    n = sqrt(-2.0 * log(1.0 - u1)) * cos(6.2831853 * u2) * spread * (2.0 / 3.0);
+                } else {
+                    n = (unitHash(key) * 2.0 - 1.0) * spread;
+                }
+                o[c] = clamp(a[c] * 255.0 / a.a + n, 0.0, 255.0) / 255.0 * a.a;
+            }
+        }
+    } else if (operation == OP_GRAIN) {
+        if (a.a > 0) {
+            float units = p.v[GRAIN_UNITS_PER_PIXEL];
+            float u = p.v[GRAIN_ORIGIN_X] + (float(xy.x) + 0.5) * units, v = p.v[GRAIN_ORIGIN_Y] + (float(xy.y) + 0.5) * units;
+            uint seed = uint(p.v[GRAIN_SEED_LOW]) | (uint(p.v[GRAIN_SEED_HIGH]) << 16);
+            float size = p.v[GRAIN_SIZE] > 0 ? p.v[GRAIN_SIZE] : 1.0;
+            float smooth_ = grainField(u, v, size, seed);
+            float fine = grainField(u, v, max(0.5, size * 0.35), mix32(seed ^ 0xA511E9B3u));
+            float noise = smooth_ + (fine - smooth_) * clamp(p.v[GRAIN_ROUGHNESS] / 100.0, 0.0, 1.0);
+            vec3 rgb = a.rgb / a.a * 255.0;
+            float level = min(1.0, (0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b) / 255.0);
+            // Film grain shows most in the midtones.
+            float delta = noise * min(1.0, p.v[GRAIN_AMOUNT] / 100.0) * 0.35 * 255.0 * (0.4 + 2.4 * level * (1.0 - level));
+            o.rgb = clamp(rgb + delta, 0.0, 255.0) / 255.0 * a.a;
+        }
     } else if (operation == OP_MIX) {
         float amount = p.v[MIX_AMOUNT];
         o = amount < 0 ? a + loadAux(index) : mix(a, loadAux(index), amount);

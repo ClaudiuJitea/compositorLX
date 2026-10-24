@@ -382,6 +382,55 @@ class TestGpuDocument : public QObject {
         const double delta = error(cpuRender(document), gpu);
         QVERIFY2(delta <= 2.01 / 255, qPrintable(QString("%1 levels").arg(delta * 255)));
     }
+    // The live adjustment kinds that run as passes of the document graph, against the CPU reference, whole and in
+    // tiles (noise and grain are keyed to document pixels, so tiles must line up with the whole canvas).
+    void liveAdjustments_data() {
+        QTest::addColumn<QJsonObject>("settings");
+        QTest::addColumn<double>("tolerance");
+        QJsonObject hsv{{"hue", 30}, {"saturation", 25}, {"lightness", -10}};
+        QTest::newRow("hue-saturation") << QJsonObject{{"kind", "Hue/Saturation"}, {"hsvSettings", hsv}} << 2.01;
+        QTest::newRow("colorize") << QJsonObject{{"kind", "Hue/Saturation"}, {"hsvSettings", QJsonObject{{"hue", 200}, {"saturation", 40}, {"colorize", true}}}} << 2.01;
+        QTest::newRow("black-white") << QJsonObject{{"kind", "Black & White"}, {"blackWhiteSettings", QJsonObject{{"reds", 70}, {"tint", true}}}} << 1.01;
+        QTest::newRow("color-balance") << QJsonObject{{"kind", "Color Balance"}, {"colorBalanceSettings", QJsonObject{{"midCyanRed", 40}, {"shadowYellowBlue", -30}}}} << 1.01;
+        QTest::newRow("gradient-map") << QJsonObject{{"kind", "Gradient Map"}, {"gradientMapSettings", QJsonObject{{"reversed", true}}}} << 1.01;
+        QTest::newRow("motion-blur") << QJsonObject{{"kind", "Motion Blur"}, {"motionAngle", 25}, {"motionDistance", 30}} << 1.01;
+        QTest::newRow("add-noise") << QJsonObject{{"kind", "Add Noise"}, {"noiseAmount", 30}, {"noiseSeed", 4000000000.0}} << 1.01;
+        QTest::newRow("add-noise-gaussian-mono") << QJsonObject{{"kind", "Add Noise"}, {"noiseAmount", 40}, {"noiseGaussian", true}, {"noiseMonochromatic", true}, {"noiseSeed", 77}} << 2.01;
+        QTest::newRow("grain") << QJsonObject{{"kind", "Grain"}, {"grainSettings", QJsonObject{{"amount", 60}, {"size", 3}, {"roughness", 70}, {"seed", 123456789}}}} << 2.01;
+    }
+    void liveAdjustments() {
+        QFETCH(QJsonObject, settings);
+        QFETCH(double, tolerance);
+        Document document;
+        document.canvasSize = {1500, 1100};
+        document.layers = {raster(opaque({1500, 1100})), raster(fixture({700, 500}, QImage::Format_RGBA8888_Premultiplied, 3), {200, 150}),
+                           filter(settings)};
+        const QImage reference = cpuRender(document);
+        const QImage whole = tryGpuDocument(document);
+        QVERIFY2(!whole.isNull() && GpuRenderer::lastExecution().accelerated, qPrintable(GpuRenderer::lastExecution().reason));
+        double delta = error(reference, whole);
+        QVERIFY2(delta <= tolerance / 255, qPrintable(QString("whole: %1 levels").arg(delta * 255)));
+        qputenv("COMPOSITOR_GPU_MEMORY_MIB", "64");
+        document.canvasSize = {3000, 2200};
+        document.layers[0] = raster(opaque({3000, 2200}));
+        QVERIFY(estimateGpuDocumentBytes(document, document.canvasSize) > (64ull << 20) * 8 / 10);
+        const QImage tiled = tryGpuDocument(document);
+        QVERIFY2(!tiled.isNull(), qPrintable(GpuRenderer::lastExecution().reason));
+        delta = error(cpuRender(document), tiled);
+        QVERIFY2(delta <= tolerance / 255, qPrintable(QString("tiled: %1 levels").arg(delta * 255)));
+    }
+    // A one-layer document is the layer itself, with no transparent canvas behind it: it fits where a float canvas
+    // would not, and an executor refusal goes again in tiles rather than to the CPU.
+    void singleLayerFits() {
+        qputenv("COMPOSITOR_GPU_MEMORY_MIB", "128");
+        Document document;
+        document.canvasSize = {3000, 2000};
+        document.layers = {raster(opaque({3000, 2000}))};
+        const QImage gpu = tryGpuDocument(document);
+        QVERIFY2(!gpu.isNull() && GpuRenderer::lastExecution().accelerated, qPrintable(GpuRenderer::lastExecution().reason));
+        QVERIFY(!GpuRenderer::lastExecution().operations.contains("Clear"));
+        QCOMPARE(error(cpuRender(document), gpu), 0.0);
+    }
     // B1: 8-bit sources upload at 4 bytes per pixel, so 3000×2000 with three layers is one graph within 512 MiB.
     void compactStorage() {
         Document document;
@@ -395,7 +444,7 @@ class TestGpuDocument : public QObject {
         const QImage gpu = tryGpuDocument(document);
         const GpuExecution report = GpuRenderer::lastExecution();
         QVERIFY2(report.accelerated, qPrintable(report.reason));
-        QCOMPARE(report.uploadedBytes, quint64(3) * 3000 * 2000 * 4); // No canvas upload: the graph starts from Clear.
+        QCOMPARE(report.uploadedBytes, quint64(3) * 3000 * 2000 * 4); // No canvas upload: the bottom layer starts it.
         QCOMPARE(report.downloadedBytes, quint64(3000) * 2000 * 4);
         QVERIFY(report.workingBytes <= 512ull << 20);
         QVERIFY(error(cpuRender(document), gpu) <= 1.01 / 255);

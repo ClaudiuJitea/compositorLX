@@ -202,3 +202,6 @@ add_test(NAME gpu_ui_tests COMMAND gpu_ui_tests -platform offscreen)
 
 add_executable(lens_benchmark ../tools/LensBenchmark.cpp)
 target_link_libraries(lens_benchmark PRIVATE compositor_core)
+
+add_executable(feature_benchmark ../tools/FeatureBenchmark.cpp)
+target_link_libraries(feature_benchmark PRIVATE compositor_core)

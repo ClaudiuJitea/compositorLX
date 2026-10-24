@@ -43,7 +43,8 @@ class GpuGraph {
     int channel(std::shared_ptr<const std::vector<float>> values, QSize size);
     // Marks a source as used only by this graph (GpuNode::transient), so its memory is not held for the next one.
     void transient(int source);
-    int clear(QSize size);
+    // A transparent surface, stored as `quantization` asks (GpuQuantization; float when 0).
+    int clear(QSize size, unsigned quantization = 0);
     int pass(GpuOp op, int input, int auxiliary = -1, const GpuParameters &parameters = {}, unsigned quantization = 0,
              QSize size = {});
     // A Lens pass that updates `input` in place over `area` only, the rest left as it is. `input` must be a pass of

@@ -125,10 +125,9 @@ QImage bloom(const QImage &image, double amount, double radius, bool deep) {
         return graph.execute(graph.pass(GpuOp::Bloom, in, blur, p, deep ? 0 : 1), tile.format());
     });
 }
-QImage motion(const QImage &image, double angle, double distance) {
-    if (!std::isfinite(angle) || !std::isfinite(distance) || distance <= 0 ||
-        !GpuRenderer::shouldAttempt(image.size(), 16))
-        return {};
+int appendMotion(GpuGraph &graph, int input, double angle, double distance, unsigned quantization, QPoint origin) {
+    if (!std::isfinite(angle) || !std::isfinite(distance) || distance <= 0)
+        return input;
     const double radians = std::clamp(angle, -90., 90.) * M_PI / 180, dx = std::cos(radians), dy = -std::sin(radians);
     const bool horizontal = std::abs(dx) >= std::abs(dy);
     const double major = horizontal ? dx : dy;
@@ -136,9 +135,92 @@ QImage motion(const QImage &image, double angle, double distance) {
     p[GpuParam::MotionBlur::horizontal] = horizontal ? 1 : 0;
     p[GpuParam::MotionBlur::slope] = float((horizontal ? dy : dx) / major);
     p[GpuParam::MotionBlur::reach] = float(std::lround(std::clamp(distance, 1., 2000.) * std::abs(major) / 2));
+    p[GpuParam::MotionBlur::origin] = float(horizontal ? origin.x() : origin.y());
+    return graph.pass(GpuOp::MotionBlur, input, -1, p, quantization);
+}
+QImage motion(const QImage &image, double angle, double distance) {
+    if (!std::isfinite(angle) || !std::isfinite(distance) || distance <= 0 ||
+        !GpuRenderer::shouldAttempt(image.size(), 16))
+        return {};
     GpuGraph graph;
-    return graph.execute(graph.pass(GpuOp::MotionBlur, graph.source(image), -1, p, image.depth() <= 32 ? 1 : 0),
+    return graph.execute(appendMotion(graph, graph.source(image), angle, distance, image.depth() <= 32 ? 1 : 0),
                          image.format());
+}
+int appendHueSaturation(GpuGraph &graph, int input, const HueSaturationSettings &settings, unsigned quantization) {
+    const auto responses = RasterOperations::hueSaturationResponses(settings);
+    QImage table(361, 1, QImage::Format_RGBA32FPx4_Premultiplied);
+    auto *values = reinterpret_cast<float *>(table.bits());
+    for (int i = 0; i <= 360; ++i) {
+        for (int c = 0; c < 3; ++c)
+            values[i * 4 + c] = float(responses[size_t(i)][size_t(c)]);
+        values[i * 4 + 3] = 1;
+    }
+    const auto &master = settings.adjustments[size_t(settings.range)];
+    const double hue = std::fmod(master.hue, 360.);
+    GpuParameters p{};
+    p[GpuParam::HueSaturation::colorize] = settings.colorize;
+    p[GpuParam::HueSaturation::hue] = float((hue < 0 ? hue + 360 : hue) / 360);
+    p[GpuParam::HueSaturation::saturation] = float(std::clamp(master.saturation / 100, 0., 1.));
+    p[GpuParam::HueSaturation::lightness] = float(master.lightness / 100);
+    return graph.pass(GpuOp::HueSaturation, input, graph.source(table), p, quantization);
+}
+int appendGradientMap(GpuGraph &graph, int input, const std::array<uint8_t, 768> &table, unsigned quantization) {
+    QImage ramp(256, 1, QImage::Format_RGBA32FPx4_Premultiplied);
+    auto *values = reinterpret_cast<float *>(ramp.bits());
+    for (int i = 0; i < 256; ++i) {
+        for (int c = 0; c < 3; ++c)
+            values[i * 4 + c] = table[size_t(i) * 3 + size_t(c)] / 255.f;
+        values[i * 4 + 3] = 1;
+    }
+    return graph.pass(GpuOp::GradientMap, input, graph.source(ramp), {}, quantization);
+}
+int appendBlackWhite(GpuGraph &graph, int input, const float *weights, bool tint, double tintHue, double tintSaturation,
+                     unsigned quantization) {
+    GpuParameters p{};
+    for (int i = 0; i < 6; ++i)
+        p[GpuParam::BlackWhite::red + i] = weights[i];
+    p[GpuParam::BlackWhite::tint] = tint ? 1 : 0;
+    p[GpuParam::BlackWhite::tintHue] = float(tintHue / 360);
+    p[GpuParam::BlackWhite::tintSaturation] = float(tintSaturation);
+    return graph.pass(GpuOp::BlackWhite, input, -1, p, quantization);
+}
+int appendColorBalance(GpuGraph &graph, int input, const float *shadows, const float *midtones, const float *highlights,
+                       bool preserveLuminosity, unsigned quantization) {
+    GpuParameters p{};
+    for (int i = 0; i < 3; ++i) {
+        p[GpuParam::ColorBalance::shadowRed + i] = shadows[i];
+        p[GpuParam::ColorBalance::midRed + i] = midtones[i];
+        p[GpuParam::ColorBalance::highlightRed + i] = highlights[i];
+    }
+    p[GpuParam::ColorBalance::preserveLuminosity] = preserveLuminosity ? 1 : 0;
+    return graph.pass(GpuOp::ColorBalance, input, -1, p, quantization);
+}
+int appendNoise(GpuGraph &graph, int input, float amount, bool gaussian, bool monochromatic, quint32 seed, QPoint origin,
+                unsigned quantization) {
+    GpuParameters p{};
+    p[GpuParam::Noise::amount] = amount;
+    p[GpuParam::Noise::gaussian] = gaussian ? 1 : 0;
+    p[GpuParam::Noise::monochromatic] = monochromatic ? 1 : 0;
+    p[GpuParam::Noise::seedLow] = float(seed & 0xffffu);
+    p[GpuParam::Noise::seedHigh] = float(seed >> 16);
+    p[GpuParam::Noise::originX] = float(origin.x());
+    p[GpuParam::Noise::originY] = float(origin.y());
+    return graph.pass(GpuOp::Noise, input, -1, p, quantization);
+}
+int appendGrain(GpuGraph &graph, int input, double amount, double size, double roughness, quint32 seed, QPointF origin,
+                double unitsPerPixel, unsigned quantization) {
+    if (!(amount > 0) || !(unitsPerPixel > 0))
+        return input;
+    GpuParameters p{};
+    p[GpuParam::Grain::amount] = float(std::clamp(amount, 0., 100.));
+    p[GpuParam::Grain::size] = float(std::clamp(size, .5, 20.));
+    p[GpuParam::Grain::roughness] = float(std::clamp(roughness, 0., 100.));
+    p[GpuParam::Grain::seedLow] = float(seed & 0xffffu);
+    p[GpuParam::Grain::seedHigh] = float(seed >> 16);
+    p[GpuParam::Grain::originX] = float(origin.x());
+    p[GpuParam::Grain::originY] = float(origin.y());
+    p[GpuParam::Grain::unitsPerPixel] = float(unitsPerPixel);
+    return graph.pass(GpuOp::Grain, input, -1, p, quantization);
 }
 int appendProgressive(GpuGraph &graph, int original, const ProgressiveBlurSettings &s, unsigned precision) {
     double low = std::clamp(s.from, 0., 250.), high = std::clamp(s.to, 0., 250.);

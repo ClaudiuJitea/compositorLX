@@ -27,7 +27,8 @@ OPERATIONS = [
     ('Gaussian', ['reach', 'axis', 'clear']),
     ('Mask', ['useAlpha', 'factor']),
     ('Bloom', ['amount', 'deep']),
-    ('MotionBlur', ['horizontal', 'slope', 'reach']),
+    # `origin`: the document position of the input's first pixel along the streak, as the CPU shears by absolute steps.
+    ('MotionBlur', ['horizontal', 'slope', 'reach', 'origin']),
     ('ProgressiveMix', ['startX', 'startY', 'deltaX', 'deltaY', 'radial', 'low', 'high', 'strongest', 'level']),
     ('Composite', ['mode', 'opacity']),
     ('Transform', ['m11', 'm21', 'dx', 'm12', 'm22', 'dy', 'sourceWidth', 'sourceHeight', 'smooth', 'opacity']),
@@ -71,6 +72,10 @@ OPERATIONS = [
     # A wide blur's smaller copy: each pixel the average of a factor × factor block (clear outside, or only the
     # pixels inside counted).
     ('LensReduce', ['factor', 'sourceWidth', 'sourceHeight', 'clear']),
+    # Add Noise and Grain (macOS GPUNoise.swift: NoisePixels.c's noise and adjust_grain with the same hashes). Seeds
+    # come in 16-bit halves, as parameters are floats; the origin places the pixels in the document.
+    ('Noise', ['amount', 'gaussian', 'monochromatic', 'seedLow', 'seedHigh', 'originX', 'originY']),
+    ('Grain', ['amount', 'size', 'roughness', 'seedLow', 'seedHigh', 'originX', 'originY', 'unitsPerPixel']),
 ]
 # Lens operations can update their input in place over a region (GpuGraph::update); the region (x, y, width, height)
 # is passed in the last four parameter slots, which those operations leave free.

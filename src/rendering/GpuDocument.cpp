@@ -57,7 +57,9 @@ struct Plan {
 };
 bool supportedAdjustment(const QString &kind) {
     return kind == "Invert" || kind == "Exposure" || kind == "Levels" || kind == "Curves" || kind == "Gaussian Blur" ||
-           kind == "Bloom / Glow" || kind == "Progressive Blur" || kind == "RGB Split";
+           kind == "Bloom / Glow" || kind == "Progressive Blur" || kind == "RGB Split" || kind == "Hue/Saturation" ||
+           kind == "Black & White" || kind == "Color Balance" || kind == "Gradient Map" || kind == "Motion Blur" ||
+           kind == "Add Noise" || kind == "Grain";
 }
 int adjustmentReach(const QJsonObject &settings, QSize canvas) {
     const QString kind = settings.value("kind").toString();
@@ -70,6 +72,8 @@ int adjustmentReach(const QJsonObject &settings, QSize canvas) {
         const auto s = progressiveFromJson(settings, canvas);
         return blur(std::max(std::clamp(s.from, 0., 250.), std::clamp(s.to, 0., 250.)));
     }
+    if (kind == "Motion Blur")
+        return int(std::ceil(std::clamp(RasterOperations::motionFromJson(settings).distance, 1., 2000.) / 2)) + 2;
     if (kind == "RGB Split") {
         const auto s = rgbSplitFromJson(settings, canvas);
         const double reach = std::abs(s.distance) + std::abs(s.blur);
@@ -221,6 +225,34 @@ int adjustment(GpuGraph &g, int input, const QJsonObject &settings, QPoint origi
         }
         return output < 0 ? -1 : g.pass(GpuOp::Copy, output, -1, {}, bytes8);
     }
+    if (kind == "Hue/Saturation") {
+        const auto s = RasterOperations::hueSaturationFromJson(settings);
+        return s.isIdentity() ? input : GpuOperations::appendHueSaturation(g, input, s, bytes8);
+    }
+    if (kind == "Black & White") {
+        const auto s = RasterOperations::blackWhiteFromJson(settings);
+        return GpuOperations::appendBlackWhite(g, input, s.weights.data(), s.tint, s.tintHue, s.tintSaturation, bytes8);
+    }
+    if (kind == "Color Balance") {
+        const auto s = RasterOperations::colorBalanceFromJson(settings);
+        return GpuOperations::appendColorBalance(g, input, s.shadows.data(), s.midtones.data(), s.highlights.data(),
+                                                 s.preserveLuminosity, bytes8);
+    }
+    if (kind == "Gradient Map")
+        return GpuOperations::appendGradientMap(g, input, RasterOperations::gradientMapTable(RasterOperations::gradientMapFromJson(settings)), bytes8);
+    if (kind == "Motion Blur") {
+        const auto s = RasterOperations::motionFromJson(settings);
+        return GpuOperations::appendMotion(g, input, s.angle, s.distance, bytes8, origin);
+    }
+    // Noise and grain are keyed to document pixels (the CPU renders them over the whole canvas from its corner).
+    if (kind == "Add Noise") {
+        const auto s = RasterOperations::noiseFromJson(settings);
+        return GpuOperations::appendNoise(g, input, s.amount, s.gaussian, s.monochromatic, s.seed, origin, bytes8);
+    }
+    if (kind == "Grain") {
+        const auto s = RasterOperations::grainFromJson(settings);
+        return GpuOperations::appendGrain(g, input, s.amount, s.size, s.roughness, s.seed, origin, 1, bytes8);
+    }
     if (kind == "Levels" || kind == "Curves") {
         std::array<float, 768> tables;
         if (kind == "Levels")
@@ -256,7 +288,10 @@ QImage renderRegion(const Document &document, const Plan &p, QRect region, const
     const QSize size = region.size();
     // The whole base keeps its identity, so the upload cache skips it on repeated renders.
     const bool whole = region == QRect(QPoint(), document.canvasSize);
-    int canvas = base.isNull() ? graph.clear(size) : graph.source(whole ? base : base.copy(region));
+    // Without a base the canvas starts transparent, at the document's precision; the first Normal layer drawn onto it
+    // is the canvas itself (Normal over nothing changes nothing), so it needs neither the clear nor the composite.
+    int canvas = base.isNull() ? -1 : graph.source(whole ? base : base.copy(region));
+    const auto cleared = [&] { return canvas >= 0 ? canvas : (canvas = graph.clear(size, precision(p.deep))); };
     const QTransform toCanvas = QTransform::fromTranslate(-region.x(), -region.y());
     std::vector<int> groupNodes(p.groupMasks.size(), -1);
     for (size_t i = 0; i < p.groupMasks.size(); ++i) {
@@ -272,7 +307,7 @@ QImage renderRegion(const Document &document, const Plan &p, QRect region, const
     for (const auto &s : p.steps) {
         const Layer &layer = *s.layer;
         if (!layer.adjustment.isEmpty()) {
-            const int changed = adjustment(graph, canvas, layer.adjustment, region.topLeft(), document.canvasSize);
+            const int changed = adjustment(graph, cleared(), layer.adjustment, region.topLeft(), document.canvasSize);
             if (changed < 0)
                 return {};
             GpuParameters m{};
@@ -335,12 +370,16 @@ QImage renderRegion(const Document &document, const Plan &p, QRect region, const
             m[GpuParam::Mask::factor] = 1;
             surface = graph.pass(GpuOp::Mask, surface, groupNodes[size_t(s.groupMask)], m, precision(p.deep));
         }
+        if (canvas < 0 && layer.blendMode == BlendMode::Normal) {
+            canvas = surface;
+            continue;
+        }
         GpuParameters c{};
         c[GpuParam::Composite::mode] = int(layer.blendMode);
         c[GpuParam::Composite::opacity] = 1; // Opacity is already in the surface.
-        canvas = graph.pass(GpuOp::Composite, canvas, surface, c, precision(p.deep));
+        canvas = graph.pass(GpuOp::Composite, cleared(), surface, c, precision(p.deep));
     }
-    return graph.execute(canvas, format);
+    return graph.execute(cleared(), format);
 }
 // Negative decisions (graph did not fit) for recently seen document shapes.
 std::mutex rejectedMutex;
@@ -391,13 +430,10 @@ QImage tryGpuDocument(const Document &document, const QImage &base, int firstTop
     }
     if (!prepare(document, p))
         return {};
-    QImage result;
-    if (!tile)
-        result = renderRegion(document, p, canvas, base, format);
-    else {
-        result = QImage(document.canvasSize, format);
+    const auto tiled = [&](int tile) {
+        QImage result(document.canvasSize, format);
         if (result.isNull())
-            return {};
+            return result;
         const int bytes = result.depth() / 8;
         for (int y = 0; y < canvas.height() && !result.isNull(); y += tile)
             for (int x = 0; x < canvas.width(); x += tile) {
@@ -418,6 +454,15 @@ QImage tryGpuDocument(const Document &document, const QImage &base, int firstTop
                     result.setDotsPerMeterY(part.dotsPerMeterY());
                 }
             }
+        return result;
+    };
+    QImage result = tile ? tiled(tile) : renderRegion(document, p, canvas, base, format);
+    // The estimate is a guide: a graph the executor finds too large goes again in tiles before the CPU takes over.
+    for (int side : {2048, 1024, 512}) {
+        if (!result.isNull() || p.halo > 512 || !GpuRenderer::lastExecution().reason.contains(QStringLiteral("budget")))
+            break;
+        if (!tile || side < tile)
+            result = tiled(tile = side);
     }
     if (result.isNull()) {
         if (GpuRenderer::lastExecution().reason.contains(QStringLiteral("budget"))) {

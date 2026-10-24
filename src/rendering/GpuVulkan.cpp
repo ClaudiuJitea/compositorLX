@@ -190,6 +190,7 @@ bool singleChannelOperation(GpuOp op) {
     return op == GpuOp::Copy || op == GpuOp::BoxBlur || op == GpuOp::Gaussian || op == GpuOp::Morphology ||
            op == GpuOp::MorphologyStep || op == GpuOp::MorphologyCombine;
 }
+bool lensOperation(GpuOp op) { return op >= GpuOp::LensPoint && op <= GpuOp::LensReduce; }
 GpuFormat passFormat(const GpuNode &node, GpuFormat input) {
     switch (GpuQuantization(node.quantization)) {
     case GpuQuantization::Unorm8:
@@ -200,7 +201,7 @@ GpuFormat passFormat(const GpuNode &node, GpuFormat input) {
         return GpuFormat::Half;
     default:
         // The Lens operations make one channel whatever they read (LensResample can pick it out of an RGBA source).
-        if (node.operation >= GpuOp::LensPoint)
+        if (lensOperation(node.operation))
             return GpuFormat::Red32;
         return input == GpuFormat::Red32 && singleChannelOperation(node.operation) ? GpuFormat::Red32
                                                                                    : GpuFormat::Float32;
@@ -792,7 +793,7 @@ bool Context::render(const GpuGraph &graph, int output, GpuFormat outputFormat, 
                 // An update writes into its input, so the input must be a pass of its kind that nothing else reads.
                 if (n.inPlace && (n.input < 0 || nodes[n.input].operation == GpuOp::Source || last[n.input] != i ||
                                   nodes[n.input].size != n.size || formats[n.input] != formats[i] ||
-                                  n.operation < GpuOp::LensPoint))
+                                  !lensOperation(n.operation)))
                     throw std::runtime_error("Invalid in-place GPU pass");
                 passes.push_back(i);
             }

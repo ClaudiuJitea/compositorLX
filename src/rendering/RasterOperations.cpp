@@ -400,6 +400,18 @@ std::optional<std::array<quint8, 3>> RasterOperations::colorRangeSample(const QI
     return color;
 }
 
+std::array<std::array<double, 3>, 361> RasterOperations::hueSaturationResponses(const HueSaturationSettings &settings)
+{
+    std::array<std::array<double, 3>, 361> responses{};
+    for (int degree = 0; degree <= 360; ++degree) for (size_t i = 0; i < settings.adjustments.size(); ++i) {
+        const auto &adjustment = settings.adjustments[i]; const double weight = settings.weight(ColorRange(i), degree);
+        responses[size_t(degree)][0] += adjustment.hue * weight;
+        responses[size_t(degree)][1] += adjustment.saturation * weight;
+        responses[size_t(degree)][2] += adjustment.lightness * weight;
+    }
+    return responses;
+}
+
 QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationSettings &settings)
 {
     if (DeepImage::isDeep(image)) {
@@ -411,30 +423,12 @@ QImage RasterOperations::hueSaturation(const QImage &image, const HueSaturationS
     if (settings.isIdentity()) return result;
     struct Response { double hue = 0, saturation = 0, lightness = 0; };
     std::array<Response, 361> responses{};
-    for (int degree = 0; degree <= 360; ++degree) for (size_t i = 0; i < settings.adjustments.size(); ++i) {
-        const auto &adjustment = settings.adjustments[i]; const double weight = settings.weight(ColorRange(i), degree);
-        responses[size_t(degree)].hue += adjustment.hue * weight;
-        responses[size_t(degree)].saturation += adjustment.saturation * weight;
-        responses[size_t(degree)].lightness += adjustment.lightness * weight;
-    }
+    const auto changes = hueSaturationResponses(settings);
+    for (int degree = 0; degree <= 360; ++degree)
+        responses[size_t(degree)] = {changes[size_t(degree)][0], changes[size_t(degree)][1], changes[size_t(degree)][2]};
     if (GpuRenderer::shouldAttempt(result.size(), 16)) {
-        QImage table(361, 1, QImage::Format_RGBA32FPx4_Premultiplied);
-        auto *values = reinterpret_cast<float *>(table.bits());
-        for (int i = 0; i <= 360; ++i) {
-            values[i*4] = responses[i].hue;
-            values[i*4+1] = responses[i].saturation;
-            values[i*4+2] = responses[i].lightness;
-            values[i*4+3] = 1;
-        }
-        GpuParameters parameters{};
-        const auto &master = settings.adjustments[size_t(settings.range)];
-        parameters[GpuParam::HueSaturation::colorize] = settings.colorize;
-        parameters[GpuParam::HueSaturation::hue] = wrapHue(master.hue)/360;
-        parameters[GpuParam::HueSaturation::saturation] = std::clamp(master.saturation/100, 0., 1.);
-        parameters[GpuParam::HueSaturation::lightness] = master.lightness/100;
         GpuGraph graph;
-        const int input = graph.source(result), response = graph.source(table);
-        const auto gpu = graph.execute(graph.pass(GpuOp::HueSaturation,input,response,parameters,1),result.format());
+        const auto gpu = graph.execute(GpuOperations::appendHueSaturation(graph, graph.source(result), settings, 1), result.format());
         if (!gpu.isNull()) return gpu;
     }
     result.detach(); // Rows are written from several threads.
@@ -478,24 +472,79 @@ QImage RasterOperations::curves(const QImage &image, const CurvesSettings &setti
     return result;
 }
 
+HueSaturationSettings RasterOperations::hueSaturationFromJson(const QJsonObject &settings)
+{
+    const QJsonObject hsv = settings.value(QStringLiteral("hsvSettings")).toObject();
+    HueSaturationSettings value(hsv.value(QStringLiteral("hue")).toDouble(settings.value(QStringLiteral("hue")).toDouble()),
+        hsv.value(QStringLiteral("saturation")).toDouble(settings.value(QStringLiteral("saturation")).toDouble()),
+        hsv.value(QStringLiteral("lightness")).toDouble(settings.value(QStringLiteral("lightness")).toDouble()),
+        hsv.value(QStringLiteral("colorize")).toBool(settings.value(QStringLiteral("colorize")).toBool()));
+    static const QStringList names{QStringLiteral("Master"),QStringLiteral("Reds"),QStringLiteral("Yellows"),QStringLiteral("Greens"),QStringLiteral("Cyans"),QStringLiteral("Blues"),QStringLiteral("Magentas")};
+    const int selected=names.indexOf(hsv.value(QStringLiteral("range")).toString());if(selected>=0)value.range=ColorRange(selected);value.invertRange=hsv.value(QStringLiteral("invertRange")).toBool();
+    const QJsonArray adjustments=hsv.value(QStringLiteral("adjustments")).toArray();for(int i=0;i+1<adjustments.size();i+=2){const int range=names.indexOf(adjustments[i].toString());const QJsonObject a=adjustments[i+1].toObject();if(range>=0)value.adjustments[size_t(range)]={a.value(QStringLiteral("hue")).toDouble(),a.value(QStringLiteral("saturation")).toDouble(),a.value(QStringLiteral("lightness")).toDouble()};}
+    const QJsonArray bands=hsv.value(QStringLiteral("bands")).toArray();for(int i=0;i+1<bands.size();i+=2){const int range=names.indexOf(bands[i].toString());const QJsonObject b=bands[i+1].toObject();if(range>=0)value.bands[size_t(range)]={b.value(QStringLiteral("falloffStart")).toDouble(),b.value(QStringLiteral("rangeStart")).toDouble(),b.value(QStringLiteral("rangeEnd")).toDouble(),b.value(QStringLiteral("falloffEnd")).toDouble()};}
+    return value;
+}
+
+RasterOperations::GradientMapSettings RasterOperations::gradientMapFromJson(const QJsonObject &settings)
+{
+    QJsonObject value = settings.value(QStringLiteral("gradientMapSettings")).toObject(); if (value.isEmpty()) value = settings.value(QStringLiteral("gradientMap")).toObject();
+    const auto color = [](const QJsonValue &entry, const QColor &fallback) { const QJsonObject c = entry.toObject(); return c.isEmpty() ? fallback : QColor::fromRgbF(c.value(QStringLiteral("red")).toDouble(), c.value(QStringLiteral("green")).toDouble(), c.value(QStringLiteral("blue")).toDouble()); };
+    return {color(value.value(QStringLiteral("shadows")), Qt::black), color(value.value(QStringLiteral("highlights")), Qt::white), value.value(QStringLiteral("reversed")).toBool()};
+}
+
+RasterOperations::GrainSettings RasterOperations::grainFromJson(const QJsonObject &settings)
+{
+    QJsonObject value = settings.value(QStringLiteral("grainSettings")).toObject(); if (value.isEmpty()) value = settings.value(QStringLiteral("grain")).toObject();
+    return {value.value(QStringLiteral("amount")).toDouble(25), value.value(QStringLiteral("size")).toDouble(1.5),
+            value.value(QStringLiteral("roughness")).toDouble(50), quint32(value.value(QStringLiteral("seed")).toDouble())};
+}
+
+RasterOperations::MotionSettings RasterOperations::motionFromJson(const QJsonObject &settings)
+{
+    return {settings.value(QStringLiteral("motionAngle")).toDouble(0.0), settings.value(QStringLiteral("motionDistance")).toDouble(10.0)};
+}
+
+RasterOperations::NoiseSettings RasterOperations::noiseFromJson(const QJsonObject &settings)
+{
+    return {float(settings.value(QStringLiteral("noiseAmount")).toDouble(10.0)), settings.value(QStringLiteral("noiseGaussian")).toBool(false),
+            settings.value(QStringLiteral("noiseMonochromatic")).toBool(false), quint32(settings.value(QStringLiteral("noiseSeed")).toDouble(0.0))};
+}
+
+RasterOperations::BlackWhiteSettings RasterOperations::blackWhiteFromJson(const QJsonObject &settings)
+{
+    QJsonObject bw = settings.value(QStringLiteral("blackWhiteSettings")).toObject();
+    if (bw.isEmpty()) bw = settings.value(QStringLiteral("blackWhite")).toObject();
+    BlackWhiteSettings value;
+    value.weights = {float(bw.value(QStringLiteral("reds")).toDouble(40.0) / 100.0), float(bw.value(QStringLiteral("yellows")).toDouble(60.0) / 100.0),
+                     float(bw.value(QStringLiteral("greens")).toDouble(40.0) / 100.0), float(bw.value(QStringLiteral("cyans")).toDouble(60.0) / 100.0),
+                     float(bw.value(QStringLiteral("blues")).toDouble(20.0) / 100.0), float(bw.value(QStringLiteral("magentas")).toDouble(80.0) / 100.0)};
+    value.tint = bw.value(QStringLiteral("tint")).toBool(false);
+    value.tintHue = bw.value(QStringLiteral("tintHue")).toDouble(40.0);
+    value.tintSaturation = bw.value(QStringLiteral("tintSaturation")).toDouble(20.0) / 100.0;
+    return value;
+}
+
+RasterOperations::ColorBalanceSettings RasterOperations::colorBalanceFromJson(const QJsonObject &settings)
+{
+    QJsonObject cb = settings.value(QStringLiteral("colorBalanceSettings")).toObject();
+    if (cb.isEmpty()) cb = settings.value(QStringLiteral("colorBalance")).toObject();
+    const auto read = [&](const char *name) { return float(cb.value(QLatin1String(name)).toDouble(0.0) / 100.0); };
+    ColorBalanceSettings value;
+    value.shadows = {read("shadowCyanRed"), read("shadowMagentaGreen"), read("shadowYellowBlue")};
+    value.midtones = {read("midCyanRed"), read("midMagentaGreen"), read("midYellowBlue")};
+    value.highlights = {read("highlightCyanRed"), read("highlightMagentaGreen"), read("highlightYellowBlue")};
+    value.preserveLuminosity = cb.value(QStringLiteral("preserveLuminosity")).toBool(true);
+    return value;
+}
+
 QImage RasterOperations::adjustment(const QImage &image, const QJsonObject &settings,
                                     const QPointF &origin, double unitsPerPixel)
 {
     const QString kind = settings.value(QStringLiteral("kind")).toString();
     if (kind == "Progressive Blur" || kind == "Bloom / Glow" || kind == "RGB Split")
         return applyFilterLayer(image, settings, origin, unitsPerPixel);
-    if (kind == QStringLiteral("Hue/Saturation")) {
-        const QJsonObject hsv = settings.value(QStringLiteral("hsvSettings")).toObject();
-        HueSaturationSettings value(hsv.value(QStringLiteral("hue")).toDouble(settings.value(QStringLiteral("hue")).toDouble()),
-            hsv.value(QStringLiteral("saturation")).toDouble(settings.value(QStringLiteral("saturation")).toDouble()),
-            hsv.value(QStringLiteral("lightness")).toDouble(settings.value(QStringLiteral("lightness")).toDouble()),
-            hsv.value(QStringLiteral("colorize")).toBool(settings.value(QStringLiteral("colorize")).toBool()));
-        static const QStringList names{QStringLiteral("Master"),QStringLiteral("Reds"),QStringLiteral("Yellows"),QStringLiteral("Greens"),QStringLiteral("Cyans"),QStringLiteral("Blues"),QStringLiteral("Magentas")};
-        const int selected=names.indexOf(hsv.value(QStringLiteral("range")).toString());if(selected>=0)value.range=ColorRange(selected);value.invertRange=hsv.value(QStringLiteral("invertRange")).toBool();
-        const QJsonArray adjustments=hsv.value(QStringLiteral("adjustments")).toArray();for(int i=0;i+1<adjustments.size();i+=2){const int range=names.indexOf(adjustments[i].toString());const QJsonObject a=adjustments[i+1].toObject();if(range>=0)value.adjustments[size_t(range)]={a.value(QStringLiteral("hue")).toDouble(),a.value(QStringLiteral("saturation")).toDouble(),a.value(QStringLiteral("lightness")).toDouble()};}
-        const QJsonArray bands=hsv.value(QStringLiteral("bands")).toArray();for(int i=0;i+1<bands.size();i+=2){const int range=names.indexOf(bands[i].toString());const QJsonObject b=bands[i+1].toObject();if(range>=0)value.bands[size_t(range)]={b.value(QStringLiteral("falloffStart")).toDouble(),b.value(QStringLiteral("rangeStart")).toDouble(),b.value(QStringLiteral("rangeEnd")).toDouble(),b.value(QStringLiteral("falloffEnd")).toDouble()};}
-        return hueSaturation(image, value);
-    }
+    if (kind == QStringLiteral("Hue/Saturation")) return hueSaturation(image, hueSaturationFromJson(settings));
     if (kind == QStringLiteral("Levels")) return levels(image, levelsFromJson(settings));
     if (kind == QStringLiteral("Curves")) return curves(image, curvesFromJson(settings));
     if (kind == QStringLiteral("Exposure")) {
@@ -503,14 +552,12 @@ QImage RasterOperations::adjustment(const QImage &image, const QJsonObject &sett
         return exposure(image, value.stops, value.offset, value.gamma);
     }
     if (kind == QStringLiteral("Gradient Map")) {
-        QJsonObject value = settings.value(QStringLiteral("gradientMapSettings")).toObject(); if (value.isEmpty()) value = settings.value(QStringLiteral("gradientMap")).toObject();
-        const auto color = [](const QJsonValue &entry, const QColor &fallback) { const QJsonObject c = entry.toObject(); return c.isEmpty() ? fallback : QColor::fromRgbF(c.value(QStringLiteral("red")).toDouble(), c.value(QStringLiteral("green")).toDouble(), c.value(QStringLiteral("blue")).toDouble()); };
-        return gradientMap(image, color(value.value(QStringLiteral("shadows")), Qt::black), color(value.value(QStringLiteral("highlights")), Qt::white), value.value(QStringLiteral("reversed")).toBool());
+        const auto value = gradientMapFromJson(settings);
+        return gradientMap(image, value.shadows, value.highlights, value.reversed);
     }
     if (kind == QStringLiteral("Grain")) {
-        QJsonObject value = settings.value(QStringLiteral("grainSettings")).toObject(); if (value.isEmpty()) value = settings.value(QStringLiteral("grain")).toObject();
-        return grain(image, value.value(QStringLiteral("amount")).toDouble(25), value.value(QStringLiteral("size")).toDouble(1.5),
-                     value.value(QStringLiteral("roughness")).toDouble(50), quint32(value.value(QStringLiteral("seed")).toDouble()), origin, unitsPerPixel);
+        const auto value = grainFromJson(settings);
+        return grain(image, value.amount, value.size, value.roughness, value.seed, origin, unitsPerPixel);
     }
     if (kind == QStringLiteral("Invert")) {
         return inverted(image);
@@ -520,52 +567,20 @@ QImage RasterOperations::adjustment(const QImage &image, const QJsonObject &sett
         return gaussianBlur(image, radius);
     }
     if (kind == QStringLiteral("Motion Blur")) {
-        const double angle = settings.value(QStringLiteral("motionAngle")).toDouble(0.0);
-        const double dist = settings.value(QStringLiteral("motionDistance")).toDouble(10.0);
-        return motionBlur(image, angle, dist);
+        const auto value = motionFromJson(settings);
+        return motionBlur(image, value.angle, value.distance);
     }
     if (kind == QStringLiteral("Add Noise")) {
-        const float amount = float(settings.value(QStringLiteral("noiseAmount")).toDouble(10.0));
-        const bool gaussian = settings.value(QStringLiteral("noiseGaussian")).toBool(false);
-        const bool monochromatic = settings.value(QStringLiteral("noiseMonochromatic")).toBool(false);
-        const quint32 seed = quint32(settings.value(QStringLiteral("noiseSeed")).toDouble(0.0));
-        return addNoise(image, amount, gaussian, monochromatic, seed);
+        const auto value = noiseFromJson(settings);
+        return addNoise(image, value.amount, value.gaussian, value.monochromatic, value.seed);
     }
     if (kind == QStringLiteral("Black & White")) {
-        QJsonObject bw = settings.value(QStringLiteral("blackWhiteSettings")).toObject();
-        if (bw.isEmpty()) bw = settings.value(QStringLiteral("blackWhite")).toObject();
-        const float reds = float(bw.value(QStringLiteral("reds")).toDouble(40.0) / 100.0);
-        const float yellows = float(bw.value(QStringLiteral("yellows")).toDouble(60.0) / 100.0);
-        const float greens = float(bw.value(QStringLiteral("greens")).toDouble(40.0) / 100.0);
-        const float cyans = float(bw.value(QStringLiteral("cyans")).toDouble(60.0) / 100.0);
-        const float blues = float(bw.value(QStringLiteral("blues")).toDouble(20.0) / 100.0);
-        const float magentas = float(bw.value(QStringLiteral("magentas")).toDouble(80.0) / 100.0);
-        const float weights[6] = {reds, yellows, greens, cyans, blues, magentas};
-        const bool tint = bw.value(QStringLiteral("tint")).toBool(false);
-        const double tintHue = bw.value(QStringLiteral("tintHue")).toDouble(40.0);
-        const double tintSaturation = bw.value(QStringLiteral("tintSaturation")).toDouble(20.0) / 100.0;
-        return blackWhite(image, weights, tint, tintHue, tintSaturation);
+        const auto value = blackWhiteFromJson(settings);
+        return blackWhite(image, value.weights.data(), value.tint, value.tintHue, value.tintSaturation);
     }
     if (kind == QStringLiteral("Color Balance")) {
-        QJsonObject cb = settings.value(QStringLiteral("colorBalanceSettings")).toObject();
-        if (cb.isEmpty()) cb = settings.value(QStringLiteral("colorBalance")).toObject();
-        const float shadows[3] = {
-            float(cb.value(QStringLiteral("shadowCyanRed")).toDouble(0.0) / 100.0),
-            float(cb.value(QStringLiteral("shadowMagentaGreen")).toDouble(0.0) / 100.0),
-            float(cb.value(QStringLiteral("shadowYellowBlue")).toDouble(0.0) / 100.0)
-        };
-        const float midtones[3] = {
-            float(cb.value(QStringLiteral("midCyanRed")).toDouble(0.0) / 100.0),
-            float(cb.value(QStringLiteral("midMagentaGreen")).toDouble(0.0) / 100.0),
-            float(cb.value(QStringLiteral("midYellowBlue")).toDouble(0.0) / 100.0)
-        };
-        const float highlights[3] = {
-            float(cb.value(QStringLiteral("highlightCyanRed")).toDouble(0.0) / 100.0),
-            float(cb.value(QStringLiteral("highlightMagentaGreen")).toDouble(0.0) / 100.0),
-            float(cb.value(QStringLiteral("highlightYellowBlue")).toDouble(0.0) / 100.0)
-        };
-        const bool preserveLuminosity = cb.value(QStringLiteral("preserveLuminosity")).toBool(true);
-        return colorBalance(image, shadows, midtones, highlights, preserveLuminosity);
+        const auto value = colorBalanceFromJson(settings);
+        return colorBalance(image, value.shadows.data(), value.midtones.data(), value.highlights.data(), value.preserveLuminosity);
     }
     throw std::runtime_error("Unsupported adjustment kind: " + kind.toStdString());
 }
@@ -703,24 +718,27 @@ QImage RasterOperations::tonalContrast(const QImage &image, double amount, doubl
     return result;
 }
 
-QImage RasterOperations::gradientMap(const QImage &image, const QColor &shadows, const QColor &highlights, bool reversed)
+std::array<uint8_t, 768> RasterOperations::gradientMapTable(const GradientMapSettings &settings)
 {
-    if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return gradientMap(low, shadows, highlights, reversed); });
-    QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
-    const QColor dark = reversed ? highlights : shadows, light = reversed ? shadows : highlights;
+    const QColor dark = settings.reversed ? settings.highlights : settings.shadows, light = settings.reversed ? settings.shadows : settings.highlights;
     std::array<uint8_t, 256 * 3> table{};
     for (int i = 0; i < 256; ++i) { const double t = i / 255.0;
         table[i * 3] = uint8_t(qRound(dark.red() + (light.red() - dark.red()) * t));
         table[i * 3 + 1] = uint8_t(qRound(dark.green() + (light.green() - dark.green()) * t));
         table[i * 3 + 2] = uint8_t(qRound(dark.blue() + (light.blue() - dark.blue()) * t));
     }
+    return table;
+}
+
+QImage RasterOperations::gradientMap(const QImage &image, const QColor &shadows, const QColor &highlights, bool reversed)
+{
+    if (DeepImage::isDeep(image)) return DeepImage::lookup(image, [&](const QImage &low) { return gradientMap(low, shadows, highlights, reversed); });
+    QImage result = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+    const std::array<uint8_t, 256 * 3> table = gradientMapTable({shadows, highlights, reversed});
     if (GpuRenderer::shouldAttempt(result.size(), 8)) { // ~3.4× faster at 1080p (tools/GpuBenchmark).
-        QImage ramp(256,1,QImage::Format_RGBA32FPx4_Premultiplied);
-        auto *values=reinterpret_cast<float *>(ramp.bits());
-        for(int i=0;i<256;++i){for(int c=0;c<3;++c)values[i*4+c]=table[i*3+c]/255.f;values[i*4+3]=1;}
-        GpuGraph graph;const int input=graph.source(result),lut=graph.source(ramp);
-        const auto gpu=graph.execute(graph.pass(GpuOp::GradientMap,input,lut,{},1),result.format());
-        if(!gpu.isNull())return gpu;
+        GpuGraph graph;
+        const auto gpu = graph.execute(GpuOperations::appendGradientMap(graph, graph.source(result), table, 1), result.format());
+        if (!gpu.isNull()) return gpu;
     }
     adjust_gradient_map(result.bits(), size_t(result.width()), size_t(result.height()), size_t(result.bytesPerLine()), table.data());
     return result;
