@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.7.1-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.7.2-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -25,7 +25,7 @@
 | **glibc** | 2.43 or newer | 2.43 or newer |
 | **Tested on** | Ubuntu 26.04 | Ubuntu 26.04 |
 | **Libraries** | Bundled (Qt 6.10, Poppler, LibRaw, OpenEXR, ONNX Runtime…) | From the system via `apt`: Qt 6.10, libheif, LibRaw 0.21, OpenEXR 3.1, lcms2, lensfun, Poppler Qt6, giflib, libtiff, libjpeg |
-| **To run** | FUSE in the kernel (most desktops have it). Without FUSE: `--appimage-extract-and-run` | `sudo apt install ./compositorlx_0.7.1_amd64.deb` |
+| **To run** | FUSE in the kernel (most desktops have it). Without FUSE: `--appimage-extract-and-run` | `sudo apt install ./compositorlx_0.7.2_amd64.deb` |
 | **GPU (optional)** | A Vulkan 1.0 driver (tested on Intel and Mesa lavapipe; AMD and NVIDIA untested); otherwise the CPU renders everything | Same |
 
 On distributions older than glibc 2.43, [build from source](#build-from-source).
@@ -79,11 +79,11 @@ Download the [AppImage or Debian package](https://github.com/ClaudiuJitea/compos
 
 ```sh
 # AppImage
-chmod +x CompositorLX-0.7.1-x86_64.AppImage
-./CompositorLX-0.7.1-x86_64.AppImage
+chmod +x CompositorLX-0.7.2-x86_64.AppImage
+./CompositorLX-0.7.2-x86_64.AppImage
 
 # Debian / Ubuntu
-sudo apt install ./compositorlx_0.7.1_amd64.deb
+sudo apt install ./compositorlx_0.7.2_amd64.deb
 compositor-lx
 ```
 
@@ -121,7 +121,8 @@ ctest --test-dir build
 
 ## Version history
 
-- **0.7.1**: the welcome panel can be closed from its corner (New canvas… brings it back), and its recent projects show the three latest, each removable from the list.
+- **0.7.2**: closing the welcome panel leaves the area empty; File › New Canvas or the + tab brings it back.
+- **0.7.1**: the welcome panel can be closed from its corner, and its recent projects show the three latest, each removable from the list.
 - **0.7.0**: macOS 1.7.0 sync (1.5.9–1.7.0). Sharpen, Reduce Noise, Rim Light, Volumetric Light, editable shapes, Align and Distribute, PSD export, custom crop ratios, Distances, project formats 18–22.
 - **0.5.8**: macOS 1.5.8 sync. Lens Effects, GIF playback on saved delays, RGB Split smears both ways, format 27 opens. Refreshed: all Lens Effects on the GPU, more of the canvas and Camera RAW on the GPU, filters, brushes and Liquify on all cores, and the Remove Background, Select Subject and Object Selection progress fix.
 - **0.5.6**: macOS 1.5.6 sync. GIF timeline redesign, Layers search and kind filter, Canvas Size keeps the zoom.

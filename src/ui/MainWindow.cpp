@@ -2031,7 +2031,8 @@ MainWindow::MainWindow(QWidget *parent)
     presetButton->setToolTip(tr("Preset sizes for screens and common formats")); presetButton->setPopupMode(QToolButton::InstantPopup); presetButton->setAutoRaise(true);
     presetButton->setStyleSheet(QStringLiteral("QToolButton::menu-indicator{image:none;}"));
     auto *presetMenu = new QMenu(presetButton); presetButton->setMenu(presetMenu); startHeader->addWidget(presetButton);
-    // A close button in the panel's top-right corner puts the panel away; "New canvas…" (or File › New Canvas) brings it back.
+    // A close button in the panel's top-right corner puts the panel away, leaving the area empty; File › New Canvas (Ctrl+N)
+    // or the + tab button brings it back.
     auto *closeStart = new QToolButton(startPanel); closeStart->setObjectName(QStringLiteral("newCanvasClose"));
     closeStart->setText(QStringLiteral("✕")); closeStart->setAutoRaise(true); closeStart->setToolTip(tr("Close"));
     closeStart->setAccessibleName(tr("Close"));
@@ -2086,12 +2087,8 @@ MainWindow::MainWindow(QWidget *parent)
     auto *startRecentLayout = new QVBoxLayout(startRecent); startRecentLayout->setContentsMargins(0, 12, 0, 0); startRecentLayout->setSpacing(2);
     startLayout->addWidget(startRecent);
     startRecent->setVisible(false);
-    startOuter->addWidget(startPanel, 0, Qt::AlignHCenter);
-    auto *reopenStart = new QPushButton(tr("New canvas…"), startPage); reopenStart->setObjectName(QStringLiteral("newCanvasReopen"));
-    reopenStart->setVisible(false);
-    startOuter->addWidget(reopenStart, 0, Qt::AlignHCenter); startOuter->addStretch();
+    startOuter->addWidget(startPanel, 0, Qt::AlignHCenter); startOuter->addStretch();
     connect(closeStart, &QToolButton::clicked, this, [this] { setStartPanelShown(false); });
-    connect(reopenStart, &QPushButton::clicked, this, [this] { setStartPanelShown(true); });
     canvasStack_->addWidget(startPage); canvasStack_->addWidget(canvas_); canvasStack_->setCurrentWidget(startPage);
     connect(createStart, &QPushButton::clicked, this, [this,canvasUnit,canvasDpi,canvasBackground] {
         const double dpi=canvasDpi->currentIndex()==0?72:300;
@@ -6819,7 +6816,6 @@ void MainWindow::newProject()
 void MainWindow::setStartPanelShown(bool shown)
 {
     if (auto *panel = findChild<QWidget *>(QStringLiteral("newCanvasPanel"))) panel->setVisible(shown);
-    if (auto *reopen = findChild<QPushButton *>(QStringLiteral("newCanvasReopen"))) reopen->setVisible(!shown);
 }
 
 void MainWindow::removeRecentProject(const QString &path)

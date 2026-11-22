@@ -1788,14 +1788,16 @@ private slots:
             MainWindow window; window.resize(1200, 800); window.show();
             QVERIFY(QTest::qWaitForWindowExposed(&window));
             auto *panel = window.findChild<QWidget *>(QStringLiteral("newCanvasPanel"));
-            auto *reopen = window.findChild<QPushButton *>(QStringLiteral("newCanvasReopen"));
             auto *close = window.findChild<QToolButton *>(QStringLiteral("newCanvasClose"));
-            QVERIFY(panel && reopen && close);
-            QVERIFY(panel->isVisible() && !reopen->isVisible());
+            QVERIFY(panel && close);
+            QVERIFY(panel->isVisible());
             QTest::mouseClick(close, Qt::LeftButton);
-            QVERIFY(!panel->isVisible() && reopen->isVisible());
-            QTest::mouseClick(reopen, Qt::LeftButton);
-            QVERIFY(panel->isVisible() && !reopen->isVisible());
+            QVERIFY(!panel->isVisible());
+            // Nothing stands in its place; File › New Canvas brings it back.
+            QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("newCanvasReopen")));
+            for (QAction *a : window.findChildren<QAction *>()) if (a->text().remove(QLatin1Char('&')).startsWith(QStringLiteral("New Canvas"))) { a->trigger(); break; }
+            QTest::qWait(50);
+            QVERIFY(window.findChild<QWidget *>(QStringLiteral("newCanvasPanel"))->isVisible());
 
             const auto entries = [&] { QStringList names; for (auto *b : window.findChildren<QPushButton *>(QStringLiteral("recentProjectEntry"))) names << b->text(); return names; };
             QCOMPARE(entries(), (QStringList{"Project0", "Project1", "Project2"}));

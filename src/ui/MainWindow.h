@@ -177,7 +177,7 @@ public:
     void clearRecentProjects();
     // Takes one project off the recent list (the welcome panel's ✕ beside it); the project itself is left alone.
     void removeRecentProject(const QString &path);
-    // The welcome panel, or in its place the small "New canvas…" button that brings it back.
+    // Shows or puts away the welcome panel; put away, the area stays empty until File › New Canvas or the + tab.
     void setStartPanelShown(bool shown);
     [[nodiscard]] QMenu *openRecentMenu() const { return openRecentMenu_; }
     [[nodiscard]] QString recoveryPath(int tabIndex = -1) const;
