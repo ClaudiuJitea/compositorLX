@@ -474,6 +474,8 @@ inline QString editorStyleTemplate()
         QPushButton#recentProjectEntry { background: transparent; border: 1px solid transparent; text-align: left; padding: 0 8px; min-height: 28px; color: @text@; }
         QPushButton#recentProjectEntry:hover { background: @controlHover@; border-color: @borderSoft@; }
         QPushButton#recentProjectEntry:focus { border-color: @focus@; }
+        QToolButton#newCanvasClose, QToolButton#recentProjectRemove { min-width: 26px; min-height: 26px; border: 1px solid transparent; border-radius: 6px; color: @textMuted@; background: transparent; }
+        QToolButton#newCanvasClose:hover, QToolButton#recentProjectRemove:hover { background: @controlHover@; border-color: @borderSoft@; color: @text@; }
         QToolTip { color: @tooltipText@; background: @tooltip@; border: 1px solid @border@; padding: 5px; }
     )css");
 }

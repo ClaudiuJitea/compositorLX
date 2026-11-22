@@ -175,6 +175,10 @@ public:
     // File > Open Recent: the projects still on disk, newest first (mac RecentProjects).
     [[nodiscard]] QStringList existingRecentProjects() const;
     void clearRecentProjects();
+    // Takes one project off the recent list (the welcome panel's ✕ beside it); the project itself is left alone.
+    void removeRecentProject(const QString &path);
+    // The welcome panel, or in its place the small "New canvas…" button that brings it back.
+    void setStartPanelShown(bool shown);
     [[nodiscard]] QMenu *openRecentMenu() const { return openRecentMenu_; }
     [[nodiscard]] QString recoveryPath(int tabIndex = -1) const;
     [[nodiscard]] QString recoveryDirectory() const;

@@ -40,6 +40,8 @@
 #include <QRandomGenerator>
 #include <QTemporaryDir>
 #include <QTabBar>
+#include <QPushButton>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QLabel>
 #include <QBuffer>
@@ -1771,6 +1773,41 @@ private slots:
         QTest::mouseRelease(canvas, Qt::LeftButton, {}, at(90, 75));
         QVERIFY(canvas->distanceLines().isEmpty());
         toggle->setChecked(false);
+    }
+
+    // 0.7.1: the welcome panel closes from its corner and comes back; the recent projects show three at most, each removable.
+    void welcomePanelClosesAndRecentProjectsCanBeRemoved()
+    {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QStringList projects;
+        for (int i = 0; i < 4; ++i) { const QString path = dir.filePath(QStringLiteral("Project%1.comp").arg(i)); QDir().mkpath(path); projects << path; }
+        QSettings settings;
+        const QVariant saved = settings.value(QStringLiteral("recentProjects"));
+        settings.setValue(QStringLiteral("recentProjects"), projects);
+        {
+            MainWindow window; window.resize(1200, 800); window.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&window));
+            auto *panel = window.findChild<QWidget *>(QStringLiteral("newCanvasPanel"));
+            auto *reopen = window.findChild<QPushButton *>(QStringLiteral("newCanvasReopen"));
+            auto *close = window.findChild<QToolButton *>(QStringLiteral("newCanvasClose"));
+            QVERIFY(panel && reopen && close);
+            QVERIFY(panel->isVisible() && !reopen->isVisible());
+            QTest::mouseClick(close, Qt::LeftButton);
+            QVERIFY(!panel->isVisible() && reopen->isVisible());
+            QTest::mouseClick(reopen, Qt::LeftButton);
+            QVERIFY(panel->isVisible() && !reopen->isVisible());
+
+            const auto entries = [&] { QStringList names; for (auto *b : window.findChildren<QPushButton *>(QStringLiteral("recentProjectEntry"))) names << b->text(); return names; };
+            QCOMPARE(entries(), (QStringList{"Project0", "Project1", "Project2"}));
+            auto removes = window.findChildren<QToolButton *>(QStringLiteral("recentProjectRemove"));
+            QCOMPARE(removes.size(), 3);
+            QTest::mouseClick(removes.at(1), Qt::LeftButton);
+            QTest::qWait(50);
+            QCOMPARE(entries(), (QStringList{"Project0", "Project2", "Project3"}));
+            QVERIFY(!QSettings().value(QStringLiteral("recentProjects")).toStringList().contains(projects.at(1)));
+            QVERIFY(QFileInfo::exists(projects.at(1))); // the project itself stays
+        }
+        if (saved.isValid()) settings.setValue(QStringLiteral("recentProjects"), saved); else settings.remove(QStringLiteral("recentProjects"));
     }
 };
 QTEST_MAIN(TestUpstream170)

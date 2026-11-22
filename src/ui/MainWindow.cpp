@@ -2031,6 +2031,11 @@ MainWindow::MainWindow(QWidget *parent)
     presetButton->setToolTip(tr("Preset sizes for screens and common formats")); presetButton->setPopupMode(QToolButton::InstantPopup); presetButton->setAutoRaise(true);
     presetButton->setStyleSheet(QStringLiteral("QToolButton::menu-indicator{image:none;}"));
     auto *presetMenu = new QMenu(presetButton); presetButton->setMenu(presetMenu); startHeader->addWidget(presetButton);
+    // A close button in the panel's top-right corner puts the panel away; "New canvas…" (or File › New Canvas) brings it back.
+    auto *closeStart = new QToolButton(startPanel); closeStart->setObjectName(QStringLiteral("newCanvasClose"));
+    closeStart->setText(QStringLiteral("✕")); closeStart->setAutoRaise(true); closeStart->setToolTip(tr("Close"));
+    closeStart->setAccessibleName(tr("Close"));
+    startHeader->addWidget(closeStart);
     startLayout->addLayout(startHeader); startLayout->addWidget(startSubtitle);
     auto *startForm = new QFormLayout;
     startForm->setContentsMargins(0, 10, 0, 0); startForm->setHorizontalSpacing(18); startForm->setVerticalSpacing(12); startForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
@@ -2081,7 +2086,12 @@ MainWindow::MainWindow(QWidget *parent)
     auto *startRecentLayout = new QVBoxLayout(startRecent); startRecentLayout->setContentsMargins(0, 12, 0, 0); startRecentLayout->setSpacing(2);
     startLayout->addWidget(startRecent);
     startRecent->setVisible(false);
-    startOuter->addWidget(startPanel, 0, Qt::AlignHCenter); startOuter->addStretch();
+    startOuter->addWidget(startPanel, 0, Qt::AlignHCenter);
+    auto *reopenStart = new QPushButton(tr("New canvas…"), startPage); reopenStart->setObjectName(QStringLiteral("newCanvasReopen"));
+    reopenStart->setVisible(false);
+    startOuter->addWidget(reopenStart, 0, Qt::AlignHCenter); startOuter->addStretch();
+    connect(closeStart, &QToolButton::clicked, this, [this] { setStartPanelShown(false); });
+    connect(reopenStart, &QPushButton::clicked, this, [this] { setStartPanelShown(true); });
     canvasStack_->addWidget(startPage); canvasStack_->addWidget(canvas_); canvasStack_->setCurrentWidget(startPage);
     connect(createStart, &QPushButton::clicked, this, [this,canvasUnit,canvasDpi,canvasBackground] {
         const double dpi=canvasDpi->currentIndex()==0?72:300;
@@ -6803,6 +6813,22 @@ void MainWindow::newProject()
     cancelActiveSelectionTask();
     suggestClipboardOnEmpty_ = true;
     installInNewTab(EditorSession(), nextUntitledTitle());
+    setStartPanelShown(true);
+}
+
+void MainWindow::setStartPanelShown(bool shown)
+{
+    if (auto *panel = findChild<QWidget *>(QStringLiteral("newCanvasPanel"))) panel->setVisible(shown);
+    if (auto *reopen = findChild<QPushButton *>(QStringLiteral("newCanvasReopen"))) reopen->setVisible(!shown);
+}
+
+void MainWindow::removeRecentProject(const QString &path)
+{
+    QSettings settings;
+    QStringList paths = settings.value(QStringLiteral("recentProjects")).toStringList();
+    paths.removeAll(path);
+    settings.setValue(QStringLiteral("recentProjects"), paths);
+    rebuildOpenRecentMenu();
 }
 
 void MainWindow::importImages()
@@ -6988,12 +7014,20 @@ void MainWindow::rebuildOpenRecentMenu()
         while (QLayoutItem *item = layout->takeAt(0)) { delete item->widget(); delete item; }
         auto *heading = new QLabel(tr("Recent projects"), area); heading->setObjectName(QStringLiteral("emptyStateHint"));
         layout->addWidget(heading);
-        for (const QString &path : paths.mid(0, 6)) {
-            auto *entry = new QPushButton(QFileInfo(path).completeBaseName(), area);
+        // The three most recent, each with a button that takes it off the list (the project itself is left alone).
+        for (const QString &path : paths.mid(0, 3)) {
+            auto *row = new QWidget(area); row->setObjectName(QStringLiteral("recentProjectRow"));
+            auto *rowLayout = new QHBoxLayout(row); rowLayout->setContentsMargins(0, 0, 0, 0); rowLayout->setSpacing(4);
+            auto *entry = new QPushButton(QFileInfo(path).completeBaseName(), row);
             entry->setObjectName(QStringLiteral("recentProjectEntry")); entry->setFlat(true); entry->setToolTip(path);
             entry->setAccessibleDescription(path);
             connect(entry, &QPushButton::clicked, this, [this, path] { openProject(path); });
-            layout->addWidget(entry);
+            auto *remove = new QToolButton(row); remove->setObjectName(QStringLiteral("recentProjectRemove"));
+            remove->setText(QStringLiteral("✕")); remove->setAutoRaise(true);
+            remove->setToolTip(tr("Remove from recent projects")); remove->setAccessibleName(tr("Remove %1 from recent projects").arg(QFileInfo(path).completeBaseName()));
+            connect(remove, &QToolButton::clicked, this, [this, path] { QTimer::singleShot(0, this, [this, path] { removeRecentProject(path); }); });
+            rowLayout->addWidget(entry, 1); rowLayout->addWidget(remove);
+            layout->addWidget(row);
         }
         area->setVisible(!paths.isEmpty());
     }
