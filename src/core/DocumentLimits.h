@@ -1,4 +1,10 @@
 #pragma once
+#include <algorithm>
+#include <cmath>
+#include <utility>
+#include <optional>
+#include <QString>
+#include <QStringList>
 
 #include <QtGlobal>
 
@@ -56,6 +62,30 @@ inline qint64 documentPixelBudget()
 
 inline int documentBudgetMegapixels() { return int(documentPixelBudget() / 1000000); }
 inline int maxSurfaceMegapixels() { return int(maxSurfacePixels / 1000000); }
+// A crop ratio typed as width:height (mac 36ced5d CropGeometry.ratio): two positive finite numbers, a comma taken as a
+// decimal point, the ratio within the document's side limits. None for anything else.
+inline std::optional<double> cropRatioFromText(const QString &text)
+{
+    const QStringList parts = text.split(QLatin1Char(':'));
+    if (parts.size() != 2) return std::nullopt;
+    bool wide = false, tall = false;
+    const double width = parts[0].trimmed().replace(QLatin1Char(','), QLatin1Char('.')).toDouble(&wide);
+    const double height = parts[1].trimmed().replace(QLatin1Char(','), QLatin1Char('.')).toDouble(&tall);
+    if (!wide || !tall || !std::isfinite(width) || !std::isfinite(height) || width <= 0 || height <= 0) return std::nullopt;
+    const double ratio = width / height;
+    if (!std::isfinite(ratio) || ratio < 1.0 / maxSide || ratio > maxSide) return std::nullopt;
+    return ratio;
+}
+// How far Image Size's width (or height) can be scrubbed, in pixels, with the other side `other` pixels (mac 42eb9b2
+// ImageSizeSheet.scrubPixelRange): within the side and surface limits, both sides together when the ratio is locked.
+inline std::pair<double, double> imageSizeScrubPixelRange(double pixels, double other, bool locked)
+{
+    const double minimum = locked ? std::max(1.0, pixels / other) : 1.0;
+    const double side = double(maxSide), surface = double(maxSurfacePixels);
+    const double dimensionLimit = locked ? std::min(side, side * pixels / other) : side;
+    const double areaLimit = locked ? std::sqrt(surface * pixels / other) : surface / other;
+    return {minimum, std::max(minimum, std::min(dimensionLimit, areaLimit))};
+}
 
 } // namespace DocumentLimits
 } // namespace compositor

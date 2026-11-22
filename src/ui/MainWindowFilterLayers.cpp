@@ -63,6 +63,8 @@ void MainWindow::filterLayerDialog(const QString &kind)
         point(tr("Start"), "progressiveStart"); point(tr("End"), "progressiveEnd");
     }
     auto *enabled = new QCheckBox(tr("Preview"), &dialog); enabled->setChecked(true); layout->addWidget(enabled);
+    // No Preview on an adjustment layer's panel; the layer's eye shows the picture without it (mac 2d44b8d).
+    enabled->setVisible(!live);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog); layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     session_.beginEdit(live ? tr("Edit %1").arg(kind) : kind);

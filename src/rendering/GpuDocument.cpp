@@ -7,6 +7,7 @@
 #include "rendering/ProgressiveBlur.h"
 #include "rendering/RasterOperations.h"
 #include "rendering/RgbSplit.h"
+#include "rendering/FilterLayers.h"
 #include <QColorSpace>
 #include <QHash>
 #include <QPainter>
@@ -59,7 +60,7 @@ bool supportedAdjustment(const QString &kind) {
     return kind == "Invert" || kind == "Exposure" || kind == "Levels" || kind == "Curves" || kind == "Gaussian Blur" ||
            kind == "Bloom / Glow" || kind == "Progressive Blur" || kind == "RGB Split" || kind == "Hue/Saturation" ||
            kind == "Black & White" || kind == "Color Balance" || kind == "Gradient Map" || kind == "Motion Blur" ||
-           kind == "Add Noise" || kind == "Grain";
+           kind == "Add Noise" || kind == "Grain" || FilterLayers::drawsOnGraph(kind);
 }
 int adjustmentReach(const QJsonObject &settings, QSize canvas) {
     const QString kind = settings.value("kind").toString();
@@ -80,7 +81,7 @@ int adjustmentReach(const QJsonObject &settings, QSize canvas) {
         const double scale = s.radial ? std::hypot(canvas.width(), canvas.height()) / std::max(1., s.reach) : 1;
         return int(std::ceil(std::min(reach * scale, 1e6))) + 2;
     }
-    return 0;
+    return FilterLayers::reach(settings);
 }
 Plan plan(const Document &document, int firstTopLevel) {
     Plan p;
@@ -272,7 +273,7 @@ int adjustment(GpuGraph &g, int input, const QJsonObject &settings, QPoint origi
         }
         return g.pass(GpuOp::Lookup, input, g.source(table), {}, bytes8);
     }
-    return -1;
+    return FilterLayers::appendLayer(g, input, settings, origin, canvas);
 }
 // One graph over `region` (canvas pixels).
 QImage renderRegion(const Document &document, const Plan &p, QRect region, const QImage &base, QImage::Format format) {

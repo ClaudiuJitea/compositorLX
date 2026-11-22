@@ -1,6 +1,9 @@
 #pragma once
 #include "rendering/RgbSplit.h"
 #include "rendering/LensEffects.h"
+#include "rendering/FilterLayers.h"
+#include "rendering/RimLight.h"
+#include "rendering/VolumetricLight.h"
 #include "rendering/Scanlines.h"
 #include "rendering/ProgressiveBlur.h"
 
@@ -11,6 +14,7 @@
 #include "rendering/RasterOperations.h"
 #include "rendering/SubjectRemoval.h"
 #include "core/ToolDefaults.h"
+#include "core/LayerAlign.h"
 
 
 #include <QSet>
@@ -50,6 +54,8 @@ public:
     QVariantMap filterMemory;
     DitherSettings lastDither;
     LensEffectSettings lastLensEffects;
+    RimLightSettings lastRimLight;
+    VolumetricLightSettings lastVolumetricLight;
 
     [[nodiscard]] const std::shared_ptr<Document> &document() const { return document_; }
     [[nodiscard]] std::shared_ptr<Document> &document() { return document_; }
@@ -81,8 +87,17 @@ public:
     using ConfirmConversionsCallback = std::function<bool(const QVector<PSDConversion> &)>;
     void setConfirmConversionsCallback(ConfirmConversionsCallback cb) { confirmConversions_ = std::move(cb); }
     [[nodiscard]] const ConfirmConversionsCallback &confirmConversionsCallback() const noexcept { return confirmConversions_; }
+    // A new pixel layer above the active one. With a folder active it goes in at the folder's top, or with
+    // `besideFolder` (Paste, mac aa22633) just above the folder, outside it; added in the middle of a clipping group, it
+    // joins the group (mac 01e6505).
     bool insertPixelLayer(const QImage &image, const QPointF &origin, const QString &name,
-                          const QString &historyName = QStringLiteral("Paste"), bool dropsSelection = true);
+                          const QString &historyName = QStringLiteral("Paste"), bool dropsSelection = true, bool besideFolder = false);
+    // Where a new layer goes: just above the active layer, or with a folder active, at the top of the folder (mac
+    // newLayerIndex, a587dcc). With nothing active, on top.
+    [[nodiscard]] int newLayerIndex() const;
+    // `id`, added in the middle of a clipping group, joins it: clipped to the base the layer above it is clipped to,
+    // when the one below is that base or clipped to it too (mac adoptClipping).
+    static void adoptClipping(const QUuid &id, QVector<Layer> &layers);
     [[nodiscard]] std::optional<QPair<QImage, QPoint>> copiedPixels(bool merged = false) const;
     // Replaces the selection with `mask` as one undo step; an empty mask deselects. (Select > Color Range.)
     bool replaceSelection(const QImage &mask, const QString &historyName);
@@ -194,6 +209,64 @@ public:
     // Fill with a palette color on live text recolors its letters and keeps them editable (mac TypeTool.swift recolorText).
     // False when the layer is not live text or could not be redrawn, so the caller fills as usual.
     bool recolorText(const QUuid &id, const QColor &color);
+
+    // Shape editing (mac 1.7 3adce92 … a38cb04, ShapeTool.swift). A selected rectangle or ellipse that is still the
+    // shape it was drawn as takes the Shape bar's fill, inside stroke and corner radius; a selected line its color,
+    // width, dashes and caps. With none selected, the bar sets the next shape.
+    // `style` drawn into a box of `size`: a rectangle or ellipse filling it, its stroke inside it; a line between its
+    // two ends.
+    static QImage shapeImage(const LayerShapeStyle &style, QSize size);
+    // The rectangle or ellipse, or the line, the bar edits: the only selected layer, still a live shape. The Shape tool
+    // must be the one in use, which the window tells the session (`shapeToolActive`).
+    [[nodiscard]] const Layer *editingShapeLayer() const;
+    [[nodiscard]] const Layer *editingLineLayer() const;
+    bool shapeToolActive = false;
+    // The next rectangle or ellipse's inside stroke; 0 draws none, as every shape started.
+    double shapeStrokeWidth = 0;
+    QColor shapeStrokeColor = Qt::black;
+    // The bar's values for the next shape when nothing is being edited.
+    double shapeCornerRadius = 0, shapeLineWidth = 4;
+    bool shapeSmoothing = false;
+    QString shapeLineStyle = QStringLiteral("Solid"), shapeLineCap = QStringLiteral("Square");
+    // A fill picked in the Shape bar, and the foreground when it was: the next shape uses it until the foreground
+    // changes (mac a38cb04). Otherwise the next shape is the foreground color.
+    std::optional<std::pair<QColor, QColor>> shapeFillChoice;
+    [[nodiscard]] QColor nextShapeFill() const;
+    // What the bar shows.
+    [[nodiscard]] QColor displayedShapeFill() const { return nextShapeFill(); }
+    [[nodiscard]] QColor displayedShapeStroke() const;
+    [[nodiscard]] double displayedStrokeWidth() const;
+    [[nodiscard]] double displayedCornerRadius() const;
+    [[nodiscard]] bool displayedShapeSmoothing() const;
+    [[nodiscard]] double displayedLineWidth() const;
+    [[nodiscard]] QString displayedLineStyle() const;
+    [[nodiscard]] QString displayedLineCap() const;
+    // Changing a value redraws the selected shape, one "Shape Style" step each; between begin and finish (a slider or
+    // scrub drag) all changes are one step.
+    void beginShapeStyleEdit();
+    void finishShapeStyleEdit();
+    bool setDisplayedStrokeWidth(double width);
+    bool setDisplayedCornerRadius(double radius);
+    bool setDisplayedShapeSmoothing(bool on);
+    bool setDisplayedLineWidth(double width);
+    bool setDisplayedLineStyle(const QString &style);
+    bool setDisplayedLineCap(const QString &cap);
+    // The Fill swatch's pick: recolors the selected shape (or line) and carries on to the next shape until the
+    // foreground changes; with nothing selected it is just remembered for the next shape.
+    bool pickShapeFill(const QColor &color);
+    // The Stroke swatch's pick: the selected shape's stroke when it has one, else the next stroke's color.
+    bool pickShapeStroke(const QColor &color);
+    // While a swatch's color picker is open, the canvas follows it with nothing recorded; cancel puts the shape back.
+    void previewShapeColor(const QColor &color, bool fill);
+    void cancelShapeColorPreview();
+    // Fill on a live shape with no selection makes it that color and keeps it a shape, stroke included ("Fill").
+    bool recolorShape(const QUuid &id, const QColor &color);
+    // The kind the Shape tool should open on: the selected live shape's, if there is one (mac 8997bfe).
+    [[nodiscard]] std::optional<ShapeKind> selectedShapeKind() const;
+    // A dragged-out shape, in what the bar shows: the next shape's fill, a rectangle or ellipse's inside stroke and
+    // radius, a line's width, dashes and caps (mac commitShape). A line runs from `start` to `end`.
+    bool drawShape(ShapeKind kind, const QRectF &rect, const std::optional<QPointF> &start = std::nullopt,
+                   const std::optional<QPointF> &end = std::nullopt);
     void redrawSelectedShapes();
     bool addNoiseToActiveLayer(float amount, bool gaussian, bool monochromatic, quint32 seed);
     bool distortActiveLayer(double amount);
@@ -209,8 +282,25 @@ public:
     bool applyScanlines(const ScanlinesSettings &settings);
     bool applyProgressiveBlur(const ProgressiveBlurSettings &settings);
     bool convertDepth(bool sixteenBit);
+    // Convert to 16-Bit / Convert to 8-Bit on every selected layer and those in selected folders, as one undo step (mac
+    // de0a43d): whichever would change one of them is offered, both for a mix. A blank layer gets clear 16-bit pixels over
+    // the canvas; an HDR layer is clipped to white and kept at 16 bits; to 8 bits they're dithered down.
+    [[nodiscard]] bool canConvertToSixteenBit() const;
+    [[nodiscard]] bool canConvertToEightBit() const;
+    bool convertLayers(bool sixteenBit);
     bool applyRgbSplit(const RgbSplitSettings &settings);
     bool applyLensEffects(const LensEffectSettings &settings);
+    // Filter › Sharpen and Filter › Reduce Noise (mac b0f0b2b, c1c5356): one undo step each, Last Filter repeats them.
+    bool applySharpen(const SharpenSettings &settings);
+    bool applyReduceNoise(const ReduceNoiseSettings &settings);
+    // Filter › Rim Light (mac b9a0ed8): the lights added to the active layer's subject, one undo step, Last Filter.
+    // False with `error` set when the subject can't be found (no model).
+    bool applyRimLight(const RimLightSettings &settings, QString *error = nullptr);
+    // Filter › Volumetric Light (mac 1405545 …): the light at settings.center (document coordinates; none, the layer's
+    // biggest bright area), one undo step, Last Filter. Extract Depth adds the depth its haze goes by as a layer of its
+    // own above the layer, white near and black far, one undo step.
+    bool applyVolumetricLight(const VolumetricLightSettings &settings);
+    bool extractDepth(const VolumetricLightSettings &settings, QString *error = nullptr);
     bool splitChannels();
     bool applyLastFilter();
     bool hasLastFilter() const { return bool(lastFilter_); }
@@ -261,6 +351,9 @@ public:
     bool beginWarpStroke(const QPointF &documentPoint, int mode, double diameter = 40, double hardness = 1, double strength = 1);
     void continueBrushStroke(const QPointF &documentPoint);
     bool endBrushStroke();
+    // Brush › Anti-alias. Off, the Brush paints and erases hard pixel edges, like a pencil (mac 1f1d84c); other tools
+    // always anti-alias.
+    bool brushAntialiased = true;
     bool cancelBrushStroke();
     void setPenInput(double pressure, bool size, bool opacity) { penPressure_ = std::clamp(pressure, 0.0, 1.0); penSize_ = size; penOpacity_ = opacity; }
     void setBrushSmoothing(double smoothing) { brushSmoothing_ = std::clamp(smoothing, 0.0, 100.0); }
@@ -298,6 +391,16 @@ public:
     [[nodiscard]] bool canLinkMask(const QUuid &source, const QUuid &target) const;
     bool linkMask(const QUuid &source, const QUuid &target);
     bool toggleClippingMask(const QUuid &target);
+    // The menus' Hide/Show Layer(s) and Create/Release Clipping Mask, on every selected layer as one step (mac d693a2a):
+    // all hidden, or with the active one hidden, all shown; each not yet clipped, from the bottom up, clipped to the layer
+    // below or that layer's base, so a run of selected layers all clip to the layer under the lowest; releasing when
+    // every one is clipped, each taking the layers clipped above it to the same base along.
+    [[nodiscard]] QString visibilityTitle() const;
+    void toggleSelectedLayersVisibility();
+    [[nodiscard]] bool releasesSelectedClipping() const;
+    [[nodiscard]] QString selectedClippingTitle() const;
+    [[nodiscard]] bool canToggleSelectedClipping() const;
+    bool toggleSelectedClipping();
     [[nodiscard]] bool canToggleClippingMask(const QUuid &id) const;
     // Layers and folders alike take a mask; one layer must be selected.
     [[nodiscard]] bool canEditMask() const;
@@ -317,6 +420,14 @@ public:
     bool trim(const TrimOptions &options = TrimOptions());
     [[nodiscard]] std::optional<QRect> selectionBounds() const;
     bool flipLayers(bool horizontally);
+    // Align and Distribute (mac LayerAlign.swift): with the selection when there is one, with the canvas when one thing
+    // is selected, otherwise with each other; a selected folder moves as one. Whole pixels, one undo step each.
+    struct AlignmentItem { QVector<QUuid> members; QRectF box; };
+    [[nodiscard]] QVector<AlignmentItem> alignmentItems() const;
+    [[nodiscard]] bool canAlignLayers() const;
+    [[nodiscard]] bool canDistributeLayers() const;
+    bool alignLayers(LayerAlignment alignment);
+    bool distributeLayers(LayerDistribution distribution);
     bool flipCanvas(bool horizontally);
     bool rotateCanvas(bool clockwise);
     [[nodiscard]] bool canMergeLayers() const;
@@ -348,6 +459,12 @@ public:
     [[nodiscard]] QSet<QUuid> selectedDeletionLiveMaskDependents() const;
     void renameLayer(const QUuid &id, const QString &name);
     void toggleLayerVisibility(const QUuid &id);
+    // A clipped layer whose base is hidden: the base and every layer clipped to it, to show together from any of their
+    // eyes, as in Photoshop (mac 3990a25). None otherwise.
+    [[nodiscard]] std::optional<QVector<QUuid>> hiddenClippingStack(const QUuid &id) const;
+    // Copies made of layers in a clipping stack form a stack of their own: a base's copy stays a base and the clipped
+    // copies clip to it, rather than to the original base (mac af0dcb9). `copiesOf` maps each original to its copy.
+    void relinkCopiedClipping(const QHash<QUuid, QUuid> &copiesOf);
     void setLayerOpacity(const QUuid &id, double opacity);
     void setSelectedLayersOpacity(double opacity);
     void setLayerBlendMode(const QUuid &id, BlendMode mode);
@@ -355,6 +472,14 @@ public:
     void moveActiveLayer(int offset);
     bool reorderLayers(const QVector<int> &topFirstRows, int destination);
     void duplicateActiveLayer();
+    // Move tool, Alt-arrow: the selected layers duplicated and the copies moved by `offset`, as one undo step (mac
+    // aef9f9b duplicateAndNudgeLayer).
+    bool duplicateAndNudgeLayers(const QPointF &offset);
+    // The image file the document began as, opened or dropped into an empty window: until the document is saved as a
+    // project, Export offers that file's name, folder and format, and Save As its name and folder (mac 2facf90).
+    QString sourceImagePath;
+    // The format (a file extension) this document was last exported in, offered first by Export As next time.
+    QString exportedFormat;
     // Every selected layer (a folder with all it holds) copied as one undo step; the copies end up selected.
     bool duplicateLayers(const QVector<QUuid> &ids, const QString &editName = QStringLiteral("Duplicate Layer"));
     // The layers Copy and Duplicate take whole, in document order, leaving out any inside a selected folder.
@@ -390,9 +515,27 @@ public:
     [[nodiscard]] const ViewState &viewState() const { return viewState_; }
     void setViewState(const ViewState &state) { viewState_ = state; }
 
-    [[nodiscard]] bool showsGuides() const { return showsGuides_; }
-
-    void setShowsGuides(bool shows) { showsGuides_ = shows; ToolDefaults::set(QStringLiteral("guides"), showsGuides_); }
+    // View › Show › Guides (Ctrl+;), as Show Extras leaves it: Ctrl+H outside the Move tool hides the guides for the
+    // session only, so the setting underneath stays; turning guides on, or making one, brings them back (mac 9cd704d).
+    [[nodiscard]] bool showsGuides() const { return showsGuides_ && !extrasHideGuides_; }
+    void setShowsGuides(bool shows) { showsGuides_ = shows; extrasHideGuides_ = false; ToolDefaults::set(QStringLiteral("guides"), showsGuides_); }
+    // The current selection's marching ants (mac bb5c8cc): hidden for this selection only. It still limits edits, and any
+    // other selection, or none, shows its outline again, so a new one is never invisible.
+    [[nodiscard]] bool showsSelectionEdges() const;
+    void setShowsSelectionEdges(bool shows);
+    // View › Show Extras (Ctrl+H outside the Move tool, mac 9cd704d): the selection's edges and the guides together. On
+    // only while both show, so it hides whatever is showing and, pressed again, brings it all back; guides turned off
+    // with Ctrl+; stay off.
+    [[nodiscard]] bool showsExtras() const { return showsSelectionEdges() && !extrasHideGuides_; }
+    void setShowsExtras(bool shows) { setShowsSelectionEdges(shows); extrasHideGuides_ = !shows; }
+    // The status bar's selection size in whole pixels (mac 63f1013): the box around the selection, cut to the canvas.
+    // The canvas shows a Marquee being drawn itself. None without a selection.
+    [[nodiscard]] std::optional<QSize> selectionSize() const;
+    // The selection's feather in whole pixels, for the status bar (mac 820b8fa); none for a hard edge.
+    [[nodiscard]] std::optional<int> selectionFeather() const;
+    // Expand, Contract and Feather in the selection tools' bar and the Select menu share one amount (mac 9986d12).
+    [[nodiscard]] int selectionModifyAmount() const { return selectionModifyAmount_; }
+    void setSelectionModifyAmount(int amount) { selectionModifyAmount_ = std::clamp(amount, 1, 500); }
     [[nodiscard]] bool locksGuides() const { return locksGuides_; }
     void setLocksGuides(bool locks) { locksGuides_ = locks; ToolDefaults::set(QStringLiteral("lockGuides"), locksGuides_); }
     [[nodiscard]] bool showsRulers() const { return showsRulers_; }
@@ -471,6 +614,7 @@ public:
     }
     void endEdit() {
         if (editDepth_ == 1) commitGifEdits();
+        if (editDepth_ == 1) if (const auto *before = history_.endingEditBefore(); before && *before) keepLayerDepths(**before);
         raiseFormatVersion();
         history_.end(document_);
         if (editDepth_ > 0 && --editDepth_ == 0) {
@@ -481,6 +625,13 @@ public:
     }
 
 private:
+    std::optional<QUuid> shapeStyleEditLayerId_;
+    bool restartingBrush_ = false;
+    void restartBrushAtDisplayedSize(const QPointF &documentPoint);
+    struct ShapeColorPreview { QUuid layerId; QImage image; std::optional<LayerShapeStyle> style; QJsonObject shape; };
+    std::optional<ShapeColorPreview> shapeColorPreview_;
+    bool paintShape(int index, const LayerShapeStyle &style, std::optional<LayerTransform> placement = std::nullopt);
+    bool changeLiveShape(const std::function<void(LayerShapeStyle &, LayerTransform &)> &change, bool line);
     void captureGifEdits();
     void commitGifEdits();
     QMap<QUuid, Layer> gifBefore_;
@@ -493,11 +644,20 @@ private:
     // format than the one it was opened as; the version is raised with the edit, inside its undo step, so Undo restores
     // the older one and saving never refuses a document the user could edit.
     void raiseFormatVersion();
+    // Keeps a layer at the depth it was given (mac 5de396b): an edit that left a 16-bit or HDR layer with only 8-bit
+    // pixels (Content-Aware Fill, Remove Background, Dither, an 8-bit tool) is made 16-bit again, its 16-bit pixels kept
+    // wherever the edit didn't change them. Only Convert to 8-Bit makes a layer 8-bit.
+    void keepLayerDepths(const Document &before);
+    bool convertsToEightBit_ = false;
     mutable qint64 selectionBoundsKey_ = 0;
     mutable std::optional<QRect> selectionBoundsCache_;
     // A filter that reaches past the layer's edge (blur, bloom): runs on the layer padded by `margin` pixels on every
     // side, then trims the empty padding again (mac PixelFilter.trimmed / FilterEdit.growForBlur).
     bool applySpreadingFilter(const QString &historyName, double margin, const std::function<QImage(const QImage &)> &filter);
+    bool moveAlignmentItems(const QVector<AlignmentItem> &items, const QVector<QSizeF> &offsets, const QString &name);
+    [[nodiscard]] QSet<QUuid> clippingTargets() const;
+    [[nodiscard]] QVector<int> depthTargets() const;
+    [[nodiscard]] std::optional<QVector<Layer>> clippedSelection() const;
     [[nodiscard]] int indexOf(const QUuid &id) const;
     std::optional<QUuid> insertCopyOf(const QUuid &id);
     [[nodiscard]] QString nextName(const QString &base) const;
@@ -549,6 +709,12 @@ private:
         bool sparseBlank = false;
         bool pressureStroke = false, pressureSize = false, pressureOpacity = false;
         double previousPressure = 1;
+        // Anti-alias off: hard pixel edges, like a pencil.
+        bool pencil = false;
+        // A scaled-down layer not grown at the press (see beginBrushStroke), and the stroke's points so far, to paint
+        // again on the layer at its displayed size if the stroke reaches past it (mac acfc5eb).
+        bool deferredGrowth = false;
+        QVector<QPointF> inputs;
     };
     std::optional<BrushState> brush_;
     struct WarpState {
@@ -597,6 +763,9 @@ private:
     struct SelectionMoveRun { QImage base; QPoint offset; qint64 resultKey = 0; };
     std::optional<SelectionMoveRun> selectionMoveRun_;
     int selectionFeatherAmount_ = 6;
+    int selectionModifyAmount_ = 5;
+    bool extrasHideGuides_ = false;
+    std::optional<qint64> hiddenSelectionEdges_;
     int objectSelectionEdgeOffset_ = 0;
     bool objectSelectionSmoothEdges_ = true;
     bool objectSelectionSampleAllLayers_ = true;

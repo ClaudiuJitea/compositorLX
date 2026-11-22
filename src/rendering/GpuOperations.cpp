@@ -2,6 +2,8 @@
 #include "rendering/DeepImage.h"
 #include "rendering/ProgressiveBlur.h"
 #include "AdjustPixels.h"
+#include <array>
+#include <cstring>
 #include <QColorSpace>
 #include <algorithm>
 #include <cmath>
@@ -327,31 +329,60 @@ int appendRgbSplit(GpuGraph &graph, int input, const RgbSplitSettings &s, unsign
         if (!std::isfinite(n) || std::abs(n) > 1e7) {
             return -1;
         }
-    // The deterministic sample jitter depends only on image coordinates. Cache one size
-    // as a single float channel so slider changes reuse both its CPU data and its upload.
+    // The deterministic sample jitter depends only on image coordinates. Cache the last two planes (the image's, and
+    // the padded streaks' with blur) as float channels so slider changes reuse both their CPU data and their uploads.
+    struct Noise { std::shared_ptr<const std::vector<float>> plane; QSize size; QPoint origin; };
     static std::mutex mutex;
-    static std::shared_ptr<const std::vector<float>> cached;
-    static QSize cachedSize;
-    static QPoint cachedOrigin;
-    std::shared_ptr<const std::vector<float>> noise;
-    {
+    static std::array<Noise, 2> cache;
+    const auto noiseFor = [&](QSize planeSize, QPoint planeOrigin) {
         std::lock_guard lock(mutex);
-        if (!cached || cachedSize != size || cachedOrigin != origin) {
-            auto next = std::make_shared<std::vector<float>>(size_t(size.width()) * size.height());
-            for (int y = 0; y < size.height(); ++y)
-                for (int x = 0; x < size.width(); ++x) {
-                    const double hash = std::sin((x + origin.x()) * 12.9898 + (y + origin.y()) * 78.233) * 43758.5453;
-                    (*next)[size_t(y) * size.width() + x] = float(hash - std::floor(hash));
-                }
-            cached = next;
-            cachedSize = size;
-            cachedOrigin = origin;
-        }
-        noise = cached;
+        for (const Noise &n : cache) if (n.plane && n.size == planeSize && n.origin == planeOrigin) return n.plane;
+        auto next = std::make_shared<std::vector<float>>(size_t(planeSize.width()) * planeSize.height());
+        #pragma omp parallel for if(planeSize.width() * planeSize.height() > 65536)
+        for (int y = 0; y < planeSize.height(); ++y)
+            for (int x = 0; x < planeSize.width(); ++x) {
+                const double hash = std::sin((x + planeOrigin.x()) * 12.9898 + (y + planeOrigin.y()) * 78.233) * 43758.5453;
+                (*next)[size_t(y) * planeSize.width() + x] = float(hash - std::floor(hash));
+            }
+        cache[1] = cache[0];
+        cache[0] = Noise{next, planeSize, planeOrigin};
+        return std::shared_ptr<const std::vector<float>>(next);
+    };
+    const double radians = s.angle * M_PI / 180;
+    if (s.smearSamples() > 1) {
+        // Two passes, as macOS's since 79f98de: the streaks into a copy padded by the spectrum's reach, then the
+        // spectrum read from it.
+        const int pad = s.twoPassPad(size);
+        const QSize padded(size.width() + pad * 2, size.height() + pad * 2);
+        using S = GpuParam::RgbSmear;
+        GpuParameters first{};
+        first[S::blur] = s.blur;
+        first[S::directionX] = std::cos(radians);
+        first[S::directionY] = std::sin(radians);
+        first[S::centerX] = s.center.x();
+        first[S::centerY] = s.center.y();
+        first[S::reach] = s.reach;
+        first[S::radial] = s.radial ? 1 : 0;
+        first[S::smearSamples] = s.smearSamples();
+        first[S::edges] = edges & 15;
+        first[S::pad] = pad;
+        const int streaks = graph.pass(GpuOp::RgbSmear, input, graph.channel(noiseFor(padded, origin - QPoint(pad, pad)), padded),
+                                       first, 0, padded);
+        using T = GpuParam::RgbSpectrum;
+        GpuParameters second{};
+        second[T::distance] = s.distance;
+        second[T::directionX] = std::cos(radians);
+        second[T::directionY] = std::sin(radians);
+        second[T::centerX] = s.center.x();
+        second[T::centerY] = s.center.y();
+        second[T::reach] = s.reach;
+        second[T::radial] = s.radial ? 1 : 0;
+        second[T::spectralSamples] = s.spectralSamples();
+        second[T::pad] = pad;
+        return graph.pass(GpuOp::RgbSpectrum, streaks, graph.channel(noiseFor(size, origin), size), second, 0, size);
     }
     using P = GpuParam::RgbSplit;
     GpuParameters p{};
-    const double radians = s.angle * M_PI / 180;
     p[P::distance] = s.distance;
     p[P::blur] = s.blur;
     p[P::directionX] = std::cos(radians);
@@ -360,15 +391,45 @@ int appendRgbSplit(GpuGraph &graph, int input, const RgbSplitSettings &s, unsign
     p[P::centerY] = s.center.y();
     p[P::reach] = s.reach;
     p[P::radial] = s.radial ? 1 : 0;
-    p[P::spectralSamples] = std::clamp(std::ceil(s.distance * 2) + 1, 1., 48.);
-    p[P::smearSamples] = s.blur > 0 ? std::clamp(std::ceil(s.blur / 3), 2., 24.) : 1;
+    p[P::spectralSamples] = s.spectralSamples();
+    p[P::smearSamples] = s.smearSamples();
     p[P::edges] = edges & 15;
-    return graph.pass(GpuOp::RgbSplit, input, graph.channel(noise, size), p);
+    return graph.pass(GpuOp::RgbSplit, input, graph.channel(noiseFor(size, origin), size), p);
 }
 QImage rgbSplit(const QImage &image, const RgbSplitSettings &s, unsigned edges, GpuExecution *report) {
-    GpuGraph graph;
-    const int output = appendRgbSplit(graph, graph.source(image), s, edges);
-    return graph.execute(output, image.format(), RenderBackend::Vulkan, report);
+    if (qint64(image.width()) * image.height() <= (qint64(1) << 22)) {
+        GpuGraph graph;
+        const int output = appendRgbSplit(graph, graph.source(image), s, edges);
+        return graph.execute(output, image.format(), RenderBackend::Vulkan, report);
+    }
+    // A large picture goes in bands of rows, each with the split's and the streak's reach above and below, so the padded
+    // float copy of the two passes stays within the GPU's memory budget. The jitter keeps the image's own coordinates,
+    // so the bands join up exactly as one dispatch would draw them.
+    double axis = 1;
+    if (s.radial) {
+        double farthest = 0;
+        for (const QPointF corner : {QPointF(0, 0), QPointF(image.width(), 0), QPointF(0, image.height()), QPointF(image.width(), image.height())})
+            farthest = std::max(farthest, std::hypot(corner.x() - s.center.x(), corner.y() - s.center.y()));
+        axis = farthest / std::max(s.reach, 1.0);
+    }
+    const int margin = s.twoPassPad(image.size()) + int(std::ceil(std::clamp(s.blur * axis / 2, 0.0, 1e5))) + 4;
+    const int bandRows = std::max(64, int((qint64(1) << 21) / std::max(1, image.width())));
+    QImage result(image.size(), image.format());
+    const qsizetype bytes = qsizetype(image.width()) * image.depth() / 8;
+    for (int top = 0; top < image.height(); top += bandRows) {
+        const int bottom = std::min(image.height(), top + bandRows);
+        const int from = std::max(0, top - margin), to = std::min(image.height(), bottom + margin);
+        RgbSplitSettings band = s;
+        band.center.ry() -= from;
+        // The band's own top and bottom carry their edge on; the picture's keep the edges asked for.
+        const unsigned bandEdges = (edges & 15) | (from > 0 ? 4u : 0u) | (to < image.height() ? 8u : 0u);
+        GpuGraph graph;
+        const int output = appendRgbSplit(graph, graph.source(image.copy(0, from, image.width(), to - from)), band, bandEdges, QPoint(0, from));
+        const QImage piece = graph.execute(output, image.format(), RenderBackend::Vulkan, report);
+        if (piece.isNull()) return {};
+        for (int y = top; y < bottom; ++y) std::memcpy(result.scanLine(y), piece.constScanLine(y - from), bytes);
+    }
+    return result;
 }
 QImage composite(const QImage &image, const QImage &top, int mode, float opacity, unsigned quantization) {
     if (image.size() != top.size() || !GpuRenderer::shouldAttempt(image.size(), 8))

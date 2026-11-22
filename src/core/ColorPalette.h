@@ -30,6 +30,9 @@ namespace palette {
 [[nodiscard]] QString hex(const QColor &color);
 /// Accepts `RRGGBB` or shorthand `RGB`, with or without a leading `#`; surrounding spaces are ignored.
 [[nodiscard]] std::optional<QColor> fromHex(const QString &text);
+/// A hex value as it's being typed, the missing digits read as zeros: `F` is F00000, `FF8` FF8000 (mac 60a4f9c
+/// typedHex). None when empty, longer than six digits or not hex.
+[[nodiscard]] std::optional<QColor> fromTypedHex(const QString &text);
 }
 
 } // namespace compositor

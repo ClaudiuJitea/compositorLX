@@ -6,6 +6,7 @@
 #include "core/SelectionOps.h"
 #include "io/ProjectReader.h"
 #include "io/ProjectWriter.h"
+#include "io/AdjustmentJson.h"
 #include "io/PSDReader.h"
 #include "io/SvgImporter.h"
 #include "rendering/TextLayout.h"
@@ -271,15 +272,23 @@ bool EditorSession::insertPhotoshop(const PSDImportResult &imported, const QStri
 }
 
 bool EditorSession::insertPixelLayer(const QImage &image, const QPointF &origin, const QString &name,
-                                     const QString &historyName, bool dropsSelection)
+                                     const QString &historyName, bool dropsSelection, bool besideFolder)
 {
     if (!document_ || image.isNull() || image.width() > 30000 || image.height() > 30000
         || qint64(image.width()) * image.height() > DocumentLimits::maxSurfacePixels) return false;
     Layer layer; layer.id = QUuid::createUuid(); layer.name = name.trimmed().isEmpty() ? nextName(QStringLiteral("Layer")) : name.trimmed();
     layer.image = DeepImage::canonical(image); layer.transform.origin = origin; layer.transform.size = image.size();
-    const Layer *active = activeLayer(); layer.parentId = active && active->group ? document_->activeLayerId : active ? active->parentId : std::nullopt;
-    const int index = active ? indexOf(active->id) + 1 : document_->layers.size();
-    beginEdit(historyName); document_->layers.insert(index, layer); if (dropsSelection) document_->selection.reset(); selectLayer(layer.id); endEdit(); return true;
+    const Layer *active = activeLayer();
+    const bool intoFolder = active && active->group && !besideFolder;
+    layer.parentId = intoFolder ? document_->activeLayerId : active ? active->parentId : std::nullopt;
+    // Into a folder, at its top; beside one, just above the folder and all it holds.
+    int index = intoFolder ? newLayerIndex() : active ? indexOf(active->id) + 1 : document_->layers.size();
+    if (active && active->group && besideFolder) {
+        const QSet<QUuid> inside = descendantIds(active->id);
+        for (int i = document_->layers.size() - 1; i >= 0; --i) if (inside.contains(document_->layers.at(i).id)) { index = std::max(index, i + 1); break; }
+    }
+    beginEdit(historyName); document_->layers.insert(index, layer); adoptClipping(layer.id, document_->layers);
+    if (dropsSelection) document_->selection.reset(); selectLayer(layer.id); endEdit(); return true;
 }
 
 std::optional<QPair<QImage, QPoint>> EditorSession::copiedPixels(bool merged) const
@@ -389,10 +398,42 @@ static bool maskHasCoverage(const QImage &source)
     return false;
 }
 
+// The selection as an upright rectangle of whole pixels, fully selected inside and not at all outside, when it is one.
+static std::optional<QRect> rectangularSelection(const QImage &selection)
+{
+    const QImage mask = selection.convertToFormat(QImage::Format_Grayscale8);
+    QRect box;
+    for (int y = 0; y < mask.height(); ++y) {
+        const uchar *row = mask.constScanLine(y);
+        for (int x = 0; x < mask.width(); ++x) {
+            if (row[x] != 0 && row[x] != 255) return std::nullopt;
+            if (row[x]) box |= QRect(x, y, 1, 1);
+        }
+    }
+    if (box.isEmpty()) return std::nullopt;
+    for (int y = box.top(); y <= box.bottom(); ++y) {
+        const uchar *row = mask.constScanLine(y);
+        for (int x = box.left(); x <= box.right(); ++x) if (!row[x]) return std::nullopt;
+    }
+    return box;
+}
+
 static bool resizeSelectionMask(std::shared_ptr<Document> &document, int amount, bool expand, DocumentHistory &history)
 {
     if (!document || !document->selection || amount < 1 || amount > 500 || !maskHasCoverage(*document->selection)) return false;
-    const QImage result = expand ? SelectionOps::dilated(*document->selection, amount) : SelectionOps::eroded(*document->selection, amount);
+    QImage result;
+    // A rectangle grows and shrinks as a rectangle, its corners sharp (mac 9986d12: the band's joins are mitered); any
+    // other outline by a disc, its curves staying round.
+    if (const auto box = rectangularSelection(*document->selection)) {
+        const QRect grown = box->adjusted(expand ? -amount : amount, expand ? -amount : amount, expand ? amount : -amount, expand ? amount : -amount);
+        // Contracted past its own size it is nothing (QRect would turn the inverted box the right way round again).
+        const QRect sized = grown.width() > 0 && grown.height() > 0 ? grown.intersected(QRect(QPoint(), document->selection->size())) : QRect();
+        result = QImage(document->selection->size(), QImage::Format_Grayscale8);
+        result.fill(0);
+        if (!sized.isEmpty()) { QPainter p(&result); p.fillRect(sized, QColor(255, 255, 255)); }
+    } else {
+        result = expand ? SelectionOps::dilated(*document->selection, amount) : SelectionOps::eroded(*document->selection, amount);
+    }
     if (result == *document->selection) return false;
     history.begin(expand ? QStringLiteral("Expand Selection") : QStringLiteral("Contract Selection"), document);
     document->selection = result;
@@ -407,12 +448,46 @@ bool EditorSession::featherSelection(int amount)
 {
     if (!document_ || !document_->selection || amount < 1 || amount > 250 || !maskHasCoverage(*document_->selection))
         return false;
-    const QImage result = RasterOperations::featherMask(*document_->selection, amount);
+    // Each Feather adds to the last, up to 250 pixels: the hard edge feathered by the total (mac 9986d12).
+    const bool feathered = document_->selectionHard && document_->selectionFeatherKey == document_->selection->cacheKey();
+    const QImage hard = feathered ? *document_->selectionHard : *document_->selection;
+    const double total = std::min(250.0, (feathered ? document_->selectionFeather : 0.0) + amount);
+    const QImage result = RasterOperations::featherMask(hard, total);
     if (result == *document_->selection) return false;
     beginEdit(QStringLiteral("Feather Selection"));
     document_->selection = result;
+    document_->selectionHard = hard;
+    document_->selectionFeather = total;
+    document_->selectionFeatherKey = document_->selection->cacheKey();
     endEdit();
     return true;
+}
+
+bool EditorSession::showsSelectionEdges() const
+{
+    return !document_ || !document_->selection || !hiddenSelectionEdges_ || *hiddenSelectionEdges_ != document_->selection->cacheKey();
+}
+
+void EditorSession::setShowsSelectionEdges(bool shows)
+{
+    if (shows || !document_ || !document_->selection) hiddenSelectionEdges_.reset();
+    else hiddenSelectionEdges_ = document_->selection->cacheKey();
+}
+
+std::optional<QSize> EditorSession::selectionSize() const
+{
+    if (!document_ || !document_->selection) return std::nullopt;
+    const std::optional<QRect> box = selectionBounds();
+    if (!box || box->isEmpty()) return std::nullopt;
+    const QRect onCanvas = box->intersected(QRect(QPoint(), document_->canvasSize));
+    return onCanvas.isEmpty() ? std::nullopt : std::optional<QSize>(onCanvas.size());
+}
+
+std::optional<int> EditorSession::selectionFeather() const
+{
+    if (!document_ || !document_->selection || !document_->selectionHard || document_->selectionFeatherKey != document_->selection->cacheKey()
+        || document_->selectionFeather <= 0) return std::nullopt;
+    return std::max(1, int(std::lround(document_->selectionFeather)));
 }
 
 bool EditorSession::moveSelection(const QPoint &offset)
@@ -880,6 +955,8 @@ bool EditorSession::fillSelection(const QColor &color)
     // A text layer that is still text takes the color as its own, rather than being painted over: the letters change
     // color and stay editable (mac SelectionEdits.swift fillSelection).
     if (!maskSelected_ && !document_->selection && layer->text && recolorText(layer->id, color)) return true;
+    // A shape that is still a shape takes the color as its fill and stays editable, stroke included (mac 3adce92).
+    if (!maskSelected_ && !document_->selection && layer->shapeStyle && !layer->text && recolorShape(layer->id, color)) return true;
     const int index = indexOf(layer->id);
     if (maskSelected_) {
         if (layer->mask.isNull() || !layer->maskEnabled) return false;
@@ -1172,9 +1249,9 @@ bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &
         size = QSize(qCeil(rect.width()), qCeil(rect.height()));
         origin = rect.topLeft();
     } else {
-        const int margin = strokeWidth > 0 ? qCeil(strokeWidth / 2.0) + 2 : 0;
-        size = QSize(qCeil(rect.width()) + margin * 2, qCeil(rect.height()) + margin * 2);
-        origin = QPointF(std::floor(rect.left()) - margin, std::floor(rect.top()) - margin);
+        // A rectangle or ellipse fills its box; a stroke goes inside it (mac 3adce92).
+        size = QSize(qCeil(rect.width()), qCeil(rect.height()));
+        origin = QPointF(std::floor(rect.left()), std::floor(rect.top()));
     }
 
     if (qint64(size.width()) * size.height() > DocumentLimits::maxSurfacePixels) return false;
@@ -1189,18 +1266,13 @@ bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &
         drawShapeLine(painter, QPointF(startUnit.x() * size.width(), startUnit.y() * size.height()),
                       QPointF(endUnit.x() * size.width(), endUnit.y() * size.height()), thickness, color, lineStyle, lineCap);
     } else {
-        const int margin = strokeWidth > 0 ? qCeil(strokeWidth / 2.0) + 2 : 0;
-        const QRectF bounds(margin, margin, rect.width(), rect.height());
-        QPainterPath path;
-        if (kind == ShapeKind::Ellipse) path.addEllipse(bounds);
-        else if (cornerRadius > 0) {
-            const double radius = std::min({cornerRadius, rect.width() / 2.0, rect.height() / 2.0});
-            path = rectanglePath(bounds, radius, smoothing);
-        } else path.addRect(bounds);
-        painter.fillPath(path, fill);
-        if (strokeWidth > 0 && stroke.isValid() && stroke != Qt::transparent) {
-            painter.strokePath(path, QPen(stroke, strokeWidth));
-        }
+        LayerShapeStyle drawn;
+        drawn.kind = kind;
+        drawn.red = fill.toRgb().redF(); drawn.green = fill.toRgb().greenF(); drawn.blue = fill.toRgb().blueF();
+        drawn.cornerRadius = kind == ShapeKind::Rectangle ? cornerRadius : 0;
+        if (kind == ShapeKind::Rectangle && smoothing) drawn.smoothing = true;
+        if (stroke.alpha() > 0) drawn.setStroke(strokeWidth, stroke);
+        painter.drawImage(0, 0, shapeImage(drawn, size));
     }
     painter.end();
 
@@ -1220,6 +1292,8 @@ bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &
         style.blue = shapeColor.blueF();
         style.cornerRadius = (kind == ShapeKind::Rectangle) ? cornerRadius : 0.0;
         if (kind == ShapeKind::Rectangle && smoothing) style.smoothing = true;
+        if (kind != ShapeKind::Line && stroke.alpha() > 0) style.setStroke(strokeWidth, stroke);
+        if (style.strokeWidth) document_->formatVersion = std::max(document_->formatVersion, 22);
         if (kind == ShapeKind::Line) {
             style.lineWidth = strokeWidth > 0 ? strokeWidth : 2.0;
             if (lineStyle != "Solid") style.lineStyle = lineStyle;
@@ -1233,8 +1307,9 @@ bool EditorSession::addShape(ShapeKind kind, const QRectF &input, const QColor &
         shapeLayer->shape.insert(QStringLiteral("red"), style.red);
         shapeLayer->shape.insert(QStringLiteral("green"), style.green);
         shapeLayer->shape.insert(QStringLiteral("blue"), style.blue);
-        shapeLayer->shape.insert(QStringLiteral("stroke"), stroke.name(QColor::HexArgb));
-        shapeLayer->shape.insert(QStringLiteral("strokeWidth"), strokeWidth);
+        // The inside stroke lives in the style; the legacy centered-stroke keys stay empty for a rectangle or ellipse.
+        shapeLayer->shape.insert(QStringLiteral("stroke"), (kind == ShapeKind::Line ? stroke : QColor(Qt::transparent)).name(QColor::HexArgb));
+        shapeLayer->shape.insert(QStringLiteral("strokeWidth"), kind == ShapeKind::Line ? strokeWidth : 0.0);
         shapeLayer->shape.insert(QStringLiteral("cornerRadius"), style.cornerRadius);
         if (kind == ShapeKind::Line) {
             shapeLayer->shape.insert(QStringLiteral("lineWidth"), *style.lineWidth);
@@ -1529,6 +1604,9 @@ void EditorSession::redrawSelectedShapes()
                           layer.shapeStyle ? layer.shapeStyle->lineCap.value_or("Round") : "Round");
             painter.restore();
             if (layer.shapeStyle) layer.shapeStyle->lineWidth = std::clamp(thickness * std::sqrt(width / oldWidth * height / oldHeight), 0.0, 5000.0);
+        } else if (layer.shapeStyle) {
+            // Its radius and inside stroke stay in document pixels, the shape drawn again at the new size (mac 3adce92).
+            painter.drawImage(0, 0, shapeImage(*layer.shapeStyle, QSize(width, height)));
         } else {
             const QColor fill = layer.shapeStyle
                 ? QColor::fromRgbF(layer.shapeStyle->red, layer.shapeStyle->green, layer.shapeStyle->blue)
@@ -1751,6 +1829,95 @@ bool EditorSession::applyLastFilter()
     if(!lastFilter_||!document_||!layer||layer->group||isMaskSelected()||selectedLayerIds_.size()!=1||!LayerRenderer::effectivelyVisible(*document_,*layer))return false;
     const auto run=lastFilter_;return run(*this);
 }
+QVector<int> EditorSession::depthTargets() const
+{
+    QVector<int> targets;
+    if (!document_) return targets;
+    QSet<QUuid> selected = selectedLayerIds_;
+    if (document_->activeLayerId) selected.insert(*document_->activeLayerId);
+    QHash<QUuid, std::optional<QUuid>> parents;
+    for (const Layer &layer : document_->layers) parents.insert(layer.id, layer.parentId);
+    for (int i = 0; i < document_->layers.size(); ++i) {
+        const Layer &layer = document_->layers.at(i);
+        // GIF frames stay in their 8-bit grid, and live text, adjustments and folders have no pixels to convert.
+        if (layer.group || layer.gif || layer.text || !layer.adjustment.isEmpty()) continue;
+        std::optional<QUuid> id = layer.id;
+        for (int seen = 0; id && seen < 64; ++seen) {
+            if (selected.contains(*id)) { targets.push_back(i); break; }
+            id = parents.value(*id);
+        }
+    }
+    return targets;
+}
+
+bool EditorSession::canConvertToSixteenBit() const
+{
+    for (int i : depthTargets()) {
+        const QImage &image = document_->layers.at(i).image;
+        if (image.isNull() || !DeepImage::isDeep(image) || DeepImage::isHDR(image)) return true;
+    }
+    return false;
+}
+
+bool EditorSession::canConvertToEightBit() const
+{
+    for (int i : depthTargets()) if (DeepImage::isDeep(document_->layers.at(i).image)) return true;
+    return false;
+}
+
+bool EditorSession::convertLayers(bool sixteenBit)
+{
+    if (!document_) return false;
+    QMap<int, std::pair<QImage, std::optional<LayerTransform>>> converted;
+    for (int i : depthTargets()) {
+        const QImage &image = document_->layers.at(i).image;
+        if (sixteenBit) {
+            if (image.isNull()) {
+                QImage clear(document_->canvasSize, QImage::Format_RGBA64_Premultiplied);
+                if (clear.isNull()) continue;
+                clear.fill(Qt::transparent);
+                LayerTransform canvas; canvas.size = document_->canvasSize;
+                converted.insert(i, {clear, canvas});
+            } else if (!DeepImage::isDeep(image) || DeepImage::isHDR(image)) {
+                converted.insert(i, {image.convertToFormat(QImage::Format_RGBA64_Premultiplied), std::nullopt});
+            }
+        } else if (DeepImage::isDeep(image)) {
+            converted.insert(i, {DeepImage::dithered(image), std::nullopt});
+        }
+    }
+    if (converted.isEmpty()) return false;
+    beginEdit(sixteenBit ? QStringLiteral("Convert to 16-Bit") : QStringLiteral("Convert to 8-Bit"));
+    for (auto it = converted.begin(); it != converted.end(); ++it) {
+        Layer &layer = document_->layers[it.key()];
+        layer.image = it.value().first;
+        if (it.value().second) layer.transform = *it.value().second;
+    }
+    // The one edit that makes a 16-bit layer 8-bit on purpose.
+    convertsToEightBit_ = !sixteenBit;
+    endEdit();
+    convertsToEightBit_ = false;
+    return true;
+}
+
+void EditorSession::keepLayerDepths(const Document &before)
+{
+    if (convertsToEightBit_ || !document_) return;
+    QHash<QUuid, QImage> deep;
+    for (const Layer &layer : before.layers) if (DeepImage::isDeep(layer.image)) deep.insert(layer.id, layer.image);
+    if (deep.isEmpty()) return;
+    for (Layer &layer : document_->layers) {
+        if (layer.gif || layer.text || layer.image.isNull() || DeepImage::isDeep(layer.image)) continue;
+        const auto it = deep.constFind(layer.id);
+        if (it == deep.cend()) continue;
+        const QImage &original = it.value();
+        // Where the result matches the layer's 8-bit copy nothing changed and the 16-bit pixels stay; elsewhere the new
+        // 8-bit values are taken at 16 bits. A result of another size is all new.
+        layer.image = original.size() == layer.image.size()
+            ? DeepImage::takePainted(original, layer.image, original.convertToFormat(QImage::Format_RGBA8888_Premultiplied))
+            : layer.image.convertToFormat(DeepImage::isHDR(original) ? QImage::Format_RGBA16FPx4_Premultiplied : QImage::Format_RGBA64_Premultiplied);
+    }
+}
+
 bool EditorSession::convertDepth(bool sixteenBit)
 {
     Layer *layer = activeLayer();
@@ -1769,7 +1936,9 @@ bool EditorSession::convertDepth(bool sixteenBit)
     const int index = indexOf(layer->id);
     beginEdit(sixteenBit ? QStringLiteral("Convert to 16-Bit") : QStringLiteral("Convert to 8-Bit"));
     document_->layers[index].image = converted;
+    convertsToEightBit_ = !sixteenBit;
     endEdit();
+    convertsToEightBit_ = false;
     return true;
 }
 bool EditorSession::applyScanlines(const ScanlinesSettings &settings)
@@ -1811,6 +1980,104 @@ bool EditorSession::applyLensEffects(const LensEffectSettings &settings)
     document_->layers[index].image = result;
     rasterizeLayer(document_->layers[index]);
     pendingFilter_ = [s](EditorSession &session) { return session.applyLensEffects(s); };
+    endEdit();
+    return true;
+}
+
+bool EditorSession::applySharpen(const SharpenSettings &settings)
+{
+    // mac FilterEdit: Amount 0 closes as Cancel does and leaves no undo step.
+    const SharpenSettings s = settings.normalized();
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || layer->image.isNull() || maskSelected_ || s.isIdentity()) return false;
+    const int index = indexOf(layer->id);
+    const QImage result = clippedPixels(layer->image, FilterLayers::sharpen(layer->image, s), *layer, document_->selection);
+    if (result.isNull() || result == layer->image) return false;
+    beginEdit(QStringLiteral("Sharpen"));
+    document_->layers[index].image = result;
+    rasterizeLayer(document_->layers[index]);
+    pendingFilter_ = [s](EditorSession &session) { return session.applySharpen(s); };
+    endEdit();
+    return true;
+}
+
+bool EditorSession::applyReduceNoise(const ReduceNoiseSettings &settings)
+{
+    // Strength and Color Noise both 0: nothing to do (mac FilterEdit).
+    const ReduceNoiseSettings s = settings.normalized();
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || layer->image.isNull() || maskSelected_ || s.isIdentity()) return false;
+    const int index = indexOf(layer->id);
+    const QImage result = clippedPixels(layer->image, FilterLayers::reduceNoise(layer->image, s), *layer, document_->selection);
+    if (result.isNull() || result == layer->image) return false;
+    beginEdit(QStringLiteral("Reduce Noise"));
+    document_->layers[index].image = result;
+    rasterizeLayer(document_->layers[index]);
+    pendingFilter_ = [s](EditorSession &session) { return session.applyReduceNoise(s); };
+    endEdit();
+    return true;
+}
+
+bool EditorSession::applyRimLight(const RimLightSettings &settings, QString *error)
+{
+    const RimLightSettings s = settings.normalized();
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || layer->image.isNull() || maskSelected_ || s.isIdentity()) return false;
+    const int index = indexOf(layer->id);
+    const QImage lit = RimLighting::apply(layer->image, s, RenderBackend::Auto, nullptr, error);
+    if (lit.isNull()) return false;
+    const QImage result = clippedPixels(layer->image, lit, *layer, document_->selection);
+    if (result.isNull() || result == layer->image) return false;
+    beginEdit(QStringLiteral("Rim Light"));
+    document_->layers[index].image = result;
+    rasterizeLayer(document_->layers[index]);
+    pendingFilter_ = [s](EditorSession &session) { return session.applyRimLight(s); };
+    endEdit();
+    return true;
+}
+
+bool EditorSession::applyVolumetricLight(const VolumetricLightSettings &settings)
+{
+    const VolumetricLightSettings s = settings.normalized();
+    const Layer *layer = activeLayer();
+    if (!layer || layer->group || layer->image.isNull() || maskSelected_ || s.isIdentity()) return false;
+    const int index = indexOf(layer->id);
+    // The light from the document into this layer's pixels (rows top-down).
+    QPointF light = VolumetricLighting::brightestPoint(layer->image);
+    if (s.center) {
+        bool ok = false;
+        const QTransform toPixels = LayerRenderer::pixelToDocument(layer->transform, layer->image.size()).inverted(&ok);
+        if (ok) light = toPixels.map(*s.center);
+    }
+    const QImage lit = VolumetricLighting::apply(layer->image, s, light);
+    if (lit.isNull()) return false;
+    const QImage result = clippedPixels(layer->image, lit, *layer, document_->selection);
+    if (result.isNull() || result == layer->image) return false;
+    beginEdit(QStringLiteral("Volumetric Light"));
+    document_->layers[index].image = result;
+    rasterizeLayer(document_->layers[index]);
+    pendingFilter_ = [s](EditorSession &session) { return session.applyVolumetricLight(s); };
+    endEdit();
+    return true;
+}
+
+bool EditorSession::extractDepth(const VolumetricLightSettings &settings, QString *error)
+{
+    const Layer *source = activeLayer();
+    if (!document_ || !source || source->group || source->image.isNull() || document_->layers.size() >= 10000) return false;
+    const QImage map = VolumetricLighting::depthMap(source->image, settings, error);
+    if (map.isNull()) return false;
+    Layer layer;
+    layer.id = QUuid::createUuid();
+    layer.name = QStringLiteral("Depth");
+    layer.image = map;
+    layer.transform = source->transform;
+    layer.parentId = source->parentId;
+    const int index = indexOf(source->id);
+    beginEdit(QStringLiteral("Extract Depth"));
+    document_->layers.insert(index + 1, layer);
+    document_->activeLayerId = layer.id;
+    selectedLayerIds_ = {layer.id};
     endEdit();
     return true;
 }
@@ -2216,7 +2483,7 @@ static QImage selectionCoverageForLayer(const Layer &layer, const QSize &size, c
 void EditorSession::raiseFormatVersion()
 {
     // 0 means "work it out from the content when saving"; only an explicit version needs raising.
-    if (!document_ || document_->formatVersion < 1 || document_->formatVersion >= 17) return;
+    if (!document_ || document_->formatVersion < 1 || document_->formatVersion >= ProjectWriter::currentVersion) return;
     document_->formatVersion = std::max(document_->formatVersion, ProjectWriter::minimumRequiredVersion(*document_));
 }
 
@@ -2246,6 +2513,24 @@ QString EditorSession::paintRefusal() const
 // BrushStroke.init: extent = the layer's pixels united with the canvas, seen in the layer's own grid). A mask that
 // follows the layer's grid grows with it, white where it is new. Returns where the old pixels now start, or none when
 // the layer already reaches the canvas (or the grown layer would be past the pixel budget).
+// How many pixels the layer would hold grown over the whole canvas at its own resolution (0 when it can't be mapped).
+static qint64 ownResolutionCanvasArea(const Layer &layer, const QSize &canvas)
+{
+    const QSize size = layer.image.size();
+    const LayerTransform &base = layer.transform;
+    if (size.isEmpty() || base.size.width() <= 0 || base.size.height() <= 0) return 0;
+    QTransform mapping;
+    mapping.translate(base.center().x(), base.center().y());
+    mapping.rotate(base.rotation);
+    mapping.scale((base.flipX ? -1 : 1) * base.size.width() / size.width(), (base.flipY ? -1 : 1) * base.size.height() / size.height());
+    mapping.translate(-size.width() / 2.0, -size.height() / 2.0);
+    bool invertible = false;
+    const QTransform inverse = mapping.inverted(&invertible);
+    if (!invertible) return 0;
+    const QRect extent = QRect(QPoint(), size).united(inverse.mapRect(QRectF(QPointF(), QSizeF(canvas))).toAlignedRect());
+    return qint64(extent.width()) * extent.height();
+}
+
 static std::optional<QPoint> growLayerOverCanvas(Layer &layer, const QSize &canvas, const std::optional<QRectF> &area = std::nullopt)
 {
     if (layer.image.isNull() || canvas.isEmpty()) return std::nullopt;
@@ -2428,12 +2713,12 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
     const QUuid id = layer->id;
     const int index = indexOf(id);
     if ((cloneSource || healMode >= 0) && paintingMask) return false;
-    beginEdit(paintingMask ? QStringLiteral("Paint Mask") : cloneSource ? QStringLiteral("Clone Stamp") : healMode == 3 ? QStringLiteral("Blur")
+    if (!restartingBrush_) beginEdit(paintingMask ? QStringLiteral("Paint Mask") : cloneSource ? QStringLiteral("Clone Stamp") : healMode == 3 ? QStringLiteral("Blur")
                                                               : healMode >= 0 ? QStringLiteral("Spot Healing")
                                                               : erasing ? QStringLiteral("Erase") : QStringLiteral("Brush Stroke"));
     // What the layer was before this stroke grew or filled it in, to put back if nothing ends up painted.
     BrushState::Restore restore;
-    bool blank = false, grown = false, maskGrown = false, sparseBlank = false;
+    bool blank = false, grown = false, maskGrown = false, sparseBlank = false, deferredGrowth = false;
     QRect maskSourceRect;
     QRect sourceRect;
     if (!paintingMask) {
@@ -2456,9 +2741,20 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
             target.image.fill(Qt::transparent);
         }
         sourceRect = QRect(QPoint(), target.image.size());
+        // A layer shown much smaller than its pixels would grow past four canvases' worth at its own resolution: it isn't
+        // grown yet, and only if the stroke reaches past it does the stroke start again on the layer at its displayed
+        // size (mac acfc5eb). Painting within it keeps its resolution.
+        if (!blank && !sparseBlank && healMode < 0 && !cloneSource && !DeepImage::isDeep(target.image)) {
+            const double own = double(target.image.width()) * target.image.height();
+            if (target.transform.size.width() * target.transform.size.height() < own * .98) {
+                const double canvasArea = double(document_->canvasSize.width()) * document_->canvasSize.height();
+                const double budget = std::min(double(DocumentLimits::maxSurfacePixels), std::max(16e6, 4 * canvasArea));
+                if (double(ownResolutionCanvasArea(target, document_->canvasSize)) > std::max(budget, own * 2)) deferredGrowth = true;
+            }
+        }
         // Painting past the layer's edge grows it over the canvas, without moving its pixels (or its mask).
         // Blur softens the layer's own pixels (mac: the sample is the layer, so nothing is painted past it) and so does not grow it.
-        if (healMode != 3 && !sparseBlank) {
+        if (healMode != 3 && !sparseBlank && !deferredGrowth) {
             if (const auto offset = growLayerOverCanvas(target, document_->canvasSize)) { grown = true; sourceRect.translate(*offset); }
         }
         if (blank) sourceRect = QRect();
@@ -2494,8 +2790,12 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
                         healMode, effectSeed, original, original, coverage, coverage, {}, {}, {}, {}};
     if(!paintingMask&&DeepImage::isDeep(editable.image)){brush_->deepBase=editable.image;editable.image=original;}
     brush_->pressureStroke = !cloneSource && healMode < 0 && (penSize_ || penOpacity_);
+    // Anti-alias off is the Brush's alone (it paints and erases); a pencil is always hard (mac 1f1d84c).
+    brush_->pencil = !brushAntialiased && !cloneSource && healMode < 0;
+    if (brush_->pencil) brush_->hardness = 1;
     brush_->pressureSize = penSize_; brush_->pressureOpacity = penOpacity_; brush_->previousPressure = penPressure_;
     brush_->sparseBlank = sparseBlank;
+    brush_->deferredGrowth = deferredGrowth;
     brush_->restore = restore; brush_->blank = blank; brush_->grown = grown; brush_->sourceRect = sourceRect;
     brush_->maskGrown = maskGrown; brush_->maskSourceRect = maskSourceRect;
     if (document_->selection) brush_->selectionCoverage = selectionCoverageForPlacement(placement, original.size(), document_->selection);
@@ -2510,6 +2810,28 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
 
     continueBrushStrokeInternal(documentPoint);
     return true;
+}
+
+void EditorSession::restartBrushAtDisplayedSize(const QPointF &documentPoint)
+{
+    BrushState old = std::move(*brush_);
+    brush_.reset();
+    QVector<QPointF> inputs = old.inputs;
+    inputs.push_back(documentPoint);
+    const int index = indexOf(old.layerId);
+    if (index < 0 || inputs.isEmpty()) { endEdit(); return; }
+    // The layer as it was before the stroke, resampled to the size it's shown at; one undo brings the original back.
+    Layer &layer = document_->layers[index];
+    layer.image = old.restore.image; layer.transform = old.restore.transform; layer.mask = old.restore.mask; layer.maskPlacement = old.restore.maskPlacement;
+    const QSize displayed(std::max(1, qRound(layer.transform.size.width())), std::max(1, qRound(layer.transform.size.height())));
+    layer.image = DeepImage::canonical(layer.image).scaled(displayed, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    restartingBrush_ = true;
+    const bool started = beginBrushStroke(inputs.first(), old.color, old.diameter, old.hardness, old.opacity, old.erasing);
+    if (started && brush_) {
+        brush_->restore = old.restore;
+        for (int i = 1; i < inputs.size(); ++i) continueBrushStrokeInternal(inputs.at(i));
+    }
+    restartingBrush_ = false;
 }
 
 void EditorSession::setCloneSource(const QPointF &documentPoint)
@@ -2583,8 +2905,28 @@ bool EditorSession::beginWarpStroke(const QPointF &documentPoint, int mode, doub
 // One dab of the tip. Hard tips keep their anti-aliased silhouette (the strongest edge wins), soft tips pile up
 // like paint (a screen of the dabs), so a stroke builds up along its length while keeping its feathered rim
 // (mac BrushStroke.dab: .lighten for hardness 1, .screen below).
-static void stampBrushCoverage(QImage &coverage, const QPointF &center, double radius, double hardness)
+static void stampBrushCoverage(QImage &coverage, const QPointF &center, double radius, double hardness, bool pencil = false)
 {
+    // A hard dab is the anti-aliased circle Core Graphics fills (mac BrushStroke fillEllipse): each pixel covered by how
+    // far its center is inside the edge, across one pixel. With Anti-alias off (a pencil) a pixel whose center the tip
+    // reaches is painted fully and any other not at all (mac 1f1d84c), which the lookup below gives at hardness 1.
+    if (hardness >= 1 && !pencil) {
+        const int left = std::max(0, qFloor(center.x() - radius - 1)), right = std::min(coverage.width() - 1, qCeil(center.x() + radius + 1));
+        const int top = std::max(0, qFloor(center.y() - radius - 1)), bottom = std::min(coverage.height() - 1, qCeil(center.y() + radius + 1));
+        if (left > right || top > bottom) return;
+        uchar *pixels = coverage.bits();
+        const qsizetype stride = coverage.bytesPerLine();
+        // Inside the rim the pixel is covered fully and outside it not at all: only the one-pixel band takes a root.
+        const double inner = radius > .5 ? (radius - .5) * (radius - .5) : 0, outer = (radius + .5) * (radius + .5);
+        #pragma omp parallel for schedule(static) if(qint64(right - left + 1) * (bottom - top + 1) > 65536)
+        for (int y = top; y <= bottom; ++y) { uchar *row = pixels + y * stride; for (int x = left; x <= right; ++x) {
+            const double dx = x + .5 - center.x(), dy = y + .5 - center.y(), squared = dx * dx + dy * dy;
+            if (squared >= outer) continue;
+            const int value = squared <= inner && radius > .5 ? 255 : qRound(std::clamp(radius + .5 - std::sqrt(squared), 0.0, 1.0) * 255);
+            if (value > row[x]) row[x] = uchar(value);
+        } }
+        return;
+    }
     constexpr int lookupSize = 4096;
     struct FalloffLookup { double radius = -1, hardness = -1; std::array<uchar, lookupSize + 1> values{}; };
     static thread_local FalloffLookup lookup;
@@ -2640,7 +2982,7 @@ static double softDabSpacing(double radius, double scale) { return std::max(0.25
 
 // A run of the stroke on the settled coverage and (when given) the coverage that also shows the provisional tail.
 static void stampCoverageLine(QImage &coverage, const QPointF &from, const QPointF &to, double radius, double hardness,
-                              double spacing = 0, double *carry = nullptr, QImage *twin = nullptr)
+                              double spacing = 0, double *carry = nullptr, QImage *twin = nullptr, bool pencil = false)
 {
     if (hardness < 1 && carry) {
         for (const QPointF &dab : dabsAlong(from, to, spacing, *carry)) {
@@ -2653,8 +2995,8 @@ static void stampCoverageLine(QImage &coverage, const QPointF &from, const QPoin
     const int steps = std::max(1, qCeil(length / std::max(1.0, radius * .12)));
     for (int step = 0; step <= steps; ++step) {
         const QPointF point = from + (to - from) * (double(step) / steps);
-        stampBrushCoverage(coverage, point, radius, hardness);
-        if (twin) stampBrushCoverage(*twin, point, radius, hardness);
+        stampBrushCoverage(coverage, point, radius, hardness, pencil);
+        if (twin) stampBrushCoverage(*twin, point, radius, hardness, pencil);
     }
 }
 
@@ -2903,6 +3245,18 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
     if (!brush_ || !document_) return;
     const int index = indexOf(brush_->layerId);
     if (index < 0) return;
+    if (brush_->deferredGrowth && !restartingBrush_) {
+        const Layer &shown = document_->layers.at(index);
+        const auto pixel = documentToPixel(shown.transform, documentPoint, brush_->original.size());
+        const double scale = std::max(1e-9, std::min(shown.transform.size.width() / std::max(1, brush_->original.width()),
+                                                     shown.transform.size.height() / std::max(1, brush_->original.height())));
+        const double reach = brush_->diameter / 2 / scale;
+        if (!pixel || !QRectF(brush_->sourceRect).adjusted(reach, reach, -reach, -reach).contains(*pixel)) {
+            restartBrushAtDisplayedSize(documentPoint);
+            return;
+        }
+        brush_->inputs.push_back(documentPoint);
+    }
     Layer &layer = document_->layers[index];
     if (brush_->sparseBlank) {
         const double radius = brush_->diameter/2+3;
@@ -2951,7 +3305,8 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
                 for (int x = bounds.left(); x <= bounds.right(); ++x) {
                     const double d = std::hypot(x + .5 - center.x(), y + .5 - center.y());
                     double cover;
-                    if (brush_->hardness >= .999) cover = std::clamp(r + .5 - d, 0.0, 1.0);
+                    if (brush_->pencil) cover = d < r ? 1 : 0;
+                    else if (brush_->hardness >= .999) cover = std::clamp(r + .5 - d, 0.0, 1.0);
                     else { const double f = std::clamp((r - d) / std::max(.001, r * (1 - brush_->hardness)), 0.0, 1.0); cover = f * f * (3 - 2 * f); }
                     row[x] = std::max(row[x], uchar(qRound(255 * cover * opacity)));
                 }
@@ -2960,8 +3315,8 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
         brush_->samples = {*current}; brush_->previousPressure = penPressure_;
     } else if (brush_->samples.isEmpty()) {
         brush_->samples.push_back(*current);
-        stampBrushCoverage(brush_->settledCoverage, *current, radius, brush_->hardness);
-        stampBrushCoverage(brush_->coverage, *current, radius, brush_->hardness);
+        stampBrushCoverage(brush_->settledCoverage, *current, radius, brush_->hardness, brush_->pencil);
+        stampBrushCoverage(brush_->coverage, *current, radius, brush_->hardness, brush_->pencil);
         brush_->settledCarry = spacing;
         dirty |= brushPathBounds(*current, *current, radius, brush_->coverage.size());
     } else if (brush_->samples.constLast() != *current) {
@@ -2975,13 +3330,13 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
             const QVector<QPointF> curve = smoothBrushCurve(before, brush_->samples.at(count - 3),
                                                             brush_->samples.at(count - 2), brush_->samples.at(count - 1));
             for (int i = 1; i < curve.size(); ++i) {
-                stampCoverageLine(brush_->settledCoverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness, spacing, &brush_->settledCarry, &brush_->coverage);
+                stampCoverageLine(brush_->settledCoverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness, spacing, &brush_->settledCarry, &brush_->coverage, brush_->pencil);
                 dirty |= brushPathBounds(curve.at(i - 1), curve.at(i), radius, brush_->coverage.size());
             }
         }
         const QPointF tailStart = brush_->samples.at(count - 2), tailEnd = brush_->samples.at(count - 1);
         double tailCarry = brush_->settledCarry;
-        stampCoverageLine(brush_->coverage, tailStart, tailEnd, radius, brush_->hardness, spacing, &tailCarry);
+        stampCoverageLine(brush_->coverage, tailStart, tailEnd, radius, brush_->hardness, spacing, &tailCarry, nullptr, brush_->pencil);
         brush_->tailBounds = brushPathBounds(tailStart, tailEnd, radius, brush_->coverage.size());
         dirty |= brush_->tailBounds;
         if (brush_->samples.size() > 5) brush_->samples.removeFirst();
@@ -3086,7 +3441,7 @@ bool EditorSession::endBrushStroke()
             const QVector<QPointF> curve = smoothBrushCurve(brush_->samples.at(std::max(0, count - 3)),
                 brush_->samples.at(count - 2), brush_->samples.at(count - 1), brush_->samples.at(count - 1));
             for (int i = 1; i < curve.size(); ++i) {
-                stampCoverageLine(brush_->settledCoverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness, spacing, &brush_->settledCarry, &brush_->coverage);
+                stampCoverageLine(brush_->settledCoverage, curve.at(i - 1), curve.at(i), radius, brush_->hardness, spacing, &brush_->settledCarry, &brush_->coverage, brush_->pencil);
                 dirty |= brushPathBounds(curve.at(i - 1), curve.at(i), radius, brush_->coverage.size());
             }
             brush_->tailBounds = {};
@@ -4081,6 +4436,32 @@ QString EditorSession::nextName(const QString &base) const
     return QStringLiteral("%1 %2").arg(base).arg(number);
 }
 
+int EditorSession::newLayerIndex() const
+{
+    if (!document_) return 0;
+    int insertion = document_->activeLayerId ? indexOf(*document_->activeLayerId) + 1 : int(document_->layers.size());
+    if (const Layer *active = activeLayer(); active && active->group) {
+        const QSet<QUuid> descendants = descendantIds(active->id);
+        for (int i = document_->layers.size() - 1; i >= 0; --i) if (descendants.contains(document_->layers.at(i).id)) { insertion = std::max(insertion, i + 1); break; }
+    }
+    return insertion;
+}
+
+void EditorSession::adoptClipping(const QUuid &id, QVector<Layer> &layers)
+{
+    int position = -1;
+    for (int i = 0; i < layers.size(); ++i) if (layers.at(i).id == id) position = i;
+    if (position < 0 || layers.at(position).group) return;
+    QVector<int> siblings;
+    for (int i = 0; i < layers.size(); ++i) if (layers.at(i).parentId == layers.at(position).parentId) siblings.push_back(i);
+    const int index = int(siblings.indexOf(position));
+    if (index <= 0 || index + 1 >= siblings.size()) return;
+    const std::optional<QUuid> source = layers.at(siblings[index + 1]).maskSourceId;
+    if (!source || *source == id) return;
+    const Layer &below = layers.at(siblings[index - 1]);
+    if (below.id == *source || below.maskSourceId == source) layers[position].maskSourceId = source;
+}
+
 void EditorSession::addBlankLayer()
 {
     if (!document_ || document_->layers.size() >= 10000) return;
@@ -4089,13 +4470,10 @@ void EditorSession::addBlankLayer()
     layer.name = nextName(QStringLiteral("Layer"));
     layer.transform.size = document_->canvasSize;
     if (const Layer *active = activeLayer()) layer.parentId = active->group ? document_->activeLayerId : active->parentId;
-    int insertion = document_->activeLayerId ? indexOf(*document_->activeLayerId) + 1 : document_->layers.size();
-    if (const Layer *active = activeLayer(); active && active->group) {
-        const QSet<QUuid> descendants = descendantIds(active->id);
-        for (int i = document_->layers.size() - 1; i >= 0; --i) if (descendants.contains(document_->layers.at(i).id)) { insertion = std::max(insertion, i + 1); break; }
-    }
+    const int insertion = newLayerIndex();
     beginEdit(QStringLiteral("New Blank Layer"));
     document_->layers.insert(insertion, layer);
+    adoptClipping(layer.id, document_->layers);
     selectLayer(layer.id);
     endEdit();
 }
@@ -4169,6 +4547,18 @@ bool EditorSession::addAdjustment(const QString &kind, const QJsonObject &settin
         if (!layer.adjustment.contains(QStringLiteral("noiseGaussian"))) layer.adjustment.insert(QStringLiteral("noiseGaussian"), false);
         if (!layer.adjustment.contains(QStringLiteral("noiseMonochromatic"))) layer.adjustment.insert(QStringLiteral("noiseMonochromatic"), false);
         if (!layer.adjustment.contains(QStringLiteral("noiseSeed"))) layer.adjustment.insert(QStringLiteral("noiseSeed"), double(QRandomGenerator::global()->generate()));
+    }
+    // Vignette, Lens Effects, Tonal Contrast, Sharpen and Reduce Noise keep their settings in an object of their own
+    // inside filterLayerSettings (mac FilterLayerSettings, versions 18, 19 and 21), starting at the filter's defaults.
+    if (adjustmentKindVersion(*optKind) >= 18) {
+        QJsonObject filter = layer.adjustment.value(QStringLiteral("filterLayerSettings")).toObject();
+        const auto ensure = [&](const QString &key, const QJsonObject &defaults) { if (!filter.contains(key)) filter.insert(key, defaults); };
+        if (*optKind == AdjustmentKind::Vignette) ensure(QStringLiteral("vignette"), VignetteLayerSettings().json());
+        if (*optKind == AdjustmentKind::TonalContrast) ensure(QStringLiteral("tonal"), TonalLayerSettings().json());
+        if (*optKind == AdjustmentKind::LensEffects) ensure(QStringLiteral("lens"), lensSettingsJson(LensEffectSettings()));
+        if (*optKind == AdjustmentKind::Sharpen) ensure(QStringLiteral("sharpen"), SharpenSettings().json());
+        if (*optKind == AdjustmentKind::ReduceNoise) ensure(QStringLiteral("reduceNoise"), ReduceNoiseSettings().json());
+        layer.adjustment.insert(QStringLiteral("filterLayerSettings"), filter);
     }
     if (isVersion16Adjustment(*optKind) && !layer.adjustment.contains("filterLayerSettings")) {
         const double w = document_->canvasSize.width(), h = document_->canvasSize.height();
@@ -4366,10 +4756,30 @@ void EditorSession::renameLayer(const QUuid &id, const QString &name)
     endEdit();
 }
 
+std::optional<QVector<QUuid>> EditorSession::hiddenClippingStack(const QUuid &id) const
+{
+    const int index = indexOf(id);
+    if (index < 0 || !document_->layers.at(index).maskSourceId) return std::nullopt;
+    const Layer &layer = document_->layers.at(index);
+    const int baseIndex = indexOf(*layer.maskSourceId);
+    if (baseIndex < 0) return std::nullopt;
+    const Layer &base = document_->layers.at(baseIndex);
+    if (base.parentId != layer.parentId || base.visible) return std::nullopt;
+    QVector<QUuid> stack{base.id};
+    for (const Layer &l : document_->layers) if (l.maskSourceId == base.id && l.parentId == base.parentId) stack.push_back(l.id);
+    return stack;
+}
+
 void EditorSession::toggleLayerVisibility(const QUuid &id)
 {
     const int index = indexOf(id);
     if (index < 0) return;
+    if (const auto stack = hiddenClippingStack(id)) {
+        beginEdit(QStringLiteral("Show Layers"));
+        for (const QUuid &member : *stack) document_->layers[indexOf(member)].visible = true;
+        endEdit();
+        return;
+    }
     beginEdit(document_->layers.at(index).visible ? QStringLiteral("Hide Layer") : QStringLiteral("Show Layer"));
     document_->layers[index].visible = !document_->layers.at(index).visible;
     endEdit();
@@ -4775,6 +5185,7 @@ std::optional<CanvasGuide> EditorSession::hitGuide(const QPointF &docPoint, doub
 
 void EditorSession::beginGuideCreation(CanvasGuide::Axis axis, double position)
 {
+    extrasHideGuides_ = false;   // making a guide brings the guides back from Show Extras (mac 9cd704d)
     if (!canEditGuides()) return;
     showsGuides_ = true;
     GuideDrag drag;

@@ -529,7 +529,9 @@ bool LayerListModel::dropMimeData(const QMimeData *data, Qt::DropAction action, 
                 parentId = target.parentId.value_or(QUuid()); aboveId = target.id;
             }
         }
-        emit layersDropRequested(ids, parentId, aboveId, atBottom, action == Qt::CopyAction);
+        const bool copies = action == Qt::CopyAction || dropCopies_;
+        dropCopies_ = false;
+        emit layersDropRequested(ids, parentId, aboveId, atBottom, copies);
         return true;
     }
 

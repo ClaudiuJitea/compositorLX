@@ -4,6 +4,11 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QColor>
+#include <QPainter>
+#include <QPainterPathStroker>
+#include <optional>
+
 namespace compositor
 {
 // Upstream ShapeTool.swift: Figma's cubic–arc–cubic construction at 60% smoothing.
@@ -45,5 +50,22 @@ inline QPainterPath rectanglePath(const QRectF &rect, double cornerRadius, bool 
     }
     path.closeSubpath();
     return path;
+}
+// Fills `path`, with an inside stroke `strokeWidth` wide when there is one: the whole shape in the stroke color, then
+// what lies inside the stroke in the fill color, so each edge pixel is drawn once and the anti-aliased rim is the stroke
+// alone, no fringe of the fill (mac e63b825 fillShape). Painter antialiasing is the caller's.
+inline void fillShape(QPainter &painter, const QPainterPath &path, const QColor &fill, const std::optional<QColor> &stroke,
+                      double strokeWidth)
+{
+    if (!(strokeWidth > 0) || !stroke) { painter.fillPath(path, fill); return; }
+    painter.fillPath(path, *stroke);
+    // Inside the stroke: the shape less a band twice the width centered on its edge, half of which falls outside.
+    QPainterPathStroker band;
+    band.setWidth(strokeWidth * 2);
+    band.setCapStyle(Qt::FlatCap);
+    band.setJoinStyle(Qt::MiterJoin);
+    band.setMiterLimit(10);
+    const QPainterPath inside = path.subtracted(band.createStroke(path));
+    if (!inside.isEmpty()) painter.fillPath(inside, fill);
 }
 } // namespace compositor

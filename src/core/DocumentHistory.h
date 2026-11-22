@@ -9,6 +9,9 @@ namespace compositor {
 
 class DocumentHistory final {
 public:
+    // The document as it was when the edit now ending began, while its outermost end() is still to come (mac
+    // DocumentHistory.endingEditBefore).
+    [[nodiscard]] const std::optional<Document> *endingEditBefore() const { return depth_ == 1 && pending_ ? &pending_->document : nullptr; }
     struct Snapshot {
         std::optional<Document> document;
         std::optional<QUuid> activeLayerId;

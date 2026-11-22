@@ -3,6 +3,7 @@
 #include "rendering/LayerRenderer.h"
 #include "rendering/DeepImage.h"
 
+#include <limits>
 #include <QColor>
 #include <QMutex>
 #include <QMutexLocker>
@@ -271,15 +272,78 @@ std::vector<float> LayerEffectsRenderer::strokeCoverage(const QImage &image, con
     const int width = canvasSize.width();
     const int height = canvasSize.height();
     auto shape = coverage(image, placed, canvasSize, 0.0);
-    const int reach = std::max(1, int(std::round(stroke.size)));
-    const auto moved = extreme(shape, width, height, reach, stroke.inside);
+    // A round reach, the true distance from the shape's edge, so a circle's stroke is as thick on the diagonals and an
+    // outside stroke rounds a rectangle's corners, as Photoshop's (mac 8e6bca6).
+    const float reach = float(stroke.size);
+    const auto distances = edgeDistances(shape, width, height, stroke.inside, int(std::ceil(reach)) + 2);
+    if (distances.empty()) return shape;
     const int total = width * height;
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < total; ++i) {
-        shape[i] = stroke.inside ? std::max(0.0f, shape[i] - moved[i])
-                                 : std::max(0.0f, moved[i] - shape[i]);
+        // A pixel's center sits half a pixel past the edge of the nearest shape pixel, so the reach blends across the
+        // pixel that straddles it.
+        const float reached = std::clamp(reach + 1 - distances[i], 0.0f, 1.0f);
+        shape[i] = stroke.inside ? std::max(0.0f, shape[i] - (1 - reached)) : std::max(0.0f, reached - shape[i]);
     }
     return shape;
+}
+
+std::vector<float> LayerEffectsRenderer::edgeDistances(const std::vector<float> &levels, int width, int height, bool inside, int limit)
+{
+    if (width <= 0 || height <= 0 || levels.size() != size_t(width) * size_t(height)) return {};
+    const long long cap = limit + 1;
+    const float far = float(cap * cap);
+    std::vector<float> squared(levels.size(), far);
+    #pragma omp parallel for schedule(static)
+    for (int row = 0; row < height; ++row) {
+        const size_t base = size_t(row) * width;
+        const auto isTarget = [&](int x) { return (levels[base + x] >= 0.5f) != inside; };
+        long long last = inside ? -1 : std::numeric_limits<long long>::min() / 2;
+        for (int x = 0; x < width; ++x) {
+            if (isTarget(x)) last = x;
+            const long long gap = std::min(cap, x - last);
+            squared[base + x] = float(gap * gap);
+        }
+        last = inside ? width : std::numeric_limits<long long>::max() / 2;
+        for (int x = width - 1; x >= 0; --x) {
+            if (isTarget(x)) last = x;
+            const long long gap = std::min(cap, last - x);
+            squared[base + x] = std::min(squared[base + x], float(gap * gap));
+        }
+    }
+    std::vector<float> result(levels.size());
+    #pragma omp parallel
+    {
+        std::vector<float> column(height), bounds(height + 1);
+        std::vector<int> lowest(height);
+        #pragma omp for schedule(static)
+        for (int x = 0; x < width; ++x) {
+            for (int y = 0; y < height; ++y) column[y] = squared[size_t(y) * width + x];
+            int count = 0;
+            lowest[0] = 0;
+            bounds[0] = -std::numeric_limits<float>::infinity();
+            bounds[1] = std::numeric_limits<float>::infinity();
+            // Where the parabolas from rows q and p cross, without squaring the row numbers (Float precision).
+            const auto crossing = [&](int q, int p) { return ((column[q] - column[p]) / float(q - p) + float(q + p)) / 2; };
+            for (int q = 1; q < std::max(1, height); ++q) {
+                float crossesAt = crossing(q, lowest[count]);
+                while (crossesAt <= bounds[count]) { --count; crossesAt = crossing(q, lowest[count]); }
+                ++count;
+                lowest[count] = q;
+                bounds[count] = crossesAt;
+                bounds[count + 1] = std::numeric_limits<float>::infinity();
+            }
+            count = 0;
+            for (int y = 0; y < height; ++y) {
+                while (bounds[count + 1] < float(y)) ++count;
+                const int p = lowest[count];
+                float distance = float((y - p) * (y - p)) + column[p];
+                if (inside) distance = std::min({distance, float((y + 1) * (y + 1)), float((height - y) * (height - y))});
+                result[size_t(y) * width + x] = std::sqrt(distance);
+            }
+        }
+    }
+    return result;
 }
 
 std::vector<float> LayerEffectsRenderer::shadowCoverage(const QImage &image, const QRectF &placed, const QSize &canvasSize, const ShadowEffect &shadow)

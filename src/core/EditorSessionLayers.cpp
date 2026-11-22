@@ -130,6 +130,7 @@ bool EditorSession::duplicateLayers(const QVector<QUuid> &ids, const QString &ed
             }
         }
     }
+    relinkCopiedClipping(copiesOf);
     selectedLayerIds_.clear();
     for (const QUuid &copy : std::as_const(copiesOf)) selectedLayerIds_.insert(copy);
     std::optional<QUuid> primary;
@@ -145,6 +146,22 @@ bool EditorSession::duplicateLayers(const QVector<QUuid> &ids, const QString &ed
 void EditorSession::duplicateActiveLayer()
 {
     duplicateLayers(copiedLayerIds());
+}
+
+bool EditorSession::duplicateAndNudgeLayers(const QPointF &offset)
+{
+    if (!document_) return false;
+    beginEdit(QStringLiteral("Duplicate Layer"));
+    if (!duplicateLayers(copiedLayerIds())) { endEdit(); return false; }
+    QSet<QUuid> moving = selectedLayerIds_;
+    for (const QUuid &id : selectedLayerIds_) moving.unite(descendantIds(id));
+    for (Layer &layer : document_->layers) {
+        if (!moving.contains(layer.id) || layer.group) continue;
+        layer.transform.origin += offset;
+        if (layer.maskLinked && layer.maskPlacement) layer.maskPlacement->origin += offset;
+    }
+    endEdit();
+    return true;
 }
 
 bool EditorSession::duplicateLayer(const QUuid &id, const std::optional<QUuid> &parent,
@@ -296,6 +313,135 @@ bool EditorSession::cycleBlendMode(bool forward)
     const int current = int(layer->blendMode);
     setLayerBlendMode(layer->id, BlendMode((current + (forward ? 1 : count - 1)) % count));
     return true;
+}
+
+
+QString EditorSession::visibilityTitle() const
+{
+    const Layer *active = activeLayer();
+    return QString(active && !active->visible ? QStringLiteral("Show ") : QStringLiteral("Hide "))
+        + (selectedLayerIds_.size() > 1 ? QStringLiteral("Layers") : QStringLiteral("Layer"));
+}
+
+void EditorSession::toggleSelectedLayersVisibility()
+{
+    const Layer *active = activeLayer();
+    if (!document_ || !active) return;
+    QSet<QUuid> ids = selectedLayerIds_;
+    ids.insert(active->id);
+    const bool visible = !active->visible;
+    beginEdit(visibilityTitle());
+    for (Layer &layer : document_->layers) if (ids.contains(layer.id)) layer.visible = visible;
+    endEdit();
+}
+
+QSet<QUuid> EditorSession::clippingTargets() const
+{
+    QSet<QUuid> targets = selectedLayerIds_;
+    if (document_ && document_->activeLayerId) targets.insert(*document_->activeLayerId);
+    return targets;
+}
+
+bool EditorSession::releasesSelectedClipping() const
+{
+    if (!document_) return false;
+    const QSet<QUuid> targets = clippingTargets();
+    bool any = false;
+    for (const Layer &layer : document_->layers) {
+        if (!targets.contains(layer.id)) continue;
+        if (!layer.maskSourceId) return false;
+        any = true;
+    }
+    return any;
+}
+
+QString EditorSession::selectedClippingTitle() const
+{
+    return releasesSelectedClipping() ? QStringLiteral("Release Clipping Mask") : QStringLiteral("Create Clipping Mask");
+}
+
+std::optional<QVector<Layer>> EditorSession::clippedSelection() const
+{
+    if (!document_) return std::nullopt;
+    QVector<Layer> layers = document_->layers;
+    const QSet<QUuid> targets = clippingTargets();
+    if (targets.isEmpty()) return std::nullopt;
+    for (int index = 0; index < layers.size(); ++index) {
+        Layer &layer = layers[index];
+        if (!targets.contains(layer.id) || layer.maskSourceId) continue;
+        if (layer.group) return std::nullopt;
+        int below = -1;
+        for (int i = index - 1; i >= 0; --i) if (layers.at(i).parentId == layer.parentId) { below = i; break; }
+        if (below < 0 || layers.at(below).group || !layers.at(below).adjustment.isEmpty()) return std::nullopt;
+        layer.maskSourceId = layers.at(below).maskSourceId.value_or(layers.at(below).id);
+    }
+    // Every chain ends at a pixel layer, with no loop, within the mac's 256 nodes (LiveMaskGraph.validate).
+    QHash<QUuid, const Layer *> byId;
+    for (const Layer &layer : layers) byId.insert(layer.id, &layer);
+    for (const Layer &layer : layers) {
+        const Layer *current = &layer;
+        for (int depth = 0; current && current->maskSourceId; ++depth) {
+            if (depth > 256) return std::nullopt;
+            current = byId.value(*current->maskSourceId);
+            if (!current || current->group || current->id == layer.id) return std::nullopt;
+        }
+    }
+    return layers;
+}
+
+bool EditorSession::canToggleSelectedClipping() const
+{
+    return document_ && (releasesSelectedClipping() || clippedSelection().has_value());
+}
+
+bool EditorSession::toggleSelectedClipping()
+{
+    if (!canToggleSelectedClipping()) return false;
+    if (releasesSelectedClipping()) {
+        const QSet<QUuid> targets = clippingTargets();
+        QSet<QUuid> releases;
+        for (int index = 0; index < document_->layers.size(); ++index) {
+            const Layer &target = document_->layers.at(index);
+            if (!targets.contains(target.id)) continue;
+            // It and the siblings above it clipped to the same base, as releasing one does.
+            for (int i = index; i < document_->layers.size(); ++i) {
+                const Layer &layer = document_->layers.at(i);
+                if (layer.parentId != target.parentId) continue;
+                if (i != index && layer.maskSourceId != target.maskSourceId) break;
+                releases.insert(layer.id);
+            }
+        }
+        beginEdit(QStringLiteral("Release Clipping Mask"));
+        for (Layer &layer : document_->layers) if (releases.contains(layer.id)) layer.maskSourceId.reset();
+        endEdit();
+        return true;
+    }
+    const auto layers = clippedSelection();
+    if (!layers) return false;
+    beginEdit(QStringLiteral("Create Clipping Mask"));
+    document_->layers = *layers;
+    endEdit();
+    return true;
+}
+
+
+void EditorSession::relinkCopiedClipping(const QHash<QUuid, QUuid> &copiesOf)
+{
+    if (!document_ || copiesOf.size() < 2) return;
+    QVector<Layer> layers = document_->layers;
+    QHash<QUuid, std::optional<QUuid>> sources;
+    for (const Layer &layer : layers) sources.insert(layer.id, layer.maskSourceId);
+    QSet<QUuid> bases;
+    for (auto it = copiesOf.begin(); it != copiesOf.end(); ++it)
+        if (const auto source = sources.value(it.key()); source && copiesOf.contains(*source)) bases.insert(*source);
+    for (auto it = copiesOf.begin(); it != copiesOf.end(); ++it) {
+        const auto copy = std::find_if(layers.begin(), layers.end(), [&](const Layer &l) { return l.id == it.value(); });
+        if (copy == layers.end() || copy->group) continue;
+        if (const auto source = sources.value(it.key()); source && copiesOf.contains(*source)) copy->maskSourceId = copiesOf.value(*source);
+        else if (bases.contains(it.key())) copy->maskSourceId.reset();
+    }
+    releaseDetachedClipping(layers);
+    document_->layers = layers;
 }
 
 } // namespace compositor

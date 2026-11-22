@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.5.8-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.7.0-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -25,7 +25,7 @@
 | **glibc** | 2.43 or newer | 2.43 or newer |
 | **Tested on** | Ubuntu 26.04 | Ubuntu 26.04 |
 | **Libraries** | Bundled (Qt 6.10, Poppler, LibRaw, OpenEXR, ONNX Runtime…) | From the system via `apt`: Qt 6.10, libheif, LibRaw 0.21, OpenEXR 3.1, lcms2, lensfun, Poppler Qt6, giflib, libtiff, libjpeg |
-| **To run** | FUSE in the kernel (most desktops have it). Without FUSE: `--appimage-extract-and-run` | `sudo apt install ./compositorlx_0.5.8_amd64.deb` |
+| **To run** | FUSE in the kernel (most desktops have it). Without FUSE: `--appimage-extract-and-run` | `sudo apt install ./compositorlx_0.7.0_amd64.deb` |
 | **GPU (optional)** | A Vulkan 1.0 driver (tested on Intel and Mesa lavapipe; AMD and NVIDIA untested); otherwise the CPU renders everything | Same |
 
 On distributions older than glibc 2.43, [build from source](#build-from-source).
@@ -42,33 +42,26 @@ On distributions older than glibc 2.43, [build from source](#build-from-source).
 - **Selections**: marquee, lasso, polygonal lasso, magic wand, Color Range, and content-aware fill.
 - **Painting and retouching**: brush, eraser, healing, clone stamp, smudge, blur, Liquify, gradients, and pen pressure.
 - **Adjustments**: Levels, Curves, Hue/Saturation, Exposure, Color Balance, Black & White, Gradient Map, and a full **Camera Raw** filter.
-- **Filters**: blurs (Gaussian, Motion, Progressive), Bloom, RGB Split, Dither, Scanlines, Tonal Contrast, Vignette, Add Noise, Lens Correction, and **Lens Effects**. **Remove Background** runs a local AI model, never a web service.
+- **Filters**: blurs (Gaussian, Motion, Progressive), Sharpen, Reduce Noise, Bloom, RGB Split, Dither, Scanlines, Tonal Contrast, Vignette, Add Noise, Lens Correction, **Lens Effects**, **Rim Light** and **Volumetric Light**; most also as adjustment layers. **Remove Background**, Rim Light and Volumetric Light's depth run local AI models, never a web service.
 - **Animated GIFs**: one layer per GIF with a frame timeline. Play, paint, duplicate, delete and retime frames, then export animated GIFs.
 - **Deep color and print**: 16-bit and HDR layers (EXR, Radiance), CMYK proofing, and CMYK JPEG, TIFF and PDF export.
-- **Files**: `.comp` projects interchangeable with the macOS app (versions 1–17 and 27), PSD/PSB with artboards, SVG, PDF, Camera RAW, HEIC/HEIF, WebP, PNG, JPEG and TIFF.
+- **Files**: `.comp` projects interchangeable with the macOS app (versions 1–22 and 27), PSD/PSB import with artboards and layered PSD export, SVG, PDF, Camera RAW, HEIC/HEIF, WebP, PNG, JPEG and TIFF.
 - **GPU rendering**: a shared Vulkan renderer for the canvas and filters, with the CPU as reference and fallback; the rest runs on every CPU core. Exports stay byte-identical on every machine. See the [GPU notes](docs/GPU_ROLLOUT.md) and [what 0.5.8 sped up](docs/PERFORMANCE_0.5.8.md).
 - **Linux-native**: light, dark or follow-system themes, system fonts, HiDPI, Wayland support, customizable shortcuts, Search Commands (Ctrl+F), and crash-safe atomic saves.
 
-## New in 0.5.8
+## New in 0.7.0
 
-Synced with macOS Compositor 1.5.8.
+Synced with macOS Compositor 1.7.0 (every release from 1.5.9 to 1.7.0).
 
-<p align="center">
-  <img src="docs/screenshots/lens-effects-gallery.jpg" alt="The five Lens Effects next to the original photo: anamorphic flare, starburst, mist, prism and hexagonal bokeh" width="920">
-</p>
+- **New filters**: Sharpen and Reduce Noise (both also as adjustment layers), **Rim Light** (up to three colored lights behind the subject) and **Volumetric Light** (light beams and haze, with depth from the bundled DepthMini model and Extract Depth). Vignette, Lens Effects and Tonal Contrast are adjustment layers too, and Lens Effects' Prism gains Fringe.
+- **Editable shapes**: change a rectangle's or ellipse's fill, inside stroke and corner radius after drawing it, or a line's color, width, dashes and caps.
+- **Align and Distribute** from the Move bar and the Layer menu; **custom crop ratios**; **Export As › PSD** keeps the layers, folders, masks and clipping for Photoshop; right-click layers to export each as a PNG.
+- **Canvas**: sizes and angles beside the pointer, rotate from just outside a corner, View › Show › Distances, Space moves a Marquee mid-drag, Alt-arrow duplicates, a pencil (Brush › Anti-alias off), even strokes all the way round.
+- **Layers**: hiding a clipping base hides its stack, duplicates of a stack form their own, new layers join a clipping group, multi-layer Hide/Show, Clipping and 16/8-bit conversion, separate adjustment and filter menus under the panel.
+- **Workflow**: an opened image exports back with its own name, folder and format; Export As remembers its format (Ctrl+Alt+Shift+S); edit panels open where the last one was; the Color Picker takes each typed digit and Return.
+- **GPU**: Sharpen, Reduce Noise's non-local means, Rim Light, Volumetric Light's beams and RGB Split's two passes run on Vulkan, with matching CPU paths.
 
-- **Filter › Lens Effects**: anamorphic flare, starburst, mist, prism, and bokeh in round, hexagon, oval or cat's-eye shapes, all made from the picture's own light. All five run on the GPU (Vulkan compute) when available, 2.2–5.7× faster than before on a 24-megapixel photo (Intel Iris Xe), with the CPU as fallback ([details](docs/LENS_EFFECTS_GPU.md)).
-- **Faster everywhere else too**: large documents and the live Hue/Saturation, Black & White, Color Balance, Gradient Map, Motion Blur, Add Noise and Grain layers render on the GPU canvas, Camera RAW's color table runs on the GPU (byte for byte the CPU's), and filters, layer effects, brushes, Liquify and Smudge use every CPU core. Brush and Liquify moves are 3–5× faster with large brushes, and Remove Background's preview refines a smaller copy as on macOS ([measurements](docs/PERFORMANCE_0.5.8.md)).
-- **Remove Background** no longer stays stuck on "Detecting foreground subjects…", and Select Subject and Object Selection apply their result again.
-- **GIFs play at their real speed**, on each frame's saved delay. The delay control shows the GIF's own milliseconds.
-- **RGB Split**'s blur smears both ways, so the image no longer shifts.
-- **Projects** in format version 27, written by builds of the macOS GIF branch, now open.
-
-<p align="center">
-  <img src="docs/screenshots/gif-timeline.jpg" alt="An animated GIF layer with its frame timeline, play button and 800ms delay" width="920">
-</p>
-
-Details and Linux differences: [port audit for 1.5.8](docs/UPSTREAM_SYNC_1.5.8.md).
+Details, measurements and Linux differences: [port audit for 1.7.0](docs/UPSTREAM_SYNC_1.7.0.md).
 
 ## Install
 
@@ -76,11 +69,11 @@ Download the [AppImage or Debian package](https://github.com/ClaudiuJitea/compos
 
 ```sh
 # AppImage
-chmod +x CompositorLX-0.5.8-x86_64.AppImage
-./CompositorLX-0.5.8-x86_64.AppImage
+chmod +x CompositorLX-0.7.0-x86_64.AppImage
+./CompositorLX-0.7.0-x86_64.AppImage
 
 # Debian / Ubuntu
-sudo apt install ./compositorlx_0.5.8_amd64.deb
+sudo apt install ./compositorlx_0.7.0_amd64.deb
 compositor-lx
 ```
 
@@ -118,6 +111,7 @@ ctest --test-dir build
 
 ## Version history
 
+- **0.7.0**: macOS 1.7.0 sync (1.5.9–1.7.0). Sharpen, Reduce Noise, Rim Light, Volumetric Light, editable shapes, Align and Distribute, PSD export, custom crop ratios, Distances, project formats 18–22.
 - **0.5.8**: macOS 1.5.8 sync. Lens Effects, GIF playback on saved delays, RGB Split smears both ways, format 27 opens. Refreshed: all Lens Effects on the GPU, more of the canvas and Camera RAW on the GPU, filters, brushes and Liquify on all cores, and the Remove Background, Select Subject and Object Selection progress fix.
 - **0.5.6**: macOS 1.5.6 sync. GIF timeline redesign, Layers search and kind filter, Canvas Size keeps the zoom.
 - **0.5.5**: GIF layers and export, PDF import, RGB Split, Channel Pack, filter layers, styled lines, pen pressure, and the shared Vulkan renderer.

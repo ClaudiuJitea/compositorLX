@@ -317,6 +317,11 @@ QString adjustmentKindToString(AdjustmentKind kind)
     case AdjustmentKind::BloomGlow: return QStringLiteral("Bloom / Glow");
     case AdjustmentKind::RgbSplit: return QStringLiteral("RGB Split");
     case AdjustmentKind::AddNoise: return QStringLiteral("Add Noise");
+    case AdjustmentKind::Vignette: return QStringLiteral("Vignette");
+    case AdjustmentKind::LensEffects: return QStringLiteral("Lens Effects");
+    case AdjustmentKind::TonalContrast: return QStringLiteral("Tonal Contrast");
+    case AdjustmentKind::Sharpen: return QStringLiteral("Sharpen");
+    case AdjustmentKind::ReduceNoise: return QStringLiteral("Reduce Noise");
     }
     return QStringLiteral("Hue/Saturation");
 }
@@ -338,6 +343,11 @@ std::optional<AdjustmentKind> adjustmentKindFromString(const QString &value)
     if (value == QStringLiteral("Bloom / Glow")) return AdjustmentKind::BloomGlow;
     if (value == QStringLiteral("RGB Split")) return AdjustmentKind::RgbSplit;
     if (value == QStringLiteral("Add Noise")) return AdjustmentKind::AddNoise;
+    if (value == QStringLiteral("Vignette")) return AdjustmentKind::Vignette;
+    if (value == QStringLiteral("Lens Effects")) return AdjustmentKind::LensEffects;
+    if (value == QStringLiteral("Tonal Contrast")) return AdjustmentKind::TonalContrast;
+    if (value == QStringLiteral("Sharpen")) return AdjustmentKind::Sharpen;
+    if (value == QStringLiteral("Reduce Noise")) return AdjustmentKind::ReduceNoise;
     return std::nullopt;
 }
 
@@ -349,6 +359,36 @@ bool isVersion16Adjustment(AdjustmentKind kind)
 bool isVersion9Adjustment(AdjustmentKind kind)
 {
     return kind == AdjustmentKind::GaussianBlur || kind == AdjustmentKind::MotionBlur || kind == AdjustmentKind::AddNoise;
+}
+
+int adjustmentKindVersion(AdjustmentKind kind)
+{
+    switch (kind) {
+    case AdjustmentKind::GaussianBlur: case AdjustmentKind::MotionBlur: case AdjustmentKind::AddNoise: return 9;
+    case AdjustmentKind::ProgressiveBlur: case AdjustmentKind::BloomGlow: case AdjustmentKind::RgbSplit: return 16;
+    case AdjustmentKind::Vignette: case AdjustmentKind::LensEffects: case AdjustmentKind::TonalContrast: return 18;
+    case AdjustmentKind::Sharpen: return 19;
+    case AdjustmentKind::ReduceNoise: return 21;
+    default: return 7;
+    }
+}
+
+int adjustmentRequiredVersion(const QJsonObject &adjustment)
+{
+    if (adjustment.isEmpty()) return 1;
+    int version = 7;
+    if (const auto kind = adjustmentKindFromString(adjustment.value(QStringLiteral("kind")).toString()))
+        version = adjustmentKindVersion(*kind);
+    if (adjustment.contains(QStringLiteral("filterLayerSettings"))) {
+        version = std::max(version, 16);
+        const QJsonObject f = adjustment.value(QStringLiteral("filterLayerSettings")).toObject();
+        if (f.contains(QStringLiteral("vignette")) || f.contains(QStringLiteral("tonal")) || f.contains(QStringLiteral("lens")))
+            version = std::max(version, 18);
+        if (f.value(QStringLiteral("lens")).toObject().contains(QStringLiteral("prismFringe"))) version = std::max(version, 20);
+        if (f.contains(QStringLiteral("sharpen"))) version = std::max(version, 19);
+        if (f.contains(QStringLiteral("reduceNoise"))) version = std::max(version, 21);
+    }
+    return version;
 }
 
 QString layerEffectKindToString(LayerEffectKind kind)

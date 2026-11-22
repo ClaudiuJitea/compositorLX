@@ -22,6 +22,8 @@
 #include <QRegularExpression>
 #include <QTimer>
 #include <QShortcut>
+#include "io/PSDWriter.h"
+#include <QDir>
 #include <QLineF>
 #include <QVBoxLayout>
 
@@ -570,7 +572,7 @@ void MainWindow::exportAsDialog(bool jpegDefault)
     layout->addLayout(form);
     auto *format = new QComboBox(&dialog);
     format->setObjectName(QStringLiteral("exportFormat"));
-    enum Kind { Png, Jpeg, Pdf, Exr, Tiff, Gif, Pack };
+    enum Kind { Png, Jpeg, Pdf, Exr, Tiff, Gif, Pack, Psd };
     // JPEG and PNG first, as on macOS, then TIFF, PDF and (with an HDR layer) EXR.
     format->addItem(tr("JPEG"), Jpeg);
     format->addItem(tr("PNG"), Png);
@@ -580,8 +582,19 @@ void MainWindow::exportAsDialog(bool jpegDefault)
     format->addItem(tr("GIF"), Gif);
     if (hasHDR)
         format->addItem(tr("OpenEXR"), Exr);
-    // The format the last export used, offered first next time; Export JPEG… always starts on JPEG.
-    static int lastFormat = Png;
+    // The layers, for Photoshop and After Effects; last, as an interchange format (mac a0cc980).
+    format->addItem(tr("PSD"), Psd);
+    format->setToolTip(tr("Other formats: TIFF, PDF and GIF%1, Channel Pack for game textures, and PSD to keep the layers for Photoshop")
+                           .arg(hasHDR ? tr(", EXR to keep light brighter than white") : QString()));
+    // The format this document was last exported in; else, for a document begun as an image, that image's format; else
+    // the one last used in any document, remembered between launches (mac 2facf90).
+    const QStringList kindExtensions{QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("pdf"),
+                                     QStringLiteral("exr"), QStringLiteral("tiff"), QStringLiteral("gif"), QStringLiteral("pack"),
+                                     QStringLiteral("psd")};
+    const QString remembered = QSettings().value(QStringLiteral("lastExportFormat"), QStringLiteral("png")).toString();
+    const QString starting = !session_.exportedFormat.isEmpty() ? session_.exportedFormat
+        : ImageExporter::startingFormat(session_.sourceImagePath, document_->projectPath, remembered);
+    const int lastFormat = std::max(0, int(kindExtensions.indexOf(starting)));
     const int startFormat = jpegDefault ? Jpeg : lastFormat == Exr && !hasHDR ? Png : lastFormat;
     format->setCurrentIndex(std::max(0, format->findData(startFormat)));
     const auto kind = [format] { return format->currentData().toInt(); };
@@ -627,7 +640,17 @@ void MainWindow::exportAsDialog(bool jpegDefault)
     sizeRow->addWidget(lock);
     sizeRow->addStretch();
     sizeRow->addWidget(scale);
-    form->addRow(sizeRow);
+    auto *sizeOptions = new QWidget(&dialog);
+    sizeOptions->setLayout(sizeRow);
+    sizeRow->setContentsMargins(0, 0, 0, 0);
+    form->addRow(sizeOptions);
+    // What a Photoshop file changes: text and effects drawn as pixels, adjustment layers left out.
+    auto *psdChanges = new QLabel(PSDWriter::summary(PSDWriter::notes(*document_)), &dialog);
+    psdChanges->setObjectName(QStringLiteral("exportPsdChanges"));
+    psdChanges->setWordWrap(true);
+    psdChanges->setMaximumWidth(420);
+    psdChanges->setForegroundRole(QPalette::PlaceholderText);
+    form->addRow(tr("Changes"), psdChanges);
     connect(width, qOverload<int>(&QSpinBox::valueChanged), &dialog, [&](int value) {
         if (lock->isChecked()) {
             QSignalBlocker block(height);
@@ -688,6 +711,11 @@ void MainWindow::exportAsDialog(bool jpegDefault)
         const int f = kind();
         for (auto *channel : channels) setRow(channel, f == Pack);
         setRow(gifLoop, f == Gif); setRow(gifTransparent, f == Gif);
+        // A Photoshop file keeps every layer as it is, at the document's size.
+        setRow(width, f != Psd); setRow(height, f != Psd); setRow(sizeOptions, f != Psd);
+        setRow(psdChanges, f == Psd && !psdChanges->text().isEmpty());
+        if (f == Psd) { const QSignalBlocker a(width), b(height); width->setValue(original.width()); height->setValue(original.height()); }
+        setRow(color, f != Psd); setRow(profiles, f != Psd);
         const bool supportsCMYK = f == Jpeg || f == Pdf || f == Tiff;
         setRow(quality, f == Jpeg);
         setRow(sixteenBit, f == Png && hasDeep);
@@ -728,7 +756,8 @@ void MainWindow::exportAsDialog(bool jpegDefault)
             if (encoded && size == requested)
                 fileSize = QLocale().formattedDataSize(encoded->data.size());
         }
-        summary->setText(f == Exr ? tr("Brighter than white kept · Transparency kept")
+        summary->setText(f == Psd ? tr("Layers, folders and masks kept · sRGB")
+                         : f == Exr ? tr("Brighter than white kept · Transparency kept")
                          : color->currentIndex() == 1 ? tr("CMYK – %1").arg(profiles->currentText())
                          : f == Png || f == Tiff ? tr("Transparency kept · sRGB") : tr("sRGB")
                          + (fileSize.isEmpty() ? QString() : QStringLiteral("    ") + fileSize));
@@ -768,21 +797,29 @@ void MainWindow::exportAsDialog(bool jpegDefault)
     if (accepted != QDialog::Accepted)
         return;
     timer->stop();
-    lastFormat = kind();
+    session_.exportedFormat = kindExtensions[kind()];
+    QSettings().setValue(QStringLiteral("lastExportFormat"), kindExtensions[kind()]);
     if (kind() == Jpeg)
         QSettings().setValue(QStringLiteral("jpegExportQuality"), quality->value());
     const QStringList extensions{QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("pdf"),
-                                 QStringLiteral("exr"), QStringLiteral("tiff"), QStringLiteral("gif"), QStringLiteral("png")};
+                                 QStringLiteral("exr"), QStringLiteral("tiff"), QStringLiteral("gif"), QStringLiteral("png"), QStringLiteral("psd")};
     const QString ext = extensions[kind()];
-    // Named after the project, as on macOS.
-    const QString baseName = document_->projectPath.isEmpty() ? QStringLiteral("Untitled")
-                                                              : QFileInfo(document_->projectPath).completeBaseName();
-    QString path = QFileDialog::getSaveFileName(this, tr("Export As"), baseName + QLatin1Char('.') + ext,
+    // Named after the project or the image it began as and, for an image, in its folder (mac exportName).
+    const QString folder = ImageExporter::exportFolder(document_->projectPath, session_.sourceImagePath);
+    const QString suggested = ImageExporter::exportName(document_->projectPath, session_.sourceImagePath, ext);
+    QString path = QFileDialog::getSaveFileName(this, tr("Export As"), folder.isEmpty() ? suggested : QDir(folder).filePath(suggested),
                                                 tr("%1 files (*.%2)").arg(ext.toUpper(), ext));
     if (path.isEmpty())
         return;
     if (QFileInfo(path).suffix().isEmpty())
         path += QLatin1Char('.') + ext;
+    if (kind() == Psd) {
+        QString error;
+        const QByteArray bytes = PSDWriter::write(*document_, &error);
+        if (bytes.isEmpty() || !ImageExporter::writeAtomically(bytes, path, &error))
+            QMessageBox::warning(this, tr("Could Not Export PSD"), error.isEmpty() ? tr("Could not write the Photoshop file.") : error);
+        return;
+    }
     if (kind() == Pack) {
         const auto bytes = ChannelPack::png(pack(QSize(width->value(), height->value())), document_->resolution);
         QString error;

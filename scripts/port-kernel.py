@@ -76,6 +76,17 @@ while (m := pattern.search(src)):
     suffix = f'\n{label}: ;\n    }}\n}}' if f'goto {label}' in body else '\n    }\n}'
     src = src[:m.start()] + prefix + body + suffix + src[end + 3:]
 src = src.replace('__block ', '').replace('failed = 1;', '_Pragma("omp atomic write") failed = 1;')
-if '^(' in src or 'dispatch_apply' in src or 'in_bands(' in src:
+# dispatch_once(&token, ^{ body }); runs its body once however many threads arrive together: a flag checked and set
+# inside one named critical section per token. The body only fills tables, so a lock taken per call costs nothing.
+once = re.compile(r'static dispatch_once_t (\w+);\n(\s*)dispatch_once\(&\1, \^\{')
+while (m := once.search(src)):
+    token, indent = m.group(1), m.group(2)
+    end = closing(src, m.end() - 1)
+    if src[end + 1:end + 3] != ');':
+        raise ValueError('unexpected dispatch_once ending')
+    body = src[m.end():end]
+    src = (src[:m.start()] + f'static int {token}_done_;\n{indent}_Pragma("omp critical({token})") {{ if (!{token}_done_) {{'
+           + body + f' {token}_done_ = 1; }} }}' + src[end + 3:])
+if '^(' in src or '^{' in src or 'dispatch_' in src or 'in_bands(' in src:
     raise ValueError('untranslated block')
 path.write_text("\n".join(line.rstrip() for line in src.splitlines()) + "\n")

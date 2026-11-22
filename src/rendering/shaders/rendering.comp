@@ -430,9 +430,150 @@ void lens(ivec2 xy, uint operation) {
     store(index, vec4(o, 0, 0, 1));
 }
 
+// ---- Reduce Noise: non-local means -------------------------------------------------------
+// The same matching as AdjustPixels.c nonlocal_means (and macOS MetalNonlocalMeans): each pixel averaged with the
+// others within `search` whose (2·patch+1)² surroundings look like its own. The group's 8 × 8 block and NLM_MARGIN
+// around it sit in shared memory, edge pixels carried on past the image's sides; for each offset the squared
+// differences are worked out once over the block and a patch around it, summed across each patch's width, then each
+// thread sums its patch's column.
+#define NLM_TILE 8
+#define NLM_MARGIN 9
+#define NLM_SPAN (NLM_TILE + 2 * NLM_MARGIN)
+#define NLM_PATCHED (NLM_TILE + 4)
+shared vec2 nlmBlock[NLM_SPAN][NLM_SPAN];
+shared float nlmDifference[NLM_PATCHED][NLM_PATCHED];
+shared float nlmAcross[NLM_PATCHED][NLM_TILE];
+void nonlocalMeans() {
+    uvec2 local = gl_LocalInvocationID.xy, group = gl_WorkGroupID.xy;
+    int member = int(local.y * NLM_TILE + local.x);
+    ivec2 corner = ivec2(group * NLM_TILE) - NLM_MARGIN;
+    for (int i = member; i < NLM_SPAN * NLM_SPAN; i += NLM_TILE * NLM_TILE) {
+        ivec2 at = clamp(corner + ivec2(i % NLM_SPAN, i / NLM_SPAN), ivec2(0), ivec2(p.width - 1, p.height - 1));
+        uint index = uint(at.y) * p.width + uint(at.x);
+        nlmBlock[i / NLM_SPAN][i % NLM_SPAN] = vec2(loadSource(index).r, loadAux(index).r);
+    }
+    memoryBarrierShared();
+    barrier();
+    int search = int(p.v[NONLOCAL_MEANS_SEARCH]), patchSize = int(p.v[NONLOCAL_MEANS_PATCH]);
+    int reach = patchSize * 2 + 1, size = NLM_TILE + 2 * patchSize, start = NLM_MARGIN - patchSize;
+    float total = 0, weights = 0, strongest = 0;
+    for (int dy = -search; dy <= search; ++dy) {
+        for (int dx = -search; dx <= search; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            for (int i = member; i < size * size; i += NLM_TILE * NLM_TILE) {
+                int y = start + i / size, x = start + i % size;
+                float d = nlmBlock[y][x].x - nlmBlock[y + dy][x + dx].x;
+                nlmDifference[i / size][i % size] = d * d;
+            }
+            memoryBarrierShared();
+            barrier();
+            for (int i = member; i < size * NLM_TILE; i += NLM_TILE * NLM_TILE) {
+                int y = i / NLM_TILE, x = i % NLM_TILE;
+                float sum = 0;
+                for (int k = 0; k < reach; ++k) sum += nlmDifference[y][x + k];
+                nlmAcross[y][x] = sum;
+            }
+            memoryBarrierShared();
+            barrier();
+            float distance = 0;
+            for (int k = 0; k < reach; ++k) distance += nlmAcross[int(local.y) + k][local.x];
+            float scaled = max(distance / p.v[NONLOCAL_MEANS_AREA] - p.v[NONLOCAL_MEANS_ALLOWANCE], 0.0) * p.v[NONLOCAL_MEANS_INVERSE_H2];
+            if (scaled < 6) {
+                vec2 neighbor = nlmBlock[int(local.y) + NLM_MARGIN + dy][int(local.x) + NLM_MARGIN + dx];
+                float weight = exp(-scaled) * neighbor.y;
+                total += weight * neighbor.x;
+                weights += weight;
+                strongest = max(strongest, weight);
+            }
+        }
+    }
+    // Every thread has helped with every offset; only those on the image write.
+    uvec2 pixel = group * NLM_TILE + local;
+    if (pixel.x >= p.width || pixel.y >= p.height) return;
+    float own = strongest > 0 ? strongest : 1;
+    float center = nlmBlock[int(local.y) + NLM_MARGIN][int(local.x) + NLM_MARGIN].x;
+    store(pixel.y * p.width + pixel.x, vec4((total + own * center) / (weights + own), 0, 0, 1));
+}
+
+// ---- Rim Light ------------------------------------------------------------------------------
+// The inverse of the error function (Giles's approximation), for how far into a blurred edge a level lies.
+float inverseError(float x) {
+    float w = -log((1.0 - x) * (1.0 + x)), q;
+    if (w < 5.0) {
+        w -= 2.5;
+        q = 2.81022636e-08; q = 3.43273939e-07 + q * w; q = -3.5233877e-06 + q * w; q = -4.39150654e-06 + q * w;
+        q = 0.00021858087 + q * w; q = -0.00125372503 + q * w; q = -0.00417768164 + q * w; q = 0.246640727 + q * w;
+        q = 1.50140941 + q * w;
+    } else {
+        w = sqrt(w) - 3.0;
+        q = -0.000200214257; q = 0.000100950558 + q * w; q = 0.00134934322 + q * w; q = -0.00367342844 + q * w;
+        q = 0.00573950773 + q * w; q = -0.0076224613 + q * w; q = 0.00943887047 + q * w; q = 1.00167406 + q * w;
+        q = 2.83297682 + q * w;
+    }
+    return q * x;
+}
+// Which way is inwards in a blurred outline (channel `c` of the source), rows running down; zero where it's flat.
+vec2 inwardsIn(ivec2 xy, int c) {
+    vec2 d = vec2(fetch(xy + ivec2(1, 0))[c] - fetch(xy + ivec2(-1, 0))[c], fetch(xy + ivec2(0, -1))[c] - fetch(xy + ivec2(0, 1))[c]);
+    return length(d) > 1e-6 ? normalize(d) : vec2(0);
+}
+
+// ---- Volumetric Light: the beams ----------------------------------------------------------------
+// An integer hash to [0, 1), the same on every device and on the CPU (mac's fract(sin(n · 12.9898) · 43758.5) drifts
+// with each device's sine at large n).
+float volumetricHash(uint n) {
+    n ^= n >> 16; n *= 0x7feb352du; n ^= n >> 15; n *= 0x846ca68bu; n ^= n >> 16;
+    return float(n >> 8) / 16777216.0;
+}
+// Smooth noise around the light, one value per `cells` around the circle.
+float volumetricAround(float angle, float cells, uint seed) {
+    float u = (angle / 6.2831853 + 0.5) * cells;
+    float i = floor(u), f = u - i;
+    f = f * f * (3.0 - 2.0 * f);
+    // The cell in integers, wrapping around the circle exactly (a float mod can land on `cells` itself).
+    int count = int(cells), k = int(i) % count;
+    if (k < 0) k += count;
+    uint a = uint(k), b = uint((k + 1) % count);
+    return mix(volumetricHash(a * 2654435761u + seed), volumetricHash(b * 2654435761u + seed), f);
+}
+// Bilinear, edges carried on, `q` in pixels (centers at .5), from the source or the auxiliary.
+vec4 sampleSource(vec2 q) { return bilinear(q, ivec2(p.width, p.height)); }
+vec4 sampleAux(vec2 q) {
+    ivec2 size = ivec2(p.width, p.height);
+    vec2 pos = clamp(q - .5, vec2(0), vec2(size - 1));
+    ivec2 a = ivec2(pos), b = min(a + 1, size - 1);
+    vec2 f = pos - vec2(a);
+    return mix(mix(loadAux(uint(a.y * size.x + a.x)), loadAux(uint(a.y * size.x + b.x)), f.x),
+               mix(loadAux(uint(b.y * size.x + a.x)), loadAux(uint(b.y * size.x + b.x)), f.x), f.y);
+}
+// What gives off light at `at`: the light itself, a soft disc, mostly where the photo is light enough to let it
+// through, and the photo's bright openings, more near the light; the subject blocks both, and the shafts break them up.
+float volumetricEmission(vec2 at) {
+    vec2 light = vec2(p.v[VOLUMETRIC_BEAMS_LIGHT_X], p.v[VOLUMETRIC_BEAMS_LIGHT_Y]);
+    float side = p.v[VOLUMETRIC_BEAMS_SIDE], size = p.v[VOLUMETRIC_BEAMS_SIZE], shafts = p.v[VOLUMETRIC_BEAMS_SHAFTS];
+    vec4 color = sampleSource(at);
+    float bright = clamp(dot(color.rgb, vec3(0.2126, 0.7152, 0.0722)) / p.v[VOLUMETRIC_BEAMS_BRIGHTEST], 0.0, 1.0);
+    float blocked = sampleAux(at).r;
+    vec2 apart = at - light;
+    float distance = length(apart);
+    float open = clamp((bright - 0.08) / 0.3, 0.0, 1.0);
+    float disc = exp(-2.0 * (distance / size) * (distance / size));
+    float openings = clamp((bright - 0.45) / 0.45, 0.0, 1.0) * exp(-distance / (side * 0.5));
+    float angle = atan(apart.y, apart.x);
+    float wave = 0.6 * volumetricAround(angle, 97.0, 31u) + 0.4 * volumetricAround(angle, 251.0, 77u);
+    float broken = 1.0 - shafts + shafts * wave * wave * 1.8;
+    return (disc * (0.25 + 0.75 * open) + openings) * (1.0 - blocked) * broken;
+}
+
+float srgbToLinear(float c) { return c <= .04045 ? c / 12.92 : pow((c + .055) / 1.055, 2.4); }
+float linearToSrgb(float c) { return c <= .0031308 ? c * 12.92 : 1.055 * pow(c, 1 / 2.4) - .055; }
+float rec709(vec3 c) { return dot(c, vec3(.2126, .7152, .0722)); }
+float smooth01(float t) { t = clamp(t, 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+
 void main() {
     ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
     uint operation = op();
+    if (operation == OP_NONLOCAL_MEANS) { nonlocalMeans(); return; }
     if (operation == OP_BOX_BLUR) { boxBlur(xy); return; }
     if (operation >= OP_LENS_POINT && operation <= OP_LENS_REDUCE) { lens(xy, operation); return; }
     if (xy.x >= p.width || xy.y >= p.height) return;
@@ -601,7 +742,51 @@ void main() {
             }
         }
         alpha /= total;
-        o = vec4(color / total, max(max(alpha.r, alpha.g), alpha.b));
+        float most = max(max(alpha.r, alpha.g), alpha.b);
+        o = vec4(min(color / total, vec3(most)), most);
+    } else if (operation == OP_RGB_SMEAR) {
+        // The first of the two passes: the image smeared along the split at each point of a copy reaching `pad` pixels
+        // past it on every side.
+        float pad = p.v[RGB_SMEAR_PAD];
+        ivec2 inSize = ivec2(int(p.width) - 2 * int(pad), int(p.height) - 2 * int(pad));
+        vec2 at = vec2(xy) + .5 - pad;
+        vec2 axis = p.v[RGB_SMEAR_RADIAL] != 0
+                        ? (at - vec2(p.v[RGB_SMEAR_CENTER_X], p.v[RGB_SMEAR_CENTER_Y])) / max(1, p.v[RGB_SMEAR_REACH])
+                        : vec2(p.v[RGB_SMEAR_DIRECTION_X], p.v[RGB_SMEAR_DIRECTION_Y]);
+        int smear = int(p.v[RGB_SMEAR_SMEAR_SAMPLES]), edges = int(p.v[RGB_SMEAR_EDGES]);
+        float noise = loadAux(index).r;
+        vec4 sum = vec4(0);
+        for (int j = 0; j < smear; ++j) {
+            float u = (float(j) + noise) / smear - .5;
+            vec2 q = at - axis * (p.v[RGB_SMEAR_BLUR] * u);
+            if (!((q.x < 0 && (edges & 1) == 0) || (q.x > inSize.x && (edges & 2) == 0) ||
+                  (q.y < 0 && (edges & 4) == 0) || (q.y > inSize.y && (edges & 8) == 0)))
+                sum += bilinear(q, inSize);
+        }
+        o = sum / smear;
+    } else if (operation == OP_RGB_SPECTRUM) {
+        // The second: the spectrum, each sample read from the padded streaks, their edges carried on.
+        float pad = p.v[RGB_SPECTRUM_PAD];
+        ivec2 inSize = ivec2(int(p.width) + 2 * int(pad), int(p.height) + 2 * int(pad));
+        vec2 at = vec2(xy) + .5;
+        vec2 axis = p.v[RGB_SPECTRUM_RADIAL] != 0
+                        ? (at - vec2(p.v[RGB_SPECTRUM_CENTER_X], p.v[RGB_SPECTRUM_CENTER_Y])) / max(1, p.v[RGB_SPECTRUM_REACH])
+                        : vec2(p.v[RGB_SPECTRUM_DIRECTION_X], p.v[RGB_SPECTRUM_DIRECTION_Y]);
+        int spectral = int(p.v[RGB_SPECTRUM_SPECTRAL_SAMPLES]);
+        float noise = loadAux(index).r;
+        vec3 color = vec3(0), alpha = vec3(0), total = vec3(0);
+        for (int i = 0; i < spectral; ++i) {
+            float t = spectral == 1 ? 0 : (float(i) + noise) / spectral * 2 - 1;
+            vec3 weight = vec3(smoothstep(-.3, 1, t), 1 - smoothstep(0, 1, abs(t)) + .05, smoothstep(-.3, 1, -t));
+            vec4 value = bilinear(at - axis * (p.v[RGB_SPECTRUM_DISTANCE] * t) + pad, inSize);
+            color += weight * value.rgb;
+            alpha += weight * value.a;
+            total += weight;
+        }
+        color /= total;
+        alpha /= total;
+        float most = max(max(alpha.r, alpha.g), alpha.b);
+        o = vec4(min(color, vec3(most)), most);
     } else if (operation == OP_BOKEH) {
         vec2 at = vec2(xy) + .5;
         vec2 fromMiddle = (at - vec2(p.width, p.height) * .5) / (max(float(p.width), float(p.height)) * .5);
@@ -683,6 +868,126 @@ void main() {
         }
         store(index, o);
         return;
+    } else if (operation == OP_SHARPEN) {
+        if (p.v[SHARPEN_STAGE] == 0) {
+            // Straight sRGB to linear light, premultiplied again (Core Image's working space).
+            vec3 c = a.a > 0 ? min(a.rgb / a.a, vec3(1)) : vec3(0);
+            o = vec4(vec3(srgbToLinear(c.r), srgbToLinear(c.g), srgbToLinear(c.b)) * a.a, a.a);
+        } else {
+            // CIUnsharpMask: the detail the blur took away added back, then clamped as a render to 8 or 16 bits is.
+            vec4 sharpened = a + p.v[SHARPEN_AMOUNT] * (a - loadAux(index));
+            float alpha = clamp(sharpened.a, 0.0, 1.0);
+            vec3 c = alpha > 0 ? clamp(sharpened.rgb / alpha, 0.0, 1.0) : vec3(0);
+            o = vec4(vec3(linearToSrgb(c.r), linearToSrgb(c.g), linearToSrgb(c.b)) * alpha, alpha);
+        }
+    } else if (operation == OP_VIGNETTE) {
+        if (a.a > 0) {
+            vec2 n = (vec2(xy) + .5 - vec2(p.v[VIGNETTE_FRAME_X], p.v[VIGNETTE_FRAME_Y]))
+                     / vec2(p.v[VIGNETTE_FRAME_WIDTH], p.v[VIGNETTE_FRAME_HEIGHT]) * 2.0 - 1.0;
+            float square = max(abs(n.x), abs(n.y)), circle = length(n) / sqrt(2.0);
+            float dist = circle + (square - circle) * ((1.0 - p.v[VIGNETTE_ROUNDNESS] / 100.0) * .5);
+            float mask = smooth01((dist - p.v[VIGNETTE_MIDPOINT] / 100.0 * .85) / max(.05, p.v[VIGNETTE_FEATHER] / 100.0));
+            if (mask > 0) {
+                vec3 c = min(a.rgb / a.a, vec3(1));
+                float bright = clamp((rec709(c) - .45) / .55, 0.0, 1.0);
+                float effect = clamp(p.v[VIGNETTE_AMOUNT] / 100.0, 0.0, 1.0) * mask * (1.0 - p.v[VIGNETTE_HIGHLIGHTS] / 100.0 * bright);
+                vec3 tint = clamp(vec3(p.v[VIGNETTE_RED], p.v[VIGNETTE_GREEN], p.v[VIGNETTE_BLUE]), 0.0, 1.0);
+                // Only the pixels that are there change color; their coverage stays as it was.
+                o = vec4((c + (tint - c) * effect) * a.a, a.a);
+            }
+        }
+    } else if (operation == OP_TONAL_CONTRAST) {
+        vec4 base = loadAux(index);
+        if (a.a > 0 && base.a > 0) {
+            vec3 c = min(a.rgb / a.a, vec3(1));
+            float l = rec709(c), baseLum = rec709(min(base.rgb / base.a, vec3(1)));
+            float shadowWeight = 1.0 - smooth01((baseLum - .15) / .35), highlightWeight = smooth01((baseLum - .5) / .35);
+            float weight = (p.v[TONAL_CONTRAST_SHADOWS] * shadowWeight + p.v[TONAL_CONTRAST_MIDTONES] * (1.0 - shadowWeight - highlightWeight)
+                            + p.v[TONAL_CONTRAST_HIGHLIGHTS] * highlightWeight) / 100.0;
+            float delta = .18 * tanh((l - baseLum) * 6.0) * weight * (p.v[TONAL_CONTRAST_AMOUNT] / 50.0) * (4.0 * l * (1.0 - l));
+            o = vec4(clamp(c + delta, 0.0, 1.0) * a.a, a.a);
+        }
+    } else if (operation == OP_RIM_MATH) {
+        int mode = int(p.v[RIM_MATH_MODE]);
+        vec4 b = loadAux(index);
+        if (mode == 0) {            // CIColorMatrix: gain and bias on the colors, alpha as it is; CIColorClamp
+            o = vec4(a.rgb * p.v[RIM_MATH_GAIN] + p.v[RIM_MATH_BIAS], a.a);
+            if (p.v[RIM_MATH_CLAMP] != 0) o.rgb = clamp(o.rgb, 0.0, 1.0);
+        } else if (mode == 1) {     // CIMultiplyCompositing, `a` over the background `b`
+            o = vec4(a.rgb * b.rgb + a.rgb * (1.0 - b.a) + b.rgb * (1.0 - a.a), a.a + b.a - a.a * b.a);
+        } else if (mode == 2) {     // CIDivideBlendMode: the background `b` divided by `a`
+            o = vec4(vec3(a.r > 0 ? b.r / a.r : 0, a.g > 0 ? b.g / a.g : 0, a.b > 0 ? b.b / a.b : 0), b.a);
+        } else if (mode == 3) {     // CIDifferenceBlendMode
+            o = vec4(abs(a.rgb - b.rgb), a.a + b.a - a.a * b.a);
+        } else if (mode == 4) {     // CIAdditionCompositing
+            o = a + b;
+        } else if (mode == 5) {     // CIBlendWithMask over nothing
+            o = a * clamp(b.r, 0.0, 1.0);
+        } else if (mode == 6) {     // two planes into one, side by side
+            o = vec4(a.r, b.r, 0, 1);
+        } else if (mode == 7) {
+            o = vec4(a.r, a.g, b.r, b.g);
+        } else if (mode == 8) {     // each one's strongest channel
+            o = vec4(max(a.r, max(a.g, a.b)), max(b.r, max(b.g, b.b)), 0, 1);
+        } else if (mode == 9) {     // a light's color over the photo's own, where its surface `b` is lit
+            vec3 albedo = a.a > 0 ? max(vec3(0), a.rgb / a.a) : vec3(0);
+            o = vec4(vec3(p.v[RIM_MATH_RED], p.v[RIM_MATH_GREEN], p.v[RIM_MATH_BLUE]) * (albedo * 0.7 + 0.45) * b.r * a.a, 0);
+        } else {                    // the lights over the photo, eased and screened so a lot rolls off into white
+            if (a.a > 0) {
+                vec3 base = clamp(a.rgb / a.a, 0.0, 1.0), eased = 1.0 - exp(-max(vec3(0), b.rgb));
+                o = vec4((1.0 - (1.0 - base) * (1.0 - eased)) * a.a, a.a);
+            }
+        }
+    } else if (operation == OP_RIM_SURFACE) {
+        // The source packs coverage, the outline blurred by `reach`, and the fine and coarse grays (MetalRimLight).
+        float covered = a.r;
+        float level = clamp(a.g, 0.001, 0.999);
+        float depth = p.v[RIM_SURFACE_REACH] * sqrt(2.0) * inverseError(2.0 * level - 1.0);
+        vec2 inwards = inwardsIn(xy, 1);
+        vec2 bumps = vec2((fetch(xy + ivec2(1, 0)).b - fetch(xy + ivec2(1, 0)).a) - (fetch(xy + ivec2(-1, 0)).b - fetch(xy + ivec2(-1, 0)).a),
+                          (fetch(xy + ivec2(0, -1)).b - fetch(xy + ivec2(0, -1)).a) - (fetch(xy + ivec2(0, 1)).b - fetch(xy + ivec2(0, 1)).a)) / 2.0;
+        vec3 direction = vec3(p.v[RIM_SURFACE_DIRECTION_X], p.v[RIM_SURFACE_DIRECTION_Y], p.v[RIM_SURFACE_DIRECTION_Z]);
+        vec3 surface = normalize(vec3(-inwards * 2.75 - bumps * p.v[RIM_SURFACE_DETAIL_SCALE], 1.0));
+        float lit = pow(max(0.0, dot(surface, direction)), 1.6);
+        float choke = p.v[RIM_SURFACE_CHOKE];
+        float t = max(depth, 0.0) / p.v[RIM_SURFACE_WIDTH];
+        float held = 1.0 - smoothstep(max(0.0, (choke - 0.3) / 0.7) * 0.95, 1.0, t);
+        float tail = exp(-2.2 * t);
+        float reaches = (choke < 0.3 ? mix(tail, held, choke / 0.3) : held) * (1.0 - smoothstep(1.5, 1.9, t));
+        float catches = clamp(1.0 + (a.b - a.a) * 6.0, 0.3, 1.8);
+        float inside = smoothstep(-1.5, 1.5, depth);
+        o = vec4(lit * reaches * catches * covered * inside, inside, covered, 1);
+    } else if (operation == OP_RIM_STRAND) {
+        // The source packs the wide outline, how far each pixel stands out from the backdrop, and its variance.
+        vec4 surface = loadAux(index);
+        float closeness = a.r;
+        float lit = surface.r;
+        if (surface.b > 0.002 || closeness > 0.002) {
+            float differs = isnan(a.b) || isinf(a.b) ? 0.0 : a.b;
+            float varies = isnan(a.a) || isinf(a.a) ? 1.0 : sqrt(max(0.0, a.a));
+            float strand = clamp((differs - 0.03 - 2.5 * varies) / 0.1, 0.0, 1.0) * smoothstep(0.0, 0.1, closeness) * (1.0 - surface.g);
+            if (strand > 0) {
+                vec2 away = inwardsIn(xy, 0);
+                vec3 direction = vec3(p.v[RIM_STRAND_DIRECTION_X], p.v[RIM_STRAND_DIRECTION_Y], p.v[RIM_STRAND_DIRECTION_Z]);
+                lit += pow(max(0.0, dot(normalize(vec3(-away * 2.75, 1.0)), direction)), 1.6) * strand;
+            }
+        } else {
+            lit = 0;
+        }
+        o = vec4(lit, lit, lit, 1);
+    } else if (operation == OP_VOLUMETRIC_BEAMS) {
+        vec2 here = vec2(xy) + 0.5;
+        vec2 light = vec2(p.v[VOLUMETRIC_BEAMS_LIGHT_X], p.v[VOLUMETRIC_BEAMS_LIGHT_Y]);
+        const int samples = 96;
+        vec2 stepping = (light - here) * p.v[VOLUMETRIC_BEAMS_LENGTH] / float(samples);
+        float jitter = volumetricHash(uint(xy.x) * 73856093u ^ uint(xy.y) * 19349663u);
+        float sum = 0.0, weight = 1.0;
+        for (int i = 0; i < samples; i++) {
+            sum += volumetricEmission(here + stepping * (float(i) + jitter)) * weight;
+            weight *= 0.985;
+        }
+        float gathered = sum / float(samples) * 4.0;
+        o = vec4(gathered, gathered, gathered, 1.0);
     } else if (operation == OP_MIX) {
         float amount = p.v[MIX_AMOUNT];
         o = amount < 0 ? a + loadAux(index) : mix(a, loadAux(index), amount);

@@ -1,6 +1,7 @@
 #include "rendering/RasterOperations.h"
 #include "rendering/GpuOperations.h"
 #include "rendering/RgbSplit.h"
+#include "rendering/FilterLayers.h"
 #include "core/CameraRawTables.h"
 #include "rendering/DeepImage.h"
 #include "PatchPixels.h"
@@ -544,6 +545,12 @@ QImage RasterOperations::adjustment(const QImage &image, const QJsonObject &sett
     const QString kind = settings.value(QStringLiteral("kind")).toString();
     if (kind == "Progressive Blur" || kind == "Bloom / Glow" || kind == "RGB Split")
         return applyFilterLayer(image, settings, origin, unitsPerPixel);
+    // Vignette, Lens Effects, Tonal Contrast (18), Sharpen (19) and Reduce Noise (21): the document is `image`, unless
+    // a canvas size says where it lies (the layer renderer composites at document size, so it is the image).
+    if (kind == "Vignette" || kind == "Lens Effects" || kind == "Tonal Contrast" || kind == "Sharpen" || kind == "Reduce Noise") {
+        const QRectF canvas(-origin / std::max(1e-9, unitsPerPixel), QSizeF(image.size()));
+        return FilterLayers::applyLayer(image, settings, canvas);
+    }
     if (kind == QStringLiteral("Hue/Saturation")) return hueSaturation(image, hueSaturationFromJson(settings));
     if (kind == QStringLiteral("Levels")) return levels(image, levelsFromJson(settings));
     if (kind == QStringLiteral("Curves")) return curves(image, curvesFromJson(settings));

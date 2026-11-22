@@ -120,6 +120,12 @@ ColorPickerDialog::ColorPickerDialog(const QColor &initial, QWidget *parent)
     hex_ = new QLineEdit(this); hex_->setObjectName(QStringLiteral("colorPickerHex")); hex_->setMaxLength(7); hex_->setAccessibleName(tr("Hex color"));
     grid->addWidget(hex_, 3, 1);
     connect(hex_, &QLineEdit::editingFinished, this, &ColorPickerDialog::commitHex);
+    // Each digit typed changes the color, the missing ones read as zeros; R, G and B change with each digit too. Return
+    // in a field confirms the picker, as OK does (mac 60a4f9c).
+    connect(hex_, &QLineEdit::textEdited, this, [this](const QString &text) {
+        // The field keeps what's typed; the rest of the picker follows it.
+        if (const auto typed = palette::fromTypedHex(text)) { typingHex_ = true; hsb_.setRGB(*typed); changed(); typingHex_ = false; }
+    });
     side->addStretch();
     hint_ = new QLabel(tr("Click the canvas to sample"), this); hint_->setObjectName(QStringLiteral("colorPickerHint"));
     QFont small = hint_->font(); small.setPointSizeF(small.pointSizeF() * .85); hint_->setFont(small);
@@ -154,7 +160,7 @@ void ColorPickerDialog::syncControls()
     syncing_ = true;
     const QColor c = currentColor();
     red_->setValue(c.red()); green_->setValue(c.green()); blue_->setValue(c.blue());
-    if (!hex_->hasFocus()) hex_->setText(palette::hex(c));
+    if (!hex_->hasFocus() && !typingHex_) hex_->setText(palette::hex(c));
     QPixmap swatch(64, 64); QPainter p(&swatch);
     p.fillRect(0, 0, 64, 32, c); p.fillRect(0, 32, 64, 32, original_);
     p.setPen(QColor(0, 0, 0, 150)); p.drawRect(0, 0, 63, 63);

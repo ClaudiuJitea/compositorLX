@@ -396,8 +396,7 @@ void ShortcutManager::initDefinitions()
     addEntry(QStringLiteral("Save"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_S));
     addEntry(QStringLiteral("Save As"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S));
     addEntry(QStringLiteral("Export PNG"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
-    addEntry(QStringLiteral("Export JPEG"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_S));
-    addEntry(QStringLiteral("Export As"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_W));
+    addEntry(QStringLiteral("Export As"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_S));
     addEntry(QStringLiteral("Close Project"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_W));
     addEntry(QStringLiteral("Fit Canvas"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_0));
     addEntry(QStringLiteral("Actual Pixels"), QStringLiteral("Menus"), QKeySequence(Qt::CTRL | Qt::Key_1));

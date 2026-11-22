@@ -551,8 +551,9 @@ private slots:
         QCOMPARE(load(16), QStringLiteral("v16"));
         // 27, from the macOS GIF branch's own builds, opens and saves again as the current format.
         QCOMPARE(load(27), QStringLiteral("v17"));
-        for (int version : {0, 18, 26, 28})
-            QCOMPARE(load(version), QStringLiteral("This project uses format version %1. This app supports versions 1–17 and 27.").arg(version));
+        // 1.7.0 reads 18–22 too (mac ProjectManifest.current 22); the message names the newest (mac 7b5ba97 … 3adce92).
+        for (int version : {0, 23, 26, 28})
+            QCOMPARE(load(version), QStringLiteral("This project uses format version %1. This app supports versions 1–22 and 27.").arg(version));
     }
 };
 QTEST_MAIN(TestUpstream158)

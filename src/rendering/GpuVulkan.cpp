@@ -188,7 +188,7 @@ Prepared prepare(const GpuNode &node) {
 }
 bool singleChannelOperation(GpuOp op) {
     return op == GpuOp::Copy || op == GpuOp::BoxBlur || op == GpuOp::Gaussian || op == GpuOp::Morphology ||
-           op == GpuOp::MorphologyStep || op == GpuOp::MorphologyCombine;
+           op == GpuOp::MorphologyStep || op == GpuOp::MorphologyCombine || op == GpuOp::NonlocalMeans;
 }
 bool lensOperation(GpuOp op) { return op >= GpuOp::LensPoint && op <= GpuOp::LensReduce; }
 GpuFormat passFormat(const GpuNode &node, GpuFormat input) {

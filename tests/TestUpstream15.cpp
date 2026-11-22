@@ -641,9 +641,9 @@ class TestUpstream15 : public QObject
         s.createDocument(20, 10, true, 300, QColor(Qt::white));
         QCOMPARE(s.document()->resolution, 300.0);
         QCOMPARE(s.activeLayer()->image.pixelColor(0, 0), QColor(Qt::white));
+        // A new canvas is where its history starts: there is nothing to undo back to (mac 4f9ed78).
+        QVERIFY(!s.canUndo());
         s.undo();
-        QVERIFY(!s.document());
-        s.redo();
         QCOMPARE(s.document()->resolution, 300.0);
     }
     void navigatorGeometryAndMiddleZoom()

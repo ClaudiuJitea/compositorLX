@@ -6,6 +6,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <algorithm>
+#include <functional>
 
 namespace compositor {
 
@@ -204,6 +205,90 @@ public:
         case 35: // Pause
             p.setBrush(ink); p.setPen(Qt::NoPen);
             p.drawRoundedRect(QRectF(7, 5.5, 3.5, 13), 1, 1); p.drawRoundedRect(QRectF(13.5, 5.5, 3.5, 13), 1, 1); break;
+        case 36: case 37: case 38: { // Expand, Contract, Feather Selection (mac SelectionModifyIcon, its 18-unit grid)
+            // Drawn without the 1.15 enlargement every other glyph takes: these fill their square to the edge.
+            p.translate(12, 12); p.scale(1 / 1.15, 1 / 1.15); p.translate(-12, -12);
+            const double u = 24.0 / 18;
+            const auto at = [u](double x, double y) { return QPointF(x * u, y * u); };
+            const auto square = [u](double inset) { return QRectF(inset * u, inset * u, (18 - inset * 2) * u, (18 - inset * 2) * u); };
+            const auto corners = [&](const std::function<void(const std::function<QPointF(double, double)> &)> &draw) {
+                for (const auto &[fx, fy] : {std::pair{false, false}, {true, false}, {false, true}, {true, true}})
+                    draw([&, fx = fx, fy = fy](double x, double y) { return at(fx ? 18 - x : x, fy ? 18 - y : y); });
+            };
+            const QPen line(ink, 1.4 * u, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+            if (kind == 36 || kind == 37) {
+                QPen dashed(ink, 1.3 * u, Qt::CustomDashLine, Qt::FlatCap, Qt::MiterJoin);
+                dashed.setDashPattern(kind == 36 ? QVector<qreal>{1.6 / 1.3, 1.2 / 1.3} : QVector<qreal>{1.8 / 1.3, 1.4 / 1.3});
+                p.setPen(dashed); p.drawRect(square(kind == 36 ? 6.2 : 1.4));
+                p.setPen(line);
+                corners([&](const std::function<QPointF(double, double)> &c) {
+                    if (kind == 36) { p.drawLine(c(4.3, 4.3), c(1.6, 1.6)); p.drawPolyline(QPolygonF{c(1.6, 4.3), c(1.6, 1.6), c(4.3, 1.6)}); }
+                    else { p.drawLine(c(4.3, 4.3), c(7.2, 7.2)); p.drawPolyline(QPolygonF{c(7.2, 4.8), c(7.2, 7.2), c(4.8, 7.2)}); }
+                });
+            } else {
+                p.setPen(Qt::NoPen); p.setBrush(ink); p.drawRoundedRect(square(6), 1 * u, 1 * u);
+                p.setBrush(Qt::NoBrush);
+                QColor middle = ink; middle.setAlphaF(ink.alphaF() * .6f);
+                p.setPen(QPen(middle, 1.3 * u)); p.drawRoundedRect(square(3.8), 2 * u, 2 * u);
+                QColor outer = ink; outer.setAlphaF(ink.alphaF() * .28f);
+                p.setPen(QPen(outer, 1.2 * u)); p.drawRoundedRect(square(1.4), 3.4 * u, 3.4 * u);
+            }
+            break;
+        }
+        case 39: case 40: case 41: case 42: case 43: case 44: { // Align left, horizontal centers, right, top, vertical centers, bottom
+            // A guide line with two bars of different lengths lined up against it (SF Symbols align.horizontal.*, align.vertical.*).
+            const bool vertical = kind >= 42;
+            const int where = (kind - 39) % 3;   // 0 start, 1 middle, 2 end
+            p.save();
+            if (vertical) { p.translate(12, 12); p.rotate(90); p.scale(1, -1); p.translate(-12, -12); }
+            const double line = where == 0 ? 5 : where == 1 ? 12 : 19;
+            p.drawLine(QPointF(line, 4), QPointF(line, 20));
+            p.setPen(Qt::NoPen); p.setBrush(ink);
+            const auto bar = [&](double length, double y) {
+                const double left = where == 0 ? line + 1.8 : where == 1 ? 12 - length / 2 : line - 1.8 - length;
+                p.drawRoundedRect(QRectF(left, y, length, 4), 1, 1);
+            };
+            bar(where == 1 ? 13 : 11, 6.5); bar(where == 1 ? 8 : 6.5, 13.5);
+            p.restore();
+            break;
+        }
+        case 45: case 46: case 47: case 48: { // Distribute horizontal centers, vertical centers, horizontal spacing, vertical spacing
+            const bool vertical = kind == 46 || kind == 48, spacing = kind >= 47;
+            p.save();
+            if (vertical) { p.translate(12, 12); p.rotate(90); p.translate(-12, -12); }
+            if (spacing) { p.drawLine(QPointF(4, 4), QPointF(4, 20)); p.drawLine(QPointF(20, 4), QPointF(20, 20)); }
+            p.setPen(Qt::NoPen); p.setBrush(ink);
+            if (spacing) { p.drawRoundedRect(QRectF(7, 7, 3.5, 10), 1, 1); p.drawRoundedRect(QRectF(13.5, 9, 3.5, 6), 1, 1); }
+            else {
+                p.drawRoundedRect(QRectF(4.5, 8, 3.5, 8), 1, 1); p.drawRoundedRect(QRectF(10.25, 5, 3.5, 14), 1, 1); p.drawRoundedRect(QRectF(16, 9, 3.5, 6), 1, 1);
+                p.setPen(QPen(ink, 1, Qt::DotLine)); p.setBrush(Qt::NoBrush); p.drawLine(QPointF(3, 12), QPointF(21, 12));
+            }
+            p.restore();
+            break;
+        }
+        case 49: case 50: { // Flip Horizontal, Flip Vertical (SF Symbols arrow.left.and.right.righttriangle.left.righttriangle.right)
+            p.save();
+            if (kind == 50) { p.translate(12, 12); p.rotate(90); p.translate(-12, -12); }
+            p.drawLine(QPointF(12, 3.5), QPointF(12, 20.5));
+            p.setBrush(ink); p.drawPolygon(QPolygonF{QPointF(10, 9.5), QPointF(10, 19.5), QPointF(3.5, 19.5)});
+            p.setBrush(Qt::NoBrush); p.drawPolygon(QPolygonF{QPointF(14, 9.5), QPointF(14, 19.5), QPointF(20.5, 19.5)});
+            p.drawLine(QPointF(6, 5), QPointF(18, 5));
+            p.drawPolyline(QPolygonF{QPointF(7.8, 3.2), QPointF(6, 5), QPointF(7.8, 6.8)});
+            p.drawPolyline(QPolygonF{QPointF(16.2, 3.2), QPointF(18, 5), QPointF(16.2, 6.8)});
+            p.restore();
+            break;
+        }
+        case 51: { // New filter layer: a ring around a checkered disc (mac b611179 CheckerCircleIcon)
+            p.drawEllipse(QPointF(12, 12), 7.5, 7.5);
+            p.save();
+            QPainterPath disc; disc.addEllipse(QPointF(12, 12), 5, 5);
+            p.setClipPath(disc);
+            p.setPen(Qt::NoPen); p.setBrush(ink);
+            for (int row = 0; row < 4; ++row) for (int column = 0; column < 4; ++column)
+                if ((row + column) % 2 == 0) p.drawRect(QRectF(7 + column * 2.5, 7 + row * 2.5, 2.5, 2.5));
+            p.restore();
+            break;
+        }
         default: break;
         }
 

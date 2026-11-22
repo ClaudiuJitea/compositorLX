@@ -22,27 +22,37 @@ enum class GpuOp : unsigned {
     GradientMap = 14,
     Morphology = 15,
     RgbSplit = 16,
-    Mix = 17,
-    HueSaturation = 18,
-    BlackWhite = 19,
-    ColorBalance = 20,
-    Clear = 21,
-    MorphologyStep = 22,
-    MorphologyCombine = 23,
-    Bokeh = 24,
-    LensPoint = 25,
-    LensCombine = 26,
-    LensSqueeze = 27,
-    LensStretch = 28,
-    LensStreakBack = 29,
-    LensResample = 30,
-    LensPrism = 31,
-    LensReduce = 32,
-    Noise = 33,
-    Grain = 34,
-    CameraRawLookup = 35,
+    RgbSmear = 17,
+    RgbSpectrum = 18,
+    Mix = 19,
+    HueSaturation = 20,
+    BlackWhite = 21,
+    ColorBalance = 22,
+    Clear = 23,
+    MorphologyStep = 24,
+    MorphologyCombine = 25,
+    Bokeh = 26,
+    LensPoint = 27,
+    LensCombine = 28,
+    LensSqueeze = 29,
+    LensStretch = 30,
+    LensStreakBack = 31,
+    LensResample = 32,
+    LensPrism = 33,
+    LensReduce = 34,
+    Noise = 35,
+    Grain = 36,
+    CameraRawLookup = 37,
+    Sharpen = 38,
+    Vignette = 39,
+    TonalContrast = 40,
+    NonlocalMeans = 41,
+    RimMath = 42,
+    RimSurface = 43,
+    RimStrand = 44,
+    VolumetricBeams = 45,
 };
-inline constexpr unsigned gpuOperationCount = 36;
+inline constexpr unsigned gpuOperationCount = 46;
 
 enum class GpuFormat : unsigned {
     Float32 = 0,
@@ -106,6 +116,8 @@ struct Composite { enum : int { mode = 0, opacity = 1, }; };
 struct Transform { enum : int { m11 = 0, m21 = 1, dx = 2, m12 = 3, m22 = 4, dy = 5, sourceWidth = 6, sourceHeight = 7, smooth = 8, opacity = 9, }; };
 struct Morphology { enum : int { radius = 0, axis = 1, erode = 2, }; };
 struct RgbSplit { enum : int { distance = 0, blur = 1, directionX = 2, directionY = 3, centerX = 4, centerY = 5, reach = 6, radial = 7, spectralSamples = 8, smearSamples = 9, edges = 10, }; };
+struct RgbSmear { enum : int { blur = 0, directionX = 1, directionY = 2, centerX = 3, centerY = 4, reach = 5, radial = 6, smearSamples = 7, edges = 8, pad = 9, }; };
+struct RgbSpectrum { enum : int { distance = 0, directionX = 1, directionY = 2, centerX = 3, centerY = 4, reach = 5, radial = 6, spectralSamples = 7, pad = 8, }; };
 struct Mix { enum : int { amount = 0, }; };
 struct HueSaturation { enum : int { colorize = 0, hue = 1, saturation = 2, lightness = 3, }; };
 struct BlackWhite { enum : int { red = 0, yellow = 1, green = 2, cyan = 3, blue = 4, magenta = 5, tint = 6, tintHue = 7, tintSaturation = 8, }; };
@@ -124,5 +136,13 @@ struct LensReduce { enum : int { factor = 0, sourceWidth = 1, sourceHeight = 2, 
 struct Noise { enum : int { amount = 0, gaussian = 1, monochromatic = 2, seedLow = 3, seedHigh = 4, originX = 5, originY = 6, }; };
 struct Grain { enum : int { amount = 0, size = 1, roughness = 2, seedLow = 3, seedHigh = 4, originX = 5, originY = 6, unitsPerPixel = 7, }; };
 struct CameraRawLookup { enum : int { grid = 0, }; };
+struct Sharpen { enum : int { stage = 0, amount = 1, }; };
+struct Vignette { enum : int { frameX = 0, frameY = 1, frameWidth = 2, frameHeight = 3, amount = 4, midpoint = 5, roundness = 6, feather = 7, highlights = 8, red = 9, green = 10, blue = 11, }; };
+struct TonalContrast { enum : int { amount = 0, shadows = 1, midtones = 2, highlights = 3, }; };
+struct NonlocalMeans { enum : int { search = 0, patch = 1, inverseH2 = 2, allowance = 3, area = 4, }; };
+struct RimMath { enum : int { mode = 0, gain = 1, bias = 2, clamp = 3, red = 4, green = 5, blue = 6, }; };
+struct RimSurface { enum : int { directionX = 0, directionY = 1, directionZ = 2, width = 3, reach = 4, detailScale = 5, choke = 6, }; };
+struct RimStrand { enum : int { directionX = 0, directionY = 1, directionZ = 2, }; };
+struct VolumetricBeams { enum : int { lightX = 0, lightY = 1, side = 2, size = 3, length = 4, shafts = 5, brightest = 6, }; };
 } // namespace GpuParam
 } // namespace compositor

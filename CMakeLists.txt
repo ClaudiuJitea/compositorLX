@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CompositorLX VERSION 0.5.8 LANGUAGES C CXX)
+project(CompositorLX VERSION 0.7.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(FetchContent)
@@ -55,8 +55,12 @@ endif()
 # Foreground segmentation is local and deterministic.  Pin both the runtime
 # and the small U2Net model so packaged builds never depend on a web service.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    # The archive may be given as a local copy (ONNXRUNTIME_ARCHIVE) when the release download is unavailable; the hash
+    # below is checked either way.
+    set(ONNXRUNTIME_ARCHIVE "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz"
+        CACHE STRING "ONNX Runtime 1.23.2 linux-x64 archive (URL or local path)")
     FetchContent_Declare(onnxruntime
-        URL https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz
+        URL "${ONNXRUNTIME_ARCHIVE}"
         URL_HASH SHA256=1fa4dcaef22f6f7d5cd81b28c2800414350c10116f5fdd46a2160082551c5f9b)
     FetchContent_MakeAvailable(onnxruntime)
     set(ONNXRUNTIME_ROOT "${onnxruntime_SOURCE_DIR}")
@@ -83,6 +87,13 @@ if(NOT SUBJECT_MODEL_EXISTING_HASH STREQUAL SUBJECT_MODEL_HASH)
         message(FATAL_ERROR "Could not download the pinned U2Net model: ${SUBJECT_MODEL_ERROR}")
     endif()
 endif()
+# Volumetric Light's depth model: macOS Compositor's DepthMini, converted to ONNX (models/DepthMini-NOTICE.txt).
+set(DEPTH_MODEL "${SUBJECT_MODEL_DIR}/depthmini.onnx")
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/models/depthmini.onnx" DEPTH_MODEL_SOURCE_HASH)
+if(NOT DEPTH_MODEL_SOURCE_HASH STREQUAL "e157ef8daf4d9912c3a878f384d29a0518e41ea58f27958b1ecc0beee4c4bd84")
+    message(FATAL_ERROR "models/depthmini.onnx does not match its pinned SHA-256")
+endif()
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/models/depthmini.onnx" "${DEPTH_MODEL}" COPYONLY)
 set(SUBJECT_MODEL_LICENSE "${SUBJECT_MODEL_DIR}/U2Net-APACHE-2.0.txt")
 if(NOT EXISTS "${SUBJECT_MODEL_LICENSE}")
     file(DOWNLOAD https://raw.githubusercontent.com/xuebinqin/U-2-Net/master/LICENSE "${SUBJECT_MODEL_LICENSE}"
@@ -105,6 +116,9 @@ add_library(compositor_core
     src/io/GifIO.cpp
     src/core/EditorSession.cpp
     src/core/EditorSessionLayers.cpp
+    src/core/ShapeEditing.cpp
+    src/core/LayerDistances.cpp
+    src/core/LayerAlign.cpp
     src/core/EditorSession.h
     src/core/ImageTrim.cpp
     src/core/ImageTrim.h
@@ -133,6 +147,7 @@ add_library(compositor_core
     src/io/ImageImporter.cpp
     src/io/ImageImporter.h
     src/io/PSDReader.cpp
+    src/io/PSDWriter.cpp
     src/io/PSDText.cpp
     src/io/PSDText.h
     src/io/PSDVector.cpp
@@ -156,6 +171,9 @@ add_library(compositor_core
     src/rendering/RgbSplitVulkan.cpp
     src/rendering/RgbSplit.cpp
     src/rendering/LensEffects.cpp
+    src/rendering/FilterLayers.cpp
+    src/rendering/RimLight.cpp
+    src/rendering/VolumetricLight.cpp
     src/rendering/LensEffects.h
     src/rendering/ProgressiveBlur.cpp
     src/rendering/DeepImage.cpp
@@ -284,7 +302,8 @@ if(ONNXRUNTIME_ROOT)
             DESTINATION ${CMAKE_INSTALL_LIBDIR} RENAME libonnxruntime.so.1)
     set_target_properties(compositor-lx PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
 endif()
-install(FILES "${SUBJECT_MODEL}" DESTINATION ${CMAKE_INSTALL_DATADIR}/compositor-lx/models)
+install(FILES "${SUBJECT_MODEL}" "${DEPTH_MODEL}" DESTINATION ${CMAKE_INSTALL_DATADIR}/compositor-lx/models)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/models/DepthMini-NOTICE.txt" DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/compositor-lx)
 install(FILES "${SUBJECT_MODEL_LICENSE}" DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/compositor-lx)
 if(ONNXRUNTIME_ROOT)
     install(FILES "${ONNXRUNTIME_ROOT}/LICENSE" DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/compositor-lx RENAME ONNXRuntime-MIT.txt)

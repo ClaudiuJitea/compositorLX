@@ -38,6 +38,9 @@ struct LensEffectSettings {
     double prismAmount = 80, prismCopies = 5, prismOffset = 6, prismAngle = 180;
     bool prismBothWays = false;
     double prismBlur = 0;
+    // How far the glass splits each copy's red and blue apart, 0–100: hundredths of a percent of the longer side
+    // (0 keeps the copies crisp; 30, the default, splits them 0.3%, the split before 1.5.11 always drew).
+    double prismFringe = 30;
     // Bokeh, always a full lens blur: the discs' size (percent of the longer side), how brightly lights open into
     // them, how much of a disc's light gathers at its rim, and the aperture's shape.
     double bokehRadius = 2, bokehBrightness = 50, bokehRing = 100;
@@ -49,8 +52,10 @@ struct LensEffectSettings {
     // The effect on an 8-bit, 16-bit or HDR layer's pixels, returned in the layer's canonical format. Sizes are
     // proportions of the image, so a smaller preview looks as the result will. Vulkan compute when the renderer allows
     // it (Automatic: a large enough picture), otherwise the CPU, which draws the same; `accelerated` reports the GPU.
+    // `side`: what the sizes are proportions of, in `image`'s pixels, when `image` is only part of the picture (a Lens
+    // Effects layer drawn a piece at a time measures by the document's longer side); 0 for the image's own.
     [[nodiscard]] QImage apply(const QImage &image, RenderBackend backend = RenderBackend::Auto,
-                               bool *accelerated = nullptr) const;
+                               bool *accelerated = nullptr, double side = 0) const;
     bool operator==(const LensEffectSettings &) const = default;
 
     static QString effectName(LensEffect effect);

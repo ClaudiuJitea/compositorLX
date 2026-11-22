@@ -653,7 +653,7 @@ void TestIoAudit::historyEveryLayerEditRoundTripsWithSelection()
         states.push_back({session.document() ? std::optional<Document>(*session.document()) : std::nullopt,
                           session.document() ? session.document()->activeLayerId : std::nullopt});
     };
-    states.push_back({std::nullopt, std::nullopt});
+    // The new canvas is where the history starts (mac 4f9ed78): undo stops there.
     session.createDocument(800, 600); capture();
     session.addBlankLayer(); capture();
     session.addBlankLayer(); capture();
@@ -1003,18 +1003,21 @@ void TestIoAudit::batchImportIsOneUndoEntryAndFailuresAddNone()
     MainWindow::setMessageDialogHook([](const QString &, const QString &) -> std::optional<QMessageBox::StandardButton> { return QMessageBox::Ok; });
     QVERIFY(window.importImageFiles({png, missing, png}));
     EditorSession &session = window.session();
-    QCOMPARE(session.history().undoCount(), 1);
+    // Images opened onto the welcome screen start the document's history (mac 4f9ed78): no step to undo back to nothing.
+    QCOMPARE(session.history().undoCount(), 0);
     QCOMPARE(session.document()->layers.size(), 2);
     const Document imported = *session.document();
-    const auto selection = session.document()->activeLayerId;
-    QCOMPARE(session.history().undoName(), QStringLiteral("Import Images"));
     session.undo();
-    QVERIFY(session.document() == nullptr);
-    session.redo();
     QVERIFY(*session.document() == imported);
-    QCOMPARE(session.document()->activeLayerId, selection);
-    QVERIFY(!window.importImageFiles({missing}));
+    // Into a document that is open, the batch is one undo step, and failures add none.
+    QVERIFY(window.importImageFiles({png, missing, png}));
     QCOMPARE(session.history().undoCount(), 1);
+    QCOMPARE(session.history().undoName(), QStringLiteral("Import Images"));
+    QCOMPARE(session.document()->layers.size(), 4);
+    session.undo();
+    QVERIFY(*session.document() == imported);
+    QVERIFY(!window.importImageFiles({missing}));
+    QCOMPARE(session.history().undoCount(), 0);
 }
 
 void TestIoAudit::importFirstImageDecidesCanvasIgnoringDropPoint()
@@ -1429,7 +1432,7 @@ namespace {
 struct MacShortcut { const char *group; const char *title; int key; int bits; };
 const MacShortcut kMacDefaults[] = {
     {"Menus", "Undo", 'z', 1}, {"Menus", "Redo", 'z', 9}, {"Menus", "New Canvas", 'n', 1}, {"Menus", "Open Project", 'o', 1},
-    {"Menus", "Save", 's', 1}, {"Menus", "Save As", 's', 9}, {"Menus", "Export PNG", 'e', 9}, {"Menus", "Export JPEG", 's', 11},
+    {"Menus", "Save", 's', 1}, {"Menus", "Save As", 's', 9}, {"Menus", "Export PNG", 'e', 9}, {"Menus", "Export As", 's', 11},
     {"Menus", "Close Project", 'w', 1}, {"Menus", "Fit Canvas", '0', 1}, {"Menus", "Actual Pixels", '1', 1}, {"Menus", "Zoom In", '=', 1},
     {"Menus", "Zoom Out", '-', 1}, {"Menus", "Show Transform Controls", 'h', 1}, {"Menus", "Cut", 'x', 1}, {"Menus", "Copy", 'c', 1},
     {"Menus", "Copy Merged", 'c', 9}, {"Menus", "Paste", 'v', 1}, {"Menus", "Fill with Foreground", 0x7f, 2},
@@ -1442,7 +1445,7 @@ const MacShortcut kMacDefaults[] = {
     {"Menus", "Show Grid", '\'', 1}, {"Menus", "Show Guides", ';', 1}, {"Menus", "Show Rulers", 'r', 1}, {"Menus", "Snap", ';', 9},
     {"Menus", "Lock Guides", ';', 3},
     // Added in Compositor 1.5.
-    {"Menus", "Export As", 'w', 11}, {"Menus", "Search Commands", 'f', 1}, {"Menus", "Toggle Fullscreen", 'f', 0},
+    {"Menus", "Search Commands", 'f', 1}, {"Menus", "Toggle Fullscreen", 'f', 0},
     {"Canvas & Layers", "Select tool", 'a', 0}, {"Canvas & Layers", "Move / Transform tool", 'v', 0}, {"Canvas & Layers", "Hand tool", 'h', 0},
     {"Canvas & Layers", "Zoom tool", 'z', 0}, {"Canvas & Layers", "Brush tool", 'b', 0}, {"Canvas & Layers", "Eraser", 'e', 0},
     {"Canvas & Layers", "Spot Healing", 'j', 0}, {"Canvas & Layers", "Clone Stamp", 's', 0}, {"Canvas & Layers", "Type tool", 't', 0},
@@ -1548,7 +1551,7 @@ void TestIoAudit::menuShortcutsMatchMacMenus()
     // The File menu bindings by name.
     const struct { const char *object; QKeySequence sequence; } files[] = {
         {"commandSave", QKeySequence(Qt::CTRL | Qt::Key_S)}, {"commandSaveAs", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S)},
-        {"commandExportPng", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E)}, {"commandExportJpeg", QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_S)},
+        {"commandExportPng", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E)}, {"commandExportAs", QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_S)},
         {"commandOpen", QKeySequence(Qt::CTRL | Qt::Key_O)}, {"commandUndo", QKeySequence(Qt::CTRL | Qt::Key_Z)},
         {"commandRedo", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z)}, {"commandCopyMerged", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C)},
     };
@@ -1635,7 +1638,7 @@ void TestIoAudit::menuStructureMatchesMac()
     struct Expect { const char *menu; const char *item; };
     const Expect expected[] = {
         {"File", "New Canvas"}, {"File", "Open Project"}, {"File", "Open Recent"}, {"File", "Import"}, {"File", "Save"}, {"File", "Save As"},
-        {"File", "Export As"}, {"File", "Export JPEG"}, {"File", "Close Project"}, {"File", "Quit"},
+        {"File", "Export As"}, {"File", "Close Project"}, {"File", "Quit"},
         {"Edit", "Undo"}, {"Edit", "Redo"}, {"Edit", "Cut"}, {"Edit", "Copy"}, {"Edit", "Copy Merged"}, {"Edit", "Paste"}, {"Edit", "Keyboard Shortcuts"},
         {"Edit", "Fill with Foreground Color"}, {"Edit", "Fill with Background Color"}, {"Edit", "Clear Selection Pixels"},
         {"Select", "Select All"}, {"Select", "Deselect"}, {"Select", "Inverse"}, {"Select", "Layer's Pixels"}, {"Select", "Select Subject"},
@@ -1657,14 +1660,14 @@ void TestIoAudit::menuStructureMatchesMac()
     QMenu *filter = topMenu(bar, QStringLiteral("Filter"));
     for (const QString &name : {QStringLiteral("Gaussian Blur"), QStringLiteral("Motion Blur"), QStringLiteral("Vignette")})
         QVERIFY2(menuItem(filter, name), qPrintable(name));
-    // New Adjustment Layer lists all 15 kinds, with a separator before the filters.
+    // New Adjustment Layer lists all 20 kinds, with a separator before the filters (mac 1.7.0).
     QMenu *layer = topMenu(bar, QStringLiteral("Layer"));
     QAction *adjustments = menuItem(layer, QStringLiteral("New Adjustment Layer"));
     QVERIFY(adjustments && adjustments->menu());
     window.session().createDocument(20, 20, true);
     window.syncDocumentViews();
     emit adjustments->menu()->aboutToShow();
-    QCOMPARE(adjustments->menu()->actions().size(), 16);
+    QCOMPARE(adjustments->menu()->actions().size(), 21);
     for (const QString &name : {QStringLiteral("Progressive Blur"), QStringLiteral("Bloom / Glow"), QStringLiteral("RGB Split")}) QVERIFY(menuItem(adjustments->menu(), name));
 }
 
@@ -1676,7 +1679,7 @@ void TestIoAudit::fileMenuEnabledStates()
     QVERIFY(!enabled("commandSave"));
     QVERIFY(!enabled("commandSaveAs"));
     QVERIFY(!enabled("commandExportPng"));
-    QVERIFY(!enabled("commandExportJpeg"));
+    QVERIFY(!enabled("commandExportAs"));
     QVERIFY(!enabled("commandCopyMerged"));
     QVERIFY(!enabled("commandUndo"));
     QVERIFY(window.findChild<QAction *>(QStringLiteral("commandOpen"))->isEnabled());
@@ -1685,7 +1688,7 @@ void TestIoAudit::fileMenuEnabledStates()
     QVERIFY(enabled("commandSave"));
     QVERIFY(enabled("commandSaveAs"));
     QVERIFY(enabled("commandExportPng"));
-    QVERIFY(enabled("commandExportJpeg"));
+    QVERIFY(enabled("commandExportAs"));
     // Copy Merged needs a selection over visible pixels: with none the Mac menu item is disabled too.
     QVERIFY(!enabled("commandCopyMerged"));
 }
@@ -1815,7 +1818,8 @@ void TestIoAudit::rawImportRunsTheDevelopStep()
     QCOMPARE(window.document()->layers.size(), 1);
     QCOMPARE(window.document()->layers.first().name, QFileInfo(sample).completeBaseName());
     QVERIFY(!window.document()->layers.first().image.isNull());
-    QCOMPARE(window.session().history().undoName(), QStringLiteral("Import Images"));
+    // Opened onto the welcome screen, the photo starts the document's history (mac 4f9ed78).
+    QVERIFY(!window.session().canUndo());
 }
 
 void TestIoAudit::rawImportRespectsTheDocumentBudget()

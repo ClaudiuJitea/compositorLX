@@ -23,8 +23,9 @@ for command_name in cmake cpack curl ninja qmake6; do
     }
 done
 
+# ONNXRUNTIME_ARCHIVE: a local copy of the pinned ONNX Runtime archive, when its download is unavailable (hash-checked).
 cmake -S "$source_dir" -B "$work_dir" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_BUILD_TYPE=Release ${ONNXRUNTIME_ARCHIVE:+"-DONNXRUNTIME_ARCHIVE=$ONNXRUNTIME_ARCHIVE"}
 cmake --build "$work_dir" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
 OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" ctest --test-dir "$work_dir" --output-on-failure
 
@@ -41,6 +42,8 @@ curl -fL --retry 3 \
 chmod +x "$tool_dir"/*.AppImage
 
 DESTDIR="$app_dir" cmake --install "$work_dir" --prefix /usr
+# mktemp makes the AppDir 0700; appimagetool refuses an AppDir others could not read and run.
+chmod -R a+rX "$app_dir"
 (
     cd "$work_dir"
     EXTRA_PLATFORM_PLUGINS="libqoffscreen.so${EXTRA_PLATFORM_PLUGINS:+;$EXTRA_PLATFORM_PLUGINS}" \

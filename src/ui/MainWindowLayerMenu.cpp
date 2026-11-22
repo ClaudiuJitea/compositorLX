@@ -1,6 +1,11 @@
 // The Layers panel's right-click menu and whole-layer Copy / Paste (mac NativeLayerList.contextMenu,
 // SelectionClipboard.copySelection / paste and ProjectWorkspace.pasteCopiedLayer).
 #include "ui/MainWindow.h"
+#include <QMessageBox>
+#include <QFileInfo>
+#include <QDir>
+#include <QFileDialog>
+#include "io/ImageExporter.h"
 
 #include "core/EditorSession.h"
 #include "io/ProjectWriter.h"
@@ -55,9 +60,8 @@ void MainWindow::populateLayerContextMenu(QMenu &menu)
         maskTargeted ? tr("Delete Mask") : selectedCount > 1 ? tr("Delete Selected Layers") : tr("Delete Layer"),
         editable, [this] { deleteLayersWithMaskChoice(); });
     menu.addSeparator();
-    add(QStringLiteral("layerMenuClipping"),
-        active && active->maskSourceId ? tr("Release Clipping Mask") : tr("Create Clipping Mask"),
-        active && session_.canToggleClippingMask(active->id), [this] { if (const Layer *layer = session_.activeLayer()) session_.toggleClippingMask(layer->id); });
+    add(QStringLiteral("layerMenuClipping"), session_.selectedClippingTitle(), session_.canToggleSelectedClipping(),
+        [this] { session_.toggleSelectedClipping(); });
     add(QStringLiteral("layerMenuGroup"), tr("Group Selected Layers"),
         document_ && document_->layers.size() < 10000 && selectedCount > 0, [this] { session_.groupSelectedLayers(); });
     if (active && active->group)
@@ -68,6 +72,10 @@ void MainWindow::populateLayerContextMenu(QMenu &menu)
     add(QStringLiteral("layerMenuMoveOut"), tr("Move Out of Folder"), active && active->parentId.has_value(),
         [this] { session_.moveActiveLayerOutOfGroup(); });
     add(QStringLiteral("layerMenuMerge"), session_.mergeTitle(), session_.canMergeLayers(), [this] { session_.mergeLayers(); });
+    // Whichever would change a selected layer, both for a mix; shown, greyed, for layers neither applies to (mac de0a43d).
+    const bool sixteen = session_.canConvertToSixteenBit(), eight = session_.canConvertToEightBit();
+    if (sixteen || !eight) add(QStringLiteral("layerMenuConvert16"), tr("Convert to 16-Bit"), sixteen, [this] { session_.convertLayers(true); });
+    if (eight) add(QStringLiteral("layerMenuConvert8"), tr("Convert to 8-Bit"), true, [this] { session_.convertLayers(false); });
     menu.addSeparator();
 
     const bool canAddMask = session_.canEditMask() && active && active->mask.isNull();
@@ -89,9 +97,10 @@ void MainWindow::populateLayerContextMenu(QMenu &menu)
     add(QStringLiteral("layerMenuLinkMask"), active && !active->mask.isNull() && !active->maskLinked ? tr("Link Mask") : tr("Unlink Mask"),
         document_ && active && !active->mask.isNull() && !active->group && active->adjustment.isEmpty(), [this] { session_.toggleMaskLink(); });
     menu.addSeparator();
-    add(QStringLiteral("layerMenuVisibility"), active && !active->visible ? tr("Show Layer") : tr("Hide Layer"), editable, [this] {
-        if (const Layer *layer = session_.activeLayer()) session_.toggleLayerVisibility(layer->id);
-    });
+    add(QStringLiteral("layerMenuVisibility"), session_.visibilityTitle(), editable, [this] { session_.toggleSelectedLayersVisibility(); });
+    menu.addSeparator();
+    add(QStringLiteral("layerMenuExportPng"), selectedCount > 1 ? tr("Export Layers as PNGs…") : tr("Export Layer as PNG…"), document_ && active,
+        [this] { exportLayersAsPng(); });
 
     if (session_.canEditEffects()) {
         menu.addSeparator();
@@ -162,6 +171,63 @@ bool MainWindow::pasteWholeLayers()
         return copyLayersToTab(ids, currentTab_, false, std::nullopt, tr("Paste"));
     }
     return false;
+}
+
+
+// Defined in MainWindow.cpp, with its dialog hook for tests.
+QMessageBox::StandardButton appMessage(QWidget *parent, const QString &title, const QString &text, const QString &detail,
+                                        QMessageBox::StandardButtons buttons, QMessageBox::StandardButton defaultButton,
+                                        const QHash<int, QString> &labels);
+
+void MainWindow::exportLayersAsPng(const QString &destination)
+{
+    const QString start = document_ && !document_->projectPath.isEmpty() ? QFileInfo(document_->projectPath).absolutePath() : QDir::homePath();
+    if (!document_) return;
+    QSet<QUuid> selected = session_.selectedLayerIds();
+    if (selected.isEmpty() && document_->activeLayerId) selected.insert(*document_->activeLayerId);
+    // Top first, as the panel lists them, so the upper of two layers of the same name keeps it.
+    QVector<const Layer *> layers;
+    for (auto it = document_->layers.crbegin(); it != document_->layers.crend(); ++it) if (selected.contains(it->id)) layers.push_back(&*it);
+    if (layers.isEmpty()) return;
+    QSet<QString> used;
+    QStringList names;
+    for (const Layer *layer : layers) {
+        const QString base = ImageExporter::layerFileName(layer->name);
+        QString name = base;
+        for (int number = 2; used.contains(name.toLower()); ++number) name = QStringLiteral("%1 %2").arg(base).arg(number);
+        used.insert(name.toLower());
+        names << name + QStringLiteral(".png");
+    }
+    QStringList paths;
+    if (layers.size() == 1) {
+        const QString path = !destination.isEmpty() ? destination
+            : QFileDialog::getSaveFileName(this, tr("Export Layer as PNG"), QDir(start).filePath(names.first()), tr("PNG images (*.png)"));
+        if (path.isEmpty()) return;
+        paths << path;
+    } else {
+        const QString folder = !destination.isEmpty() ? destination
+            : QFileDialog::getExistingDirectory(this, tr("Export %1 Layers as PNGs").arg(layers.size()), start);
+        if (folder.isEmpty()) return;
+        for (const QString &name : names) paths << QDir(folder).filePath(name);
+        QStringList existing;
+        for (const QString &path : paths) if (QFileInfo::exists(path)) existing << path;
+        if (!existing.isEmpty()) {
+            const QString text = existing.size() == 1 ? tr("“%1” already exists. Replace it?").arg(QFileInfo(existing.first()).fileName())
+                : tr("%1 of these files already exist in “%2”. Replace them?").arg(existing.size()).arg(QFileInfo(folder).fileName());
+            if (appMessage(this, tr("Export Layers as PNGs"), text, {}, QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes,
+                            {{int(QMessageBox::Yes), tr("Replace")}}) != QMessageBox::Yes) return;
+        }
+    }
+    QStringList empty;
+    for (int i = 0; i < layers.size(); ++i) {
+        QString error;
+        const std::optional<QByteArray> data = ImageExporter::layerPng(*document_, layers[i]->id, &error);
+        if (!data) { if (error.isEmpty()) empty << layers[i]->name; else { appMessage(this, tr("Couldn’t export layers"), error, {}, QMessageBox::Ok, QMessageBox::NoButton, {}); return; } continue; }
+        if (!ImageExporter::writeAtomically(*data, paths[i], &error)) { appMessage(this, tr("Couldn’t export layers"), error, {}, QMessageBox::Ok, QMessageBox::NoButton, {}); return; }
+    }
+    if (!empty.isEmpty())
+        appMessage(this, empty.size() == 1 ? tr("“%1” has nothing to export").arg(empty.first()) : tr("%1 layers have nothing to export").arg(empty.size()),
+                    tr("A layer with no visible pixels, such as an adjustment layer, isn’t saved as a PNG."), {}, QMessageBox::Ok, QMessageBox::NoButton, {});
 }
 
 } // namespace compositor

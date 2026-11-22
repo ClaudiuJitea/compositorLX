@@ -83,6 +83,8 @@ public:
     [[nodiscard]] bool isMenuBarVisible() const;
     void updateMenuRestoreButton();
     void syncDocumentViews(bool compositeChanged = true);
+    // The status bar's canvas size, and the selection's size and feather.
+    void updateStatusDimensions();
     // The Layers panel's right-click menu for the active layer (mac NativeLayerList.contextMenu), and the row selection a
     // right-click makes first. Both are used by the panel and by tests.
     void populateLayerContextMenu(QMenu &menu);
@@ -187,6 +189,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    QToolButton *alignButton_ = nullptr;
     // Destructive filter previews (C1). Large layers render on a worker from a snapshot of the document and only the
     // newest result is shown; small layers, and the final render when the dialog closes, run synchronously.
     void previewFilter(QWidget *dialog, const QUuid &target, const Layer &original,
@@ -253,6 +256,14 @@ private:
     int layerPanScroll_ = 0;
     std::optional<QUuid> revealedLayer_;
     void tonalContrastDialog();
+    // Filter › Sharpen and Reduce Noise (mac 1.5.10, 1.6.2), as filters and as adjustment layers.
+    void sharpenDialog();
+    void reduceNoiseDialog();
+    // Filter › Rim Light (mac b9a0ed8) and Filter › Volumetric Light (mac 1405545 …).
+    void rimLightDialog();
+    void volumetricLightDialog();
+    // Opens the panel that edits an adjustment layer of `kind` (Layer › Edit Adjustment, a double-click, a new layer).
+    void editAdjustmentLayer(const QString &kind);
     void removeBackgroundDialog();
     void keyboardShortcutsDialog();
     void selectSubjectAction();
@@ -269,6 +280,9 @@ private:
     void copyWholeLayers();
     bool pasteWholeLayers();
     void deleteLayersWithMaskChoice();
+    // The Layers panel's Export Layer as PNG… / Export Layers as PNGs… (mac 0673a4a): each selected layer on its own,
+    // trimmed to its pixels and named after it; one to a file, several to a folder. `destination` skips the panel (tests).
+    void exportLayersAsPng(const QString &destination = {});
     void showAbout();
     void showAboutQt();
     void checkForUpdates();
@@ -365,6 +379,20 @@ private:
     QDoubleSpinBox *brushSmoothingField_ = nullptr;
     QDoubleSpinBox *shapeRadiusField_ = nullptr;
     QDoubleSpinBox *shapeLineWidthField_ = nullptr;
+    // The Shape bar's Fill and Stroke swatches and the inside stroke's width (mac 3adce92).
+    QToolButton *shapeFillSwatch_ = nullptr, *shapeStrokeSwatch_ = nullptr;
+    QLabel *shapeFillLabel_ = nullptr, *shapeStrokeLabel_ = nullptr;
+    QDoubleSpinBox *shapeStrokeWidthField_ = nullptr;
+    ScrubLabel *shapeStrokeWidthLabel_ = nullptr;
+    // Shows the selected shape's (or line's) values on the Shape bar, or the next shape's, and which controls apply.
+    void updateShapeBar();
+    // A swatch's color picker: the selected shape follows it while open, one edit on OK, nothing on Cancel.
+    void pickShapeColor(bool fill);
+    // The layer the Shape tool last took its kind from, so it adopts a selected shape's kind only as the selection moves.
+    std::optional<QUuid> shapeKindAdoptedFor_;
+    QToolButton *filterLayerMenuButton_ = nullptr;
+    // Alt was held as the left button went down on the Layers panel: a drag from that press is a copy.
+    bool layerDragAltAtPress_ = false;
     QSpinBox *wandToleranceField_ = nullptr;
     QSpinBox *objectEdgeOffsetField_ = nullptr;
     QSpinBox *selectionAmountField_ = nullptr;

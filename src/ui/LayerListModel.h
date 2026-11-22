@@ -54,6 +54,8 @@ public:
     bool dropMimeData(const QMimeData *data, Qt::DropAction action, int row, int column,
                       const QModelIndex &parent) override;
     [[nodiscard]] Qt::DropActions supportedDropActions() const override { return Qt::MoveAction | Qt::CopyAction; }
+    // The next drop from the list copies whatever action Qt settles on: an Alt-drag (mac 8e2659d).
+    void setDropCopies(bool copies) { dropCopies_ = copies; }
     [[nodiscard]] Qt::DropActions supportedDragActions() const override { return Qt::MoveAction | Qt::CopyAction; }
 
     [[nodiscard]] bool canCopyMask(const QUuid &sourceId, const QUuid &targetId) const;
@@ -69,6 +71,7 @@ signals:
     void effectDropRequested(const QUuid &sourceId, LayerEffectKind kind, const QUuid &targetId);
 
 private:
+    bool dropCopies_ = false;
     std::optional<QUuid> maskAlone_;
     [[nodiscard]] int layerIndex(int row) const;
     [[nodiscard]] QVector<int> visibleLayerIndexes() const;

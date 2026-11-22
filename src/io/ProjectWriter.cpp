@@ -94,6 +94,12 @@ QJsonObject shapeObject(const LayerShapeStyle &style)
     if (style.lineWidth) obj.insert(QStringLiteral("lineWidth"), *style.lineWidth);
     if (style.start) obj.insert(QStringLiteral("start"), QJsonArray{style.start->x(), style.start->y()});
     if (style.end) obj.insert(QStringLiteral("end"), QJsonArray{style.end->x(), style.end->y()});
+    if (style.strokeWidth) {
+        obj.insert(QStringLiteral("strokeWidth"), *style.strokeWidth);
+        obj.insert(QStringLiteral("strokeRed"), style.strokeRed);
+        obj.insert(QStringLiteral("strokeGreen"), style.strokeGreen);
+        obj.insert(QStringLiteral("strokeBlue"), style.strokeBlue);
+    }
     return obj;
 }
 
@@ -292,6 +298,8 @@ void validateAdjustmentSettings(const QJsonObject &adj, int version)
     if (isVersion9Adjustment(*kind) && version < 9) {
         fail(QStringLiteral("%1 adjustment requires format version 9; version %2 cannot contain blurs or noise.").arg(kindStr).arg(version));
     }
+    if (adjustmentRequiredVersion(adj) > version)
+        fail(QStringLiteral("%1 layers require format version %2; this document is version %3.").arg(kindStr).arg(adjustmentRequiredVersion(adj)).arg(version));
 
     if (const QString problem = adjustmentJsonError(adj); !problem.isEmpty()) fail(problem);
 
@@ -366,19 +374,14 @@ int ProjectWriter::minimumRequiredVersion(const Document &document)
             minRequired = std::max(minRequired, layer.group ? 6 : 4);
         }
         if (layer.maskSourceId.has_value()) minRequired = std::max(minRequired, 5);
-        if (!layer.adjustment.isEmpty()) {
-            minRequired = std::max(minRequired, 7);
-            const auto kind = adjustmentKindFromString(layer.adjustment.value(QStringLiteral("kind")).toString());
-            if (kind && isVersion9Adjustment(*kind)) {
-                minRequired = std::max(minRequired, 9);
-            }
-        }
+        if (!layer.adjustment.isEmpty()) minRequired = std::max(minRequired, adjustmentRequiredVersion(layer.adjustment));
         if (layer.adjustment.contains(QStringLiteral("filterLayerSettings")) ||
             (adjustmentKindFromString(layer.adjustment.value("kind").toString()) &&
              isVersion16Adjustment(*adjustmentKindFromString(layer.adjustment.value("kind").toString())))) minRequired = std::max(minRequired, 16);
         if (layer.shapeStyle && (layer.shapeStyle->lineStyle || layer.shapeStyle->lineCap)) minRequired = std::max(minRequired, 15);
         if (layer.group && layer.opacity < 0.999999) minRequired = std::max(minRequired, 8);
         if (layer.shapeStyle && layer.shapeStyle->smoothing.value_or(false)) minRequired = std::max(minRequired, 14);
+        if (layer.shapeStyle && layer.shapeStyle->strokeWidth) minRequired = std::max(minRequired, 22);
         if (DeepImage::isDeep(layer.image)) minRequired = std::max(minRequired, DeepImage::isHDR(layer.image) ? 13 : 12);
         if (layer.text) minRequired = std::max(minRequired, layer.text->requiredFormatVersion());
     }
@@ -389,7 +392,7 @@ int ProjectWriter::minimumRequiredVersion(const Document &document)
 int ProjectWriter::computeTargetVersion(const Document &document)
 {
     const int minRequired = minimumRequiredVersion(document);
-    return (document.formatVersion >= 1 && document.formatVersion <= 17)
+    return (document.formatVersion >= 1 && document.formatVersion <= currentVersion)
                ? document.formatVersion
                : std::max(minRequired, 9);
 }
@@ -611,6 +614,8 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
             fail(QStringLiteral("The layer image requires a newer project format version."));
         if (layer.shapeStyle && (layer.shapeStyle->lineStyle || layer.shapeStyle->lineCap) && targetVersion < 15)
             fail(QStringLiteral("Line styles require format version 15"));
+        if (layer.shapeStyle && layer.shapeStyle->strokeWidth && targetVersion < 22)
+            fail(QStringLiteral("shape strokes require format version 22; this document is version %1.").arg(targetVersion));
         if(layer.shapeStyle&&layer.shapeStyle->smoothing.value_or(false)&&targetVersion<14)
             fail(QStringLiteral("Smooth corners require project format version 14."));
 

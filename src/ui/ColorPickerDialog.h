@@ -34,6 +34,7 @@ signals:
     void currentColorChanged(const QColor &color);
 
 private:
+    bool typingHex_ = false;
     friend class ColorPickerField;
     friend class ColorHueStrip;
     void changed(bool fromHex = false);

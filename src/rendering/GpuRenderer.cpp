@@ -42,10 +42,11 @@ bool environmentBackend(RenderBackend *value) {
 QString summary(const std::vector<GpuNode> &nodes, int output) {
     static const char *names[] = {"Source", "Copy", "Invert", "Exposure", "Lookup", "Cube", "BoxBlur", "Gaussian",
                                   "Mask", "Bloom", "MotionBlur", "ProgressiveMix", "Composite", "Transform",
-                                  "GradientMap", "Morphology", "RgbSplit", "Mix", "HueSaturation", "BlackWhite",
+                                  "GradientMap", "Morphology", "RgbSplit", "RgbSmear", "RgbSpectrum", "Mix", "HueSaturation", "BlackWhite",
                                   "ColorBalance", "Clear", "MorphologyStep", "MorphologyCombine", "Bokeh",
                                   "LensPoint", "LensCombine", "LensSqueeze", "LensStretch", "LensStreakBack",
-                                  "LensResample", "LensPrism", "LensReduce", "Noise", "Grain", "CameraRawLookup"};
+                                  "LensResample", "LensPrism", "LensReduce", "Noise", "Grain", "CameraRawLookup",
+                                  "Sharpen", "Vignette", "TonalContrast", "NonlocalMeans", "RimMath", "RimSurface", "RimStrand", "VolumetricBeams"};
     static_assert(std::size(names) == gpuOperationCount);
     std::map<QString, int> counts;
     for (int i = 0; i <= output && i < int(nodes.size()); ++i)

@@ -93,7 +93,60 @@ QJsonObject completedAdjustmentJson(const QJsonObject &adjustment)
             map.insert(end, filled(map.value(end).toObject(), color(end == QStringLiteral("shadows") ? 0 : 1, end == QStringLiteral("shadows") ? 0 : 1, end == QStringLiteral("shadows") ? 0 : 1)));
         result.insert(QStringLiteral("gradientMapSettings"), map);
     }
+    // The filter layers' own objects, each key in place with its filter's default (mac encodes every member).
+    if (result.value(QStringLiteral("filterLayerSettings")).isObject()) {
+        QJsonObject f = result.value(QStringLiteral("filterLayerSettings")).toObject();
+        const auto completeIn = [&](const QString &key, const QJsonObject &defaults) {
+            if (f.contains(key)) f.insert(key, filled(f.value(key).toObject(), defaults));
+        };
+        completeIn(QStringLiteral("vignette"), {{QStringLiteral("amount"), 35.0}, {QStringLiteral("color"), color(0, 0, 0)},
+            {QStringLiteral("midpoint"), 50.0}, {QStringLiteral("roundness"), 100.0}, {QStringLiteral("feather"), 60.0}, {QStringLiteral("highlights"), 25.0}});
+        if (f.contains(QStringLiteral("vignette"))) {
+            QJsonObject v = f.value(QStringLiteral("vignette")).toObject();
+            v.insert(QStringLiteral("color"), filled(v.value(QStringLiteral("color")).toObject(), color(0, 0, 0)));
+            f.insert(QStringLiteral("vignette"), v);
+        }
+        completeIn(QStringLiteral("tonal"), {{QStringLiteral("amount"), 50.0}, {QStringLiteral("radius"), 16.0}, {QStringLiteral("shadows"), 40.0},
+            {QStringLiteral("midtones"), 60.0}, {QStringLiteral("highlights"), 30.0}});
+        completeIn(QStringLiteral("sharpen"), {{QStringLiteral("amount"), 100.0}, {QStringLiteral("radius"), 1.0}});
+        completeIn(QStringLiteral("reduceNoise"), {{QStringLiteral("strength"), 50.0}, {QStringLiteral("details"), 50.0}, {QStringLiteral("color"), 50.0}});
+        completeIn(QStringLiteral("lens"), lensSettingsJson(LensEffectSettings()));
+        result.insert(QStringLiteral("filterLayerSettings"), f);
+    }
     return result;
+}
+
+QJsonObject lensSettingsJson(const LensEffectSettings &settings)
+{
+    return {{QStringLiteral("effect"), LensEffectSettings::effectName(settings.effect)}, {QStringLiteral("threshold"), settings.threshold},
+            {QStringLiteral("flareAmount"), settings.flareAmount}, {QStringLiteral("flareLength"), settings.flareLength},
+            {QStringLiteral("flareBlue"), settings.flareBlue}, {QStringLiteral("starAmount"), settings.starAmount},
+            {QStringLiteral("starLength"), settings.starLength}, {QStringLiteral("starPoints"), settings.starPoints},
+            {QStringLiteral("starAngle"), settings.starAngle}, {QStringLiteral("mistStrength"), settings.mistStrength},
+            {QStringLiteral("mistSize"), settings.mistSize}, {QStringLiteral("prismAmount"), settings.prismAmount},
+            {QStringLiteral("prismCopies"), settings.prismCopies}, {QStringLiteral("prismOffset"), settings.prismOffset},
+            {QStringLiteral("prismAngle"), settings.prismAngle}, {QStringLiteral("prismBothWays"), settings.prismBothWays},
+            {QStringLiteral("prismBlur"), settings.prismBlur}, {QStringLiteral("prismFringe"), settings.prismFringe},
+            {QStringLiteral("bokehRadius"), settings.bokehRadius}, {QStringLiteral("bokehBrightness"), settings.bokehBrightness},
+            {QStringLiteral("bokehRing"), settings.bokehRing}, {QStringLiteral("bokehShape"), LensEffectSettings::shapeName(settings.bokehShape)}};
+}
+
+LensEffectSettings lensSettingsFromJson(const QJsonObject &object)
+{
+    LensEffectSettings s;
+    const auto read = [&](const char *key, double &into) { if (object.value(QLatin1String(key)).isDouble()) into = object.value(QLatin1String(key)).toDouble(); };
+    for (LensEffect effect : LensEffectSettings::effects)
+        if (object.value(QStringLiteral("effect")).toString() == LensEffectSettings::effectName(effect)) s.effect = effect;
+    for (BokehShape shape : LensEffectSettings::shapes)
+        if (object.value(QStringLiteral("bokehShape")).toString() == LensEffectSettings::shapeName(shape)) s.bokehShape = shape;
+    read("threshold", s.threshold); read("flareAmount", s.flareAmount); read("flareLength", s.flareLength); read("flareBlue", s.flareBlue);
+    read("starAmount", s.starAmount); read("starLength", s.starLength); read("starAngle", s.starAngle);
+    if (object.value(QStringLiteral("starPoints")).isDouble()) s.starPoints = object.value(QStringLiteral("starPoints")).toInt(6);
+    read("mistStrength", s.mistStrength); read("mistSize", s.mistSize); read("prismAmount", s.prismAmount); read("prismCopies", s.prismCopies);
+    read("prismOffset", s.prismOffset); read("prismAngle", s.prismAngle); read("prismBlur", s.prismBlur); read("prismFringe", s.prismFringe);
+    if (object.value(QStringLiteral("prismBothWays")).isBool()) s.prismBothWays = object.value(QStringLiteral("prismBothWays")).toBool();
+    read("bokehRadius", s.bokehRadius); read("bokehBrightness", s.bokehBrightness); read("bokehRing", s.bokehRing);
+    return s;
 }
 
 QString adjustmentJsonError(const QJsonObject &adjustment)
@@ -115,6 +168,63 @@ QString adjustmentJsonError(const QJsonObject &adjustment)
         }
         for (const char *key : {"progressiveRadial", "progressiveInverted", "rgbSplitRadial"})
             if (f.contains(QLatin1String(key)) && !f.value(QLatin1String(key)).isBool()) return QStringLiteral("Invalid filter layer toggle");
+        // The objects of versions 18, 19 and 21 (mac VignetteLayerSettings, TonalLayerSettings, SharpenLayerSettings,
+        // ReduceNoiseLayerSettings): synthesized Codable, so every key is required, each within its filter's range.
+        // Lens Effects reads each setting it finds and defaults the rest (LensEffectSettings.init(from:)).
+        const auto object = [&](const char *name, std::initializer_list<Range> ranges) -> QString {
+            if (!f.contains(QLatin1String(name))) return {};
+            if (!f.value(QLatin1String(name)).isObject()) return QStringLiteral("Invalid %1 settings").arg(QLatin1String(name));
+            const QJsonObject o = f.value(QLatin1String(name)).toObject();
+            for (const Range &r : ranges) {
+                const QJsonValue v = o.value(QLatin1String(r.key));
+                if (!finite(v) || v.toDouble() < r.lo || v.toDouble() > r.hi)
+                    return QStringLiteral("Filter layer parameter out of range: %1.%2").arg(QLatin1String(name), QLatin1String(r.key));
+            }
+            return {};
+        };
+        for (const QString &problem : {
+                 object("vignette", {{"amount", 0, 100}, {"midpoint", 0, 100}, {"roundness", -100, 100}, {"feather", 0, 100}, {"highlights", 0, 100}}),
+                 object("tonal", {{"amount", 0, 100}, {"radius", 1, 100}, {"shadows", -100, 100}, {"midtones", -100, 100}, {"highlights", -100, 100}}),
+                 object("sharpen", {{"amount", 0, 300}, {"radius", 0.1, 20}}),
+                 object("reduceNoise", {{"strength", 0, 100}, {"details", 0, 100}, {"color", 0, 100}})})
+            if (!problem.isEmpty()) return problem;
+        if (f.contains(QStringLiteral("vignette"))) {
+            const QJsonObject c = f.value(QStringLiteral("vignette")).toObject().value(QStringLiteral("color")).toObject();
+            for (const char *channel : {"red", "green", "blue"}) {
+                const QJsonValue v = c.value(QLatin1String(channel));
+                if (!finite(v) || v.toDouble() < 0 || v.toDouble() > 1) return QStringLiteral("Vignette color out of range");
+            }
+        }
+        if (f.contains(QStringLiteral("lens"))) {
+            if (!f.value(QStringLiteral("lens")).isObject()) return QStringLiteral("Invalid lens settings");
+            const QJsonObject lens = f.value(QStringLiteral("lens")).toObject();
+            for (const Range &r : {Range{"threshold", 50, 100}, Range{"flareAmount", 0, 100}, Range{"flareLength", 1, 100},
+                     Range{"flareBlue", 0, 100}, Range{"starAmount", 0, 100}, Range{"starLength", 2, 40}, Range{"starAngle", -180, 180},
+                     Range{"mistStrength", 0, 100}, Range{"mistSize", 0, 100}, Range{"prismAmount", 0, 100}, Range{"prismCopies", 1, 8},
+                     Range{"prismOffset", 0, 50}, Range{"prismAngle", -180, 180}, Range{"prismBlur", 0, 100}, Range{"prismFringe", 0, 100},
+                     Range{"bokehRadius", 0.5, 6}, Range{"bokehBrightness", 0, 100}, Range{"bokehRing", 0, 100}}) {
+                const QJsonValue v = lens.value(QLatin1String(r.key));
+                if (!v.isUndefined() && (!finite(v) || v.toDouble() < r.lo || v.toDouble() > r.hi))
+                    return QStringLiteral("Lens Effects parameter out of range: %1").arg(QLatin1String(r.key));
+            }
+            if (lens.contains(QStringLiteral("prismCopies")) && std::round(lens.value(QStringLiteral("prismCopies")).toDouble()) != lens.value(QStringLiteral("prismCopies")).toDouble())
+                return QStringLiteral("Lens Effects prismCopies must be whole");
+            if (lens.contains(QStringLiteral("starPoints"))) {
+                const QJsonValue v = lens.value(QStringLiteral("starPoints"));
+                const double points = v.toDouble(-1);
+                if (!v.isDouble() || (points != 4 && points != 6 && points != 8 && points != 12 && points != 14))
+                    return QStringLiteral("Lens Effects starPoints must be 4, 6, 8, 12 or 14");
+            }
+            if (lens.contains(QStringLiteral("prismBothWays")) && !lens.value(QStringLiteral("prismBothWays")).isBool())
+                return QStringLiteral("Invalid Lens Effects toggle");
+            static const QStringList effects{QStringLiteral("Anamorphic Flare"), QStringLiteral("Starburst"), QStringLiteral("Mist"),
+                                             QStringLiteral("Prism"), QStringLiteral("Bokeh")};
+            static const QStringList shapes{QStringLiteral("Round"), QStringLiteral("Hexagon"), QStringLiteral("Oval"), QStringLiteral("Cat's Eye")};
+            if (lens.contains(QStringLiteral("effect")) && !effects.contains(lens.value(QStringLiteral("effect")).toString()))
+                return QStringLiteral("Unknown Lens Effects effect");
+            if (lens.contains(QStringLiteral("bokehShape")) && !shapes.contains(lens.value(QStringLiteral("bokehShape")).toString()))
+                return QStringLiteral("Unknown Lens Effects bokeh shape");
+        }
     }
     const QJsonObject value = completedAdjustmentJson(adjustment);
     const auto number = [&](const QJsonObject &object, const char *key) { return object.value(QLatin1String(key)).toDouble(); };

@@ -2,6 +2,7 @@
 
 #include <QJsonObject>
 #include <QString>
+#include "rendering/LensEffects.h"
 
 namespace compositor {
 
@@ -14,5 +15,10 @@ namespace compositor {
 // The first reason macOS (LayerAdjustment.isValid) would refuse this adjustment, or an empty string. Checked on the
 // completed object, so it covers Levels, Curves, Exposure, Gradient Map, Grain and Hue/Saturation ranges too.
 [[nodiscard]] QString adjustmentJsonError(const QJsonObject &adjustment);
+
+// A Lens Effects layer's `lens` object (mac LensEffectSettings Codable): every setting, by its macOS name.
+[[nodiscard]] QJsonObject lensSettingsJson(const LensEffectSettings &settings);
+// Each setting `object` has, its default where it has none, as macOS reads it.
+[[nodiscard]] LensEffectSettings lensSettingsFromJson(const QJsonObject &object);
 
 } // namespace compositor

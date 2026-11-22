@@ -11,6 +11,11 @@
 #include "rendering/GpuRenderer.h"
 #include "rendering/LayerEffectsRenderer.h"
 #include "rendering/LayerRenderer.h"
+#include "rendering/DeepImage.h"
+#include "rendering/VolumetricLight.h"
+#include "rendering/RimLight.h"
+#include "rendering/RgbSplit.h"
+#include "rendering/FilterLayers.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QJsonObject>
@@ -197,6 +202,65 @@ int main(int argc, char **argv)
         return 0;
     }
     // --survey: CPU times of the other filters, to see which are worth moving.
+    // --upstream170: the work macOS Compositor 1.7.0 added or changed, CPU against Vulkan where both exist.
+    if (app.arguments().contains(QStringLiteral("--upstream170"))) {
+        const QImage image = photo(w, h, 5);
+        const auto row = [&](const char *name, const std::function<QImage(bool gpu)> &run) {
+            QImage cpu, gpu; bool accelerated = false;
+            qputenv("COMPOSITOR_RENDER_BACKEND", "cpu");
+            const double cpuMs = timed([&] { return run(false); }, &cpu, nullptr);
+            qputenv("COMPOSITOR_RENDER_BACKEND", "vulkan");
+            const double gpuMs = timed([&] { return run(true); }, &gpu, &accelerated);
+            qunsetenv("COMPOSITOR_RENDER_BACKEND");
+            std::printf("| %s | %.0f | %s | %s | %d |\n", name, cpuMs, accelerated ? qPrintable(QString::number(gpuMs, 'f', 0)) : "n/a",
+                        accelerated ? qPrintable(QStringLiteral("%1×").arg(cpuMs / gpuMs, 0, 'f', 1)) : "–", difference(cpu, gpu));
+            std::fflush(stdout);
+        };
+        SharpenSettings sharpen; sharpen.amount = 100; sharpen.radius = 3;
+        row("Sharpen (100, radius 3)", [&](bool gpu) {
+            bool used = false; const QImage out = FilterLayers::sharpen(image, sharpen, 1, gpu ? RenderBackend::Vulkan : RenderBackend::Cpu, &used);
+            if (gpu) { GpuExecution e; e.accelerated = used; GpuRenderer::record(e); } return out; });
+        ReduceNoiseSettings noise;
+        row("Reduce Noise (50, 50, 50)", [&](bool gpu) {
+            const QImage out = FilterLayers::reduceNoise(image, noise);
+            GpuExecution e; e.accelerated = gpu && GpuRenderer::backend() != RenderBackend::Cpu; GpuRenderer::record(e); return out; });
+        RgbSplitSettings split; split.distance = 10; split.blur = 20; split.angle = 30;
+        row("RGB Split with blur 20 (two passes)", [&](bool gpu) {
+            RgbSplitExecution report; const QImage out = split.apply(image, 0, gpu ? RgbSplitBackend::Vulkan : RgbSplitBackend::Cpu, &report);
+            GpuExecution e; e.accelerated = report.backend == RgbSplitBackend::Vulkan; GpuRenderer::record(e); return out; });
+        QImage coverage(w, h, QImage::Format_Grayscale8); coverage.fill(0);
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) if (std::hypot(x - w / 2.0, y - h / 2.0) < h * .35) coverage.scanLine(y)[x] = 255;
+        RimLightSettings rim; rim.lights.push_back(rim.nextLight());
+        row("Rim Light (two lights, given subject)", [&](bool gpu) {
+            bool used = false; const QImage out = RimLighting::applyWithSubject(image, coverage, rim, gpu ? RenderBackend::Vulkan : RenderBackend::Cpu, &used);
+            GpuExecution e; e.accelerated = used; GpuRenderer::record(e); return out; });
+        const QImage small = image.scaled(w / 2, h / 2).convertToFormat(QImage::Format_RGBA32FPx4_Premultiplied);
+        const std::vector<float> subject(size_t(w / 2) * (h / 2), 0.f);
+        VolumetricLightSettings volumetric; volumetric.length = 80; volumetric.shafts = 40;
+        row("Volumetric Light beams (half size)", [&](bool gpu) {
+            bool used = false;
+            const std::vector<float> out = VolumetricLighting::beams(small, subject, 1, QPointF(w / 4.0, h / 8.0), std::max(w, h), volumetric,
+                                                                      gpu ? RenderBackend::Vulkan : RenderBackend::Cpu, &used);
+            GpuExecution e; e.accelerated = used; GpuRenderer::record(e);
+            QImage plane(w / 2, h / 2, QImage::Format_Grayscale8);
+            for (int y = 0; y < h / 2; ++y) for (int x = 0; x < w / 2; ++x) plane.scanLine(y)[x] = uchar(std::clamp(out[size_t(y) * (w / 2) + x] * 255.f, 0.f, 255.f));
+            return plane; });
+        // The stroke effect's reach, before (square, two sliding windows) and since 1.7 (true distance), CPU only.
+        std::vector<float> disc(size_t(w) * h);
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) disc[size_t(y) * w + x] = std::hypot(x - w / 2.0, y - h / 2.0) < h * .35 ? 1.f : 0.f;
+        for (const bool round : {false, true}) {
+            std::vector<double> times;
+            for (int i = 0; i < 3; ++i) {
+                QElapsedTimer t; t.start();
+                if (round) (void)LayerEffectsRenderer::edgeDistances(disc, w, h, false, 26);
+                else (void)LayerEffectsRenderer::extreme(disc, w, h, 24, false);
+                times.push_back(t.nsecsElapsed() / 1e6);
+            }
+            std::sort(times.begin(), times.end());
+            std::printf("| Stroke 24 px reach, %s (CPU) | %.0f | – | – | – |\n", round ? "round (1.7)" : "square (before)", times[1]);
+        }
+        return 0;
+    }
     if (app.arguments().contains(QStringLiteral("--survey"))) {
         qputenv("COMPOSITOR_RENDER_BACKEND", "cpu");
         const QImage image = photo(w, h, 2);

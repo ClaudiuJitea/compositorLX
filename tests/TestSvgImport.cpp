@@ -289,14 +289,9 @@ void TestSvgImport::testEditorSessionInsertSvgLifecycle()
     QCOMPARE(emptySession.document()->layers.size(), 1);
     QCOMPARE(emptySession.document()->layers[0].image.size(), QSize(200, 100));
     QVERIFY(emptySession.sessionRevision() > initialRev);
-    QVERIFY(emptySession.canUndo());
-
-    // Test Undo / Redo
-    const quint64 beforeUndoRev = emptySession.sessionRevision();
+    // Opening onto the welcome screen is where the document's history starts (mac 4f9ed78): nothing to undo.
+    QVERIFY(!emptySession.canUndo());
     emptySession.undo();
-    QVERIFY(emptySession.sessionRevision() > beforeUndoRev);
-    // After undoing the document creation edit
-    emptySession.redo();
     QVERIFY(emptySession.hasDocument());
     QCOMPARE(emptySession.document()->layers.size(), 1);
 

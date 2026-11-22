@@ -646,6 +646,24 @@ struct LayerShapeStyle {
     std::optional<QString> lineCap;
     std::optional<QPointF> start;
     std::optional<QPointF> end;
+    // A rectangle or ellipse's inside stroke (version 22): its width in document pixels and its color. None: no stroke.
+    std::optional<double> strokeWidth;
+    double strokeRed = 0.0, strokeGreen = 0.0, strokeBlue = 0.0;
+    bool operator==(const LayerShapeStyle &) const = default;
+    [[nodiscard]] QColor color() const { return QColor::fromRgbF(float(red), float(green), float(blue)); }
+    [[nodiscard]] std::optional<QColor> strokeColor() const {
+        if (!strokeWidth) return std::nullopt;
+        return QColor::fromRgbF(float(strokeRed), float(strokeGreen), float(strokeBlue));
+    }
+    // Remembers a stroke, or forgets it when the width is 0 (mac setStroke). Lines have none: their thickness is
+    // `lineWidth`.
+    void setStroke(double width, const QColor &value) {
+        if (kind == ShapeKind::Line || !std::isfinite(width) || width <= 0 || width > 5000 || !value.isValid()) {
+            strokeWidth.reset(); strokeRed = strokeGreen = strokeBlue = 0; return;
+        }
+        const QColor rgb = value.toRgb();
+        strokeWidth = width; strokeRed = rgb.redF(); strokeGreen = rgb.greenF(); strokeBlue = rgb.blueF();
+    }
 
     [[nodiscard]] bool isValid() const {
         if (!std::isfinite(red) || red < 0.0 || red > 1.0) return false;
@@ -655,6 +673,10 @@ struct LayerShapeStyle {
         if (lineStyle && !QStringList{"Solid", "Dotted", "Dashed", "Long Dash"}.contains(*lineStyle)) return false;
         if (lineCap && *lineCap != "Square" && *lineCap != "Round") return false;
         if (kind != ShapeKind::Line && (lineStyle || lineCap)) return false;
+        if (strokeWidth) {
+            if (kind == ShapeKind::Line || !std::isfinite(*strokeWidth) || *strokeWidth <= 0.0 || *strokeWidth > 5000.0) return false;
+            for (double c : {strokeRed, strokeGreen, strokeBlue}) if (!std::isfinite(c) || c < 0.0 || c > 1.0) return false;
+        }
         if (kind == ShapeKind::Line) {
             if (!lineWidth || !std::isfinite(*lineWidth) || *lineWidth < 0.0 || *lineWidth > 5000.0) return false;
             if (!start || !std::isfinite(start->x()) || !std::isfinite(start->y())) return false;
@@ -662,7 +684,6 @@ struct LayerShapeStyle {
         }
         return true;
     }
-    bool operator==(const LayerShapeStyle &) const = default;
 };
 
 enum class AdjustmentKind {
@@ -681,7 +702,13 @@ enum class AdjustmentKind {
     AddNoise,
     ProgressiveBlur,
     BloomGlow,
-    RgbSplit
+    RgbSplit,
+    // Version 18, 19 and 21 additions (filterLayerSettings.vignette/tonal/lens, .sharpen, .reduceNoise)
+    Vignette,
+    LensEffects,
+    TonalContrast,
+    Sharpen,
+    ReduceNoise
 };
 
 struct LayerTransform {
@@ -749,6 +776,12 @@ struct Document {
     QVector<CanvasGuide> guides;
     /// Canvas-sized grayscale coverage. Null means no selection; an all-black image is an explicit empty selection.
     std::optional<QImage> selection;
+    // A feathered selection's hard mask and how far it is feathered, while `selection` is that mask feathered (the key
+    // is its cacheKey): Feather adds to the amount and feathers the hard mask again, as macOS's path keeps its feather
+    // (mac 9986d12). Any other selection drops them.
+    std::optional<QImage> selectionHard;
+    double selectionFeather = 0;
+    qint64 selectionFeatherKey = 0;
     QString projectPath;
 
     bool operator==(const Document &other) const {
@@ -784,5 +817,10 @@ struct Document {
 [[nodiscard]] std::optional<AdjustmentKind> adjustmentKindFromString(const QString &value);
 [[nodiscard]] bool isVersion9Adjustment(AdjustmentKind kind);
 [[nodiscard]] bool isVersion16Adjustment(AdjustmentKind kind);
+// The format version an adjustment of `kind` first appeared in (mac ProjectStore.validate): 7, 9, 16, 18, 19 or 21.
+[[nodiscard]] int adjustmentKindVersion(AdjustmentKind kind);
+// The format version `adjustment`'s settings need: its kind's, and 18 / 19 / 20 / 21 for the filterLayerSettings
+// objects that arrived then (a Lens Effects layer's prismFringe is version 20's).
+[[nodiscard]] int adjustmentRequiredVersion(const QJsonObject &adjustment);
 
 } // namespace compositor

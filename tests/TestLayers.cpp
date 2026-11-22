@@ -1859,11 +1859,13 @@ void TestLayers::crossProjectCopyBakesLiveMasksAndAnchorsSeveralLayers()
 {
     MainWindow window;
     window.session().createDocument(100, 100);
-    // A hidden 20x20 source supplies a live mask to a 40x40 red layer; copying only the red layer bakes the clip.
-    window.session().insertImage(solid(20, 20, Qt::black), QStringLiteral("Source"), QPointF(50, 50));
-    const QUuid source = active(window.session());
+    // A hidden 20x20 source supplies a live mask to a 40x40 red layer; copying only the red layer bakes the clip. The
+    // source sits above, as macOS's live-mask fixtures have it: a hidden base below would hide the red layer since 1.7
+    // (mac dc3a211).
     window.session().insertImage(solid(40, 40, Qt::red), QStringLiteral("Red"), QPointF(50, 50));
     const QUuid red = active(window.session());
+    window.session().insertImage(solid(20, 20, Qt::black), QStringLiteral("Source"), QPointF(50, 50));
+    const QUuid source = active(window.session());
     QVERIFY(window.session().linkMask(source, red));
     findMutable(window.session(), source)->visible = false;
     const QImage before = render(window.session());

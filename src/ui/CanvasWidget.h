@@ -1,4 +1,5 @@
 #pragma once
+#include "core/LayerDistances.h"
 #include "io/CMYK.h"
 #include <functional>
 
@@ -6,6 +7,7 @@
 #include "core/EditorSession.h"
 
 #include <QElapsedTimer>
+#include <QGuiApplication>
 #include <QWidget>
 #include <QSet>
 #include <QHash>
@@ -23,6 +25,14 @@ class EditorSession;
 class CanvasWidget final : public QWidget {
     Q_OBJECT
 public:
+    // A size or angle shown beside the pointer as something is dragged out (see dragOutSize).
+    struct DragOutSize { QString text; QPointF corner; bool line = false, shape = false; };
+    // While a filter's panel is open: where its point is (a crosshair in a ring, mac TransformOverlay's
+    // drawRGBSplitCenter), which a click or drag on the canvas moves, even though the panel holds the other tools.
+    void setFilterPoint(const std::optional<QPointF> &documentPoint) { filterPoint_ = documentPoint; filterPointDragging_ = false; update(); }
+    [[nodiscard]] std::optional<QPointF> filterPoint() const { return filterPoint_; }
+    // How much a Ctrl- or Alt-scroll zooms (mac CanvasView.wheelZoomFactor).
+    [[nodiscard]] static double wheelZoomFactor(double deltaY, bool inverted);
     enum class Tool { Move, Marquee, Lasso, Wand, Crop, Brush, Eraser, Healing, Clone, Blur, Gradient, Shape, Text, Eyedropper, Hand, Zoom, Other };
     enum class WandMode { Wand, Object };
     explicit CanvasWidget(QWidget *parent = nullptr);
@@ -74,6 +84,8 @@ public:
     [[nodiscard]] double brushSmoothing() const { return brushSmoothing_; }
     void setShapeCornerRadius(double radius) { shapeCornerRadius_ = radius; }
     void setShapeSmoothing(bool value) { shapeSmoothing_ = value; update(); }
+    // What a dragged-out shape is drawn in: its fill, and a rectangle or ellipse's inside stroke (mac 503bda6).
+    void setShapeDraftStyle(const QColor &fill, const QColor &stroke, double strokeWidth) { shapeDraftFill_ = fill; shapeDraftStroke_ = stroke; shapeDraftStrokeWidth_ = strokeWidth; update(); }
     bool shapeSmoothing() const { return shapeSmoothing_; }
     [[nodiscard]] double shapeCornerRadius() const { return shapeCornerRadius_; }
     void setCropRatio(double ratio);
@@ -177,6 +189,12 @@ signals:
     void cycleSmearModeRequested();
     void cycleToolModeRequested();
     void marqueeKindChanged(bool elliptical);
+    // The Marquee being drawn changed size or place, or ended (the status bar shows its size).
+    void marqueeDraftChanged();
+    // A filter's point (Volumetric Light's light) clicked or dragged on the canvas, in document coordinates.
+    void filterPointMoved(const QPointF &documentPoint);
+    // Move tool, Alt-arrow: duplicate the selected layers and move the copies (mac aef9f9b).
+    void duplicateNudgeRequested(const QPointF &offset);
     void lassoKindChanged(bool polygonal);
     void shapeKindChanged(ShapeKind kind);
     void layerTransformStarted(bool duplicate);
@@ -385,6 +403,40 @@ private:
     int selectionDragMode_ = 0;              // the mode a marquee drag started with, whatever is held when it ends
     bool marqueeConstrainArmed_ = true;      // a Shift held from the press chose Add; only a fresh Shift squares the box
     QRect marqueeRect(Qt::KeyboardModifiers modifiers) const;
+    // Where the pointer and the Marquee's starting corner were when Space went down mid-drag, and the box's size.
+    struct MarqueeMove { QPoint pixel, anchor, size; };
+    std::optional<MarqueeMove> marqueeMoveStart_;
+    // A Move tool resize's size or rotation's angle, and where the pointer is (document pixels), while dragging.
+    std::optional<DragOutSize> transformReadout_;
+    bool showsDistances_ = false;
+    QVector<DistanceLine> distanceLines_;
+    [[nodiscard]] QVector<QRectF> layerBoxes(const QSet<QUuid> &excluding) const;
+    void updateMovingDistances(const QRectF &box, const QSet<QUuid> &moving);
+    std::optional<QPointF> filterPoint_;
+    bool filterPointDragging_ = false;
+public:
+    // What's being dragged out, for the label beside the pointer (mac de6837b dragOutSize, 1315aae): a Marquee's or
+    // shape's width and height at the corner being dragged, a line's length at its end, a layer's size as the Move tool
+    // resizes it or its angle as it turns, with that point in document pixels. None between drags.
+    [[nodiscard]] std::optional<DragOutSize> dragOutSize() const;
+    // Rotation is from just outside a corner of `box`, within 26 screen points of it (mac 90e7948).
+    [[nodiscard]] bool nearRotationCorner(const QRectF &box, const QPointF &point) const;
+    // The direction of `box`'s corner nearest `point`, counterclockwise from the right with y up, for the pointer.
+    [[nodiscard]] static double cornerAngle(const QRectF &box, const QPointF &point);
+    [[nodiscard]] static QCursor rotationCursor(double angle);
+    // View › Show › Distances (mac 8fb163e): pixel gaps while a layer is moved, and with Ctrl held over another layer.
+    void setShowsDistances(bool shown);
+    [[nodiscard]] bool showsDistances() const { return showsDistances_; }
+    [[nodiscard]] const QVector<DistanceLine> &distanceLines() const { return distanceLines_; }
+    // The hover gaps for the pointer where it is, as Ctrl goes down or up or the pointer moves.
+    void updateHoverDistances(Qt::KeyboardModifiers modifiers);
+    // The Marquee being drawn, in document pixels (mac selectionSize: the status bar shows it as it's drawn).
+    [[nodiscard]] std::optional<QRect> marqueeDraft() const
+    {
+        if (!selectionDragging_ || tool_ != Tool::Marquee) return std::nullopt;
+        return marqueeRect(QGuiApplication::keyboardModifiers());
+    }
+private:
     bool selectionAntialiased_ = true;
     bool brushDrawing_ = false;
     std::optional<QPointF> lastBrushPoint_;
@@ -408,7 +460,9 @@ private:
     QString shapeLineStyle_ = "Solid", shapeLineCap_ = "Square";
     bool middleZoom_ = false;
     double zoomDragPreviousX_ = 0;
-    double shapeLineWidth_ = 2.0;
+    double shapeLineWidth_ = 4.0;
+    QColor shapeDraftFill_ = Qt::black, shapeDraftStroke_ = Qt::black;
+    double shapeDraftStrokeWidth_ = 0;
     double brushDiameter_ = 40;
     double brushSmoothing_ = 0.0;
     std::optional<QPointF> cursorDocument_;

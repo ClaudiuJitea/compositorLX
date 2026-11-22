@@ -1,3 +1,4 @@
+#include <QComboBox>
 #include "core/Document.h"
 #include "core/EditorSession.h"
 #include "io/ProjectReader.h"
@@ -9322,7 +9323,7 @@ void TestProjectFormat::testSection10CropGapsAndSelectionInitialization()
     window.syncDocumentViews();
     QCoreApplication::processEvents();
 
-    auto *cropRatio = window.findChild<SegmentedControl *>(QStringLiteral("cropRatio"));
+    auto *cropRatio = window.findChild<QComboBox *>(QStringLiteral("cropRatio"));
     auto *applyBtn = window.findChild<QPushButton *>(QStringLiteral("primaryButton"));
     auto *cancelBtn = window.findChild<QPushButton *>(QStringLiteral("transformCancel"));
     QVERIFY(cropRatio);
@@ -9330,9 +9331,10 @@ void TestProjectFormat::testSection10CropGapsAndSelectionInitialization()
     QVERIFY(cancelBtn);
 
     // -------------------------------------------------------------
-    // 1. Ratio Presets (All 7 matching macOS CropControls.swift)
+    // 1. Ratio Presets (macOS CropControls.swift, grouped by shape: 8 ratios, 4 separators, Custom…)
     // -------------------------------------------------------------
-    QCOMPARE(cropRatio->count(), 7);
+    QCOMPARE(cropRatio->count(), 13);
+    const auto choose = [cropRatio](const QString &ratio) { cropRatio->setCurrentIndex(cropRatio->findData(ratio)); };
 
     // Switch to Crop tool
     canvas->setTool(CanvasWidget::Tool::Crop);
@@ -9341,32 +9343,32 @@ void TestProjectFormat::testSection10CropGapsAndSelectionInitialization()
     QCOMPARE(cropRatio->currentIndex(), 0); // Defaults to Free
 
     // Index 1: Original ratio (800 / 600 = 4 / 3 = 1.333...)
-    cropRatio->setCurrentIndex(1);
+    choose(QStringLiteral("Canvas"));
     QCoreApplication::processEvents();
     QCOMPARE(canvas->cropRatio(), 800.0 / 600.0);
 
     // Index 2: 1:1
-    cropRatio->setCurrentIndex(2);
+    choose(QStringLiteral("1:1"));
     QCoreApplication::processEvents();
     QCOMPARE(canvas->cropRatio(), 1.0);
 
     // Index 3: 4:3
-    cropRatio->setCurrentIndex(3);
+    choose(QStringLiteral("4:3"));
     QCoreApplication::processEvents();
     QCOMPARE(canvas->cropRatio(), 4.0 / 3.0);
 
     // Index 4: 3:4 (0.75) - confirmed gap added
-    cropRatio->setCurrentIndex(4);
+    choose(QStringLiteral("3:4"));
     QCoreApplication::processEvents();
     QCOMPARE(canvas->cropRatio(), 3.0 / 4.0);
 
     // Index 5: 16:9
-    cropRatio->setCurrentIndex(5);
+    choose(QStringLiteral("16:9"));
     QCoreApplication::processEvents();
     QCOMPARE(canvas->cropRatio(), 16.0 / 9.0);
 
     // Index 6: 9:16 (0.5625) - confirmed gap added
-    cropRatio->setCurrentIndex(6);
+    choose(QStringLiteral("9:16"));
     QCoreApplication::processEvents();
     QCOMPARE(canvas->cropRatio(), 9.0 / 16.0);
 

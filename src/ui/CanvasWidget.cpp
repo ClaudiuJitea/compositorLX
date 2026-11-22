@@ -4,6 +4,7 @@
 #include "rendering/ShapeLine.h"
 #include <QTabletEvent>
 #include "rendering/ShapePath.h"
+#include "core/LayerDistances.h"
 #include "rendering/DeepImage.h"
 #include "rendering/NavigatorGeometry.h"
 #include "ui/EditorStyle.h"
@@ -144,6 +145,8 @@ static QCursor selectionCursor(int mode)
 void CanvasWidget::refreshSelectionCursor()
 {
     if (tool_ != Tool::Marquee && tool_ != Tool::Lasso && tool_ != Tool::Wand) return;
+    // Space shows the hand steadily; the selection tools don't take the cursor back as the pointer moves (mac 720f210).
+    if (spaceHeld_ && !(selectionDragging_ && tool_ == Tool::Marquee)) return;
     const Qt::KeyboardModifiers held = QGuiApplication::queryKeyboardModifiers();
     if (cursorDocument_ && document_ && document_->selection && held.testFlag(Qt::ControlModifier)) return;
     const int mode = selectionDragging_ || !lassoPoints_.isEmpty() ? (tool_ == Tool::Lasso ? lassoMode_ : selectionDragMode_)
@@ -369,6 +372,8 @@ void CanvasWidget::setEditorInteractionBlocked(bool blocked)
 void CanvasWidget::refreshCursor()
 {
     const bool blocked = editorInteractionBlocked_;
+    // Drawing a Marquee, Space moves the box rather than panning: the cursor stays as it is (mac fc3c81a).
+    if (spaceHeld_ && selectionDragging_ && tool_ == Tool::Marquee) return;
     if (spaceHeld_) setCursor(panning_ ? Qt::ClosedHandCursor : Qt::OpenHandCursor);
     else if (hueTargeting_) setCursor(Qt::SizeHorCursor);
     else if (tool_ == Tool::Hand) setCursor(panning_ ? Qt::ClosedHandCursor : Qt::OpenHandCursor); // closed for the whole pan, as on macOS
@@ -386,8 +391,9 @@ void CanvasWidget::setCropRatio(double ratio)
     cropRatio_ = std::isfinite(ratio) && ratio > 0 ? ratio : 0;
     if (!cropRatio_ || !document_) return;
     QRectF rect = cropRect_.value_or(QRectF(QPointF(), QSizeF(document_->canvasSize)));
-    const double height = rect.width() / cropRatio_;
-    rect = QRectF(rect.left(), rect.center().y() - height / 2, rect.width(), height);
+    // As wide as it was, at the new ratio, within the side limits (mac 36ced5d changeCropRatio).
+    const double height = std::clamp(rect.width() / cropRatio_, 1.0, double(DocumentLimits::maxSide)), width = height * cropRatio_;
+    rect = QRectF(rect.left(), rect.center().y() - height / 2, width, height);
     rect = QRectF(std::round(rect.x()), std::round(rect.y()), std::max(1.0, std::round(rect.width())), std::max(1.0, std::round(rect.height())));
     cropRect_ = rect; emit pendingCropChanged(true); update();
 }
@@ -595,6 +601,141 @@ void CanvasWidget::drawCheckerboard(QPainter &painter, const QRectF &area) const
     painter.restore();
 }
 
+void CanvasWidget::setShowsDistances(bool shown)
+{
+    showsDistances_ = shown;
+    if (!shown && !distanceLines_.isEmpty()) { distanceLines_.clear(); update(); }
+}
+
+QVector<QRectF> CanvasWidget::layerBoxes(const QSet<QUuid> &excluding) const
+{
+    QVector<QRectF> boxes;
+    if (!document_) return boxes;
+    for (const Layer &layer : document_->layers)
+        if (!layer.group && !layer.image.isNull() && !excluding.contains(layer.id) && LayerRenderer::effectivelyVisible(*document_, layer))
+            boxes.push_back(transformedBounds(layer.transform));
+    return boxes;
+}
+
+void CanvasWidget::updateMovingDistances(const QRectF &box, const QSet<QUuid> &moving)
+{
+    // Only a move: a resize or turn shows its size or angle instead (mac 8fb163e).
+    if (!showsDistances_ || !document_ || transformDrag_ != TransformDrag::Move) { distanceLines_.clear(); return; }
+    distanceLines_ = LayerDistances::moving(box, layerBoxes(moving), QSizeF(document_->canvasSize));
+}
+
+void CanvasWidget::updateHoverDistances(Qt::KeyboardModifiers modifiers)
+{
+    // The Move tool with Ctrl held, between drags: the gaps from the selected layers to the layer under the pointer, or
+    // to the canvas's edges (macOS's Command).
+    QVector<DistanceLine> lines;
+    if (showsDistances_ && document_ && tool_ == Tool::Move && transformDrag_ == TransformDrag::None && modifiers.testFlag(Qt::ControlModifier)
+        && cursorDocument_ && document_->activeLayerId) {
+        QSet<QUuid> selected = selectedLayerIds_;
+        selected.insert(*document_->activeLayerId);
+        QRectF box;
+        if (transformsAsGroup()) box = selectedLayersBounds();
+        else for (const Layer &layer : document_->layers) if (layer.id == *document_->activeLayerId && !layer.group && !layer.image.isNull()) box = transformedBounds(layer.transform);
+        if (!box.isEmpty()) {
+            std::optional<QRectF> under;
+            for (const QRectF &other : layerBoxes(selected)) if (other.contains(*cursorDocument_)) under = other; // the top one there
+            lines = LayerDistances::between(box, under.value_or(QRectF(QPointF(), QSizeF(document_->canvasSize))));
+        }
+    }
+    if (lines != distanceLines_) { distanceLines_ = lines; update(); }
+}
+
+bool CanvasWidget::nearRotationCorner(const QRectF &box, const QPointF &point) const
+{
+    if (box.contains(point)) return false;
+    const double reach = 26.0 / zoom_;
+    for (const QPointF corner : {box.topLeft(), box.topRight(), box.bottomLeft(), box.bottomRight()})
+        if (QLineF(point, corner).length() <= reach) return true;
+    return false;
+}
+
+double CanvasWidget::cornerAngle(const QRectF &box, const QPointF &point)
+{
+    QPointF nearest = box.topLeft();
+    for (const QPointF corner : {box.topLeft(), box.topRight(), box.bottomLeft(), box.bottomRight()})
+        if (QLineF(point, corner).length() < QLineF(point, nearest).length()) nearest = corner;
+    // Counterclockwise from the right, with y up, as the pointer is drawn.
+    return std::atan2(-(nearest.y() - box.center().y()), nearest.x() - box.center().x());
+}
+
+QCursor CanvasWidget::rotationCursor(double angle)
+{
+    // A curved double arrow wrapped round the corner, turned to face out of it: white under black, three quarters of
+    // its first size so it sits level with the corner resize arrows (mac 90e7948, 1315aae). One per sixteenth of a turn.
+    constexpr int steps = 16;
+    const int step = ((int(std::round(angle / (2 * M_PI) * steps)) % steps) + steps) % steps;
+    static QHash<int, QCursor> cache;
+    if (const auto it = cache.constFind(step); it != cache.cend()) return *it;
+    const double turn = double(step) / steps * 2 * M_PI;
+    constexpr int size = 28;
+    QPixmap image(size, size);
+    image.fill(Qt::transparent);
+    {
+        QPainter p(&image);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.translate(size / 2.0, size / 2.0);
+        p.rotate(-turn * 180 / M_PI); // y down: counterclockwise is negative
+        const double scale = .75, radius = 10.5 * scale, sweep = M_PI / 4.4;
+        const QPointF center(-6.5 * scale, 0);
+        QPainterPath arc;
+        arc.moveTo(center + QPointF(std::cos(-sweep), std::sin(-sweep)) * radius);
+        for (int i = 1; i <= 24; ++i) { const double a = -sweep + 2 * sweep * i / 24; arc.lineTo(center + QPointF(std::cos(a), std::sin(a)) * radius); }
+        QPainterPath heads;
+        for (const double end : {-sweep, sweep}) {
+            const QPointF base = center + QPointF(std::cos(end), std::sin(end)) * radius;
+            const double sign = end > 0 ? 1 : -1;
+            const QPointF along(-std::sin(end) * sign, std::cos(end) * sign), side(-along.y(), along.x());
+            heads.moveTo(base + along * 5.5 * scale);
+            heads.lineTo(base + side * 3.6 * scale);
+            heads.lineTo(base - side * 3.6 * scale);
+            heads.closeSubpath();
+        }
+        QPen white(Qt::white, 4.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        p.strokePath(arc, white);
+        white.setWidthF(2.6); p.setPen(white); p.setBrush(Qt::white); p.drawPath(heads);
+        p.strokePath(arc, QPen(Qt::black, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.fillPath(heads, Qt::black);
+    }
+    const QCursor cursor(image, size / 2, size / 2);
+    cache.insert(step, cursor);
+    return cursor;
+}
+
+std::optional<CanvasWidget::DragOutSize> CanvasWidget::dragOutSize() const
+{
+    if (transformReadout_ && transformDrag_ != TransformDrag::None) return transformReadout_;
+    const auto farthest = [](const QVector<QPointF> &points, QPointF anchor) {
+        QPointF best = points.first();
+        for (const QPointF &p : points) if (QLineF(p, anchor).length() > QLineF(best, anchor).length()) best = p;
+        return best;
+    };
+    if (creationDragging_ && tool_ == Tool::Shape) {
+        if (shapeKind_ == ShapeKind::Line) {
+            QPointF end = creationCurrent_;
+            if (creationSquare_) {
+                const double dx = end.x() - creationAnchor_.x(), dy = end.y() - creationAnchor_.y();
+                const double angle = std::round(std::atan2(dy, dx) / (M_PI / 4.0)) * (M_PI / 4.0), length = std::hypot(dx, dy);
+                end = creationAnchor_ + QPointF(std::cos(angle) * length, std::sin(angle) * length);
+            }
+            return DragOutSize{QStringLiteral("%1 px").arg(qRound(QLineF(creationAnchor_, end).length())), end, true, true};
+        }
+        const QRectF rect = dragBox(creationAnchor_, creationCurrent_, creationSquare_, creationFromCenter_);
+        return DragOutSize{QStringLiteral("%1 × %2 px").arg(qRound(rect.width())).arg(qRound(rect.height())),
+                           farthest({rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()}, creationAnchor_), false, true};
+    }
+    if (const auto draft = marqueeDraft()) {
+        const QRectF rect(*draft);
+        return DragOutSize{QStringLiteral("%1 × %2 px").arg(draft->width()).arg(draft->height()),
+                           farthest({rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()}, QPointF(selectionAnchor_))};
+    }
+    return std::nullopt;
+}
+
 void CanvasWidget::paintEvent(QPaintEvent *event)
 {
     Q_UNUSED(event)
@@ -734,11 +875,25 @@ void CanvasWidget::paintCanvas(QPainter &painter)
         }
         QTransform selectionTransform; selectionTransform.translate(target.left() + selectionShift.x(), target.top() + selectionShift.y()); selectionTransform.scale(zoom_, zoom_);
         const QPainterPath outline = selectionTransform.map(selectionOutline_);
-        if (!outline.isEmpty()) {
+        // Show Extras off hides the ants; the selection still limits edits (mac bb5c8cc).
+        if (!outline.isEmpty() && (!session_ || session_->showsSelectionEdges())) {
             painter.setBrush(Qt::NoBrush); painter.setPen(QPen(Qt::white, 1)); painter.drawPath(outline);
             QPen ants(Qt::black, 1); ants.setDashPattern({4, 4}); ants.setDashOffset((QDateTime::currentMSecsSinceEpoch() / 120) % 8);
             painter.setPen(ants); painter.drawPath(outline);
         }
+    }
+    if (filterPoint_) {
+        // A crosshair in a ring, white over a dark outline, where the light is.
+        const QPointF at = target.topLeft() + *filterPoint_ * zoom_;
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        for (const auto &[color, width] : {std::pair{QColor(0, 0, 0, 150), 3.0}, {QColor(Qt::white), 1.5}}) {
+            painter.setPen(QPen(color, width)); painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(at, 9, 9);
+            painter.drawLine(at - QPointF(14, 0), at - QPointF(4, 0)); painter.drawLine(at + QPointF(4, 0), at + QPointF(14, 0));
+            painter.drawLine(at - QPointF(0, 14), at - QPointF(0, 4)); painter.drawLine(at + QPointF(0, 4), at + QPointF(0, 14));
+        }
+        painter.restore();
     }
     if (samplingColor_ && showSampleRing_ && cursorDocument_) {
         const QPointF center = target.topLeft() + *cursorDocument_ * zoom_ + QPointF(42, -42);
@@ -815,10 +970,7 @@ void CanvasWidget::paintCanvas(QPainter &painter)
                                   QPointF(box.center().x(), box.top()), QPointF(box.center().x(), box.bottom()),
                                   QPointF(box.left(), box.center().y()), QPointF(box.right(), box.center().y())};
         for (const QPointF &point : points) painter.drawRect(QRectF(point.x() - handle / 2, point.y() - handle / 2, handle, handle));
-        painter.setPen(QPen(QColor(36, 145, 255), 1.0));
-        painter.drawLine(QPointF(box.center().x(), box.top()), QPointF(box.center().x(), box.top() - 24));
-        painter.setBrush(QColor(245, 249, 255));
-        painter.drawEllipse(QPointF(box.center().x(), box.top() - 28), 4, 4);
+        // No handle above the box: rotation is from just outside any corner (mac 90e7948).
         painter.restore();
     } else if (!distortionActive && transformControlsVisible() && document_->activeLayerId) {
         const auto it = std::find_if(document_->layers.cbegin(), document_->layers.cend(), [this](const Layer &layer) {
@@ -842,10 +994,6 @@ void CanvasWidget::paintCanvas(QPainter &painter)
                                       QPointF(box.center().x(), box.top()), QPointF(box.center().x(), box.bottom()),
                                       QPointF(box.left(), box.center().y()), QPointF(box.right(), box.center().y())};
             for (const QPointF &point : points) painter.drawRect(QRectF(point.x() - handle / 2, point.y() - handle / 2, handle, handle));
-            painter.setPen(QPen(QColor(36, 145, 255), 1.0));
-            painter.drawLine(QPointF(0, box.top()), QPointF(0, box.top() - 24));
-            painter.setBrush(QColor(245, 249, 255));
-            painter.drawEllipse(QPointF(0, box.top() - 28), 4, 4);
             painter.restore();
         }
     }
@@ -884,7 +1032,19 @@ void CanvasWidget::paintCanvas(QPainter &painter)
             const QPointF p1 = target.topLeft() + lineStart * zoom_;
             const QPointF p2 = target.topLeft() + lineEnd * zoom_;
             const double thickness = std::max(1.0, shapeLineWidth_ * zoom_);
-            drawShapeLine(painter, p1, p2, thickness, paletteForeground_, shapeLineStyle_, shapeLineCap_);
+            drawShapeLine(painter, p1, p2, thickness, shapeDraftFill_, shapeLineStyle_, shapeLineCap_);
+        } else if (tool_ == Tool::Shape) {
+            // The shape as it will be: its fill and, for a rectangle or ellipse, its inside stroke, shown while the box
+            // is still being dragged (mac 503bda6, e63b825).
+            const QRectF box = QRectF(first, last).normalized();
+            QPainterPath path;
+            if (shapeKind_ == ShapeKind::Ellipse) path.addEllipse(box);
+            else path = rectanglePath(box, shapeCornerRadius_ * zoom_, shapeSmoothing_);
+            painter.save();
+            painter.setRenderHint(QPainter::Antialiasing);
+            fillShape(painter, path, shapeDraftFill_, shapeDraftStroke_,
+                      std::min(shapeDraftStrokeWidth_ * zoom_, std::min(box.width(), box.height()) / 2));
+            painter.restore();
         } else {
             const QRectF box(first, last);
             if (shapeKind_ == ShapeKind::Ellipse || (tool_ != Tool::Shape && ellipticalShape_)) {
@@ -896,6 +1056,55 @@ void CanvasWidget::paintCanvas(QPainter &painter)
                 painter.drawRect(box.normalized());
             }
         }
+    }
+    // The Move tool's pixel gaps: a line with an end bar at each side and its length in a label on it, the same size at
+    // any zoom (mac 8fb163e drawDistances).
+    if (!distanceLines_.isEmpty()) {
+        const QColor pink(255, 45, 85);
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.setPen(QPen(pink, 1));
+        const auto ends = [&](const DistanceLine &line) {
+            const QPointF a = line.horizontal ? QPointF(line.from, line.across) : QPointF(line.across, line.from);
+            const QPointF b = line.horizontal ? QPointF(line.to, line.across) : QPointF(line.across, line.to);
+            return std::pair{target.topLeft() + a * zoom_, target.topLeft() + b * zoom_};
+        };
+        for (const DistanceLine &line : std::as_const(distanceLines_)) {
+            const auto [start, end] = ends(line);
+            painter.drawLine(start, end);
+            for (const QPointF point : {start, end})
+                painter.drawLine(line.horizontal ? QLineF(point.x(), point.y() - 4, point.x(), point.y() + 4) : QLineF(point.x() - 4, point.y(), point.x() + 4, point.y()));
+        }
+        QFont font = painter.font(); font.setPixelSize(11); font.setWeight(QFont::Medium);
+        painter.setFont(font);
+        painter.setRenderHint(QPainter::Antialiasing);
+        for (const DistanceLine &line : std::as_const(distanceLines_)) {
+            const auto [start, end] = ends(line);
+            const QString text = QStringLiteral("%1 px").arg(qRound(line.length()));
+            const QSizeF size = QFontMetricsF(font).size(Qt::TextSingleLine, text);
+            const QRectF label((start.x() + end.x()) / 2 - size.width() / 2 - 5, (start.y() + end.y()) / 2 - size.height() / 2 - 2, size.width() + 10, size.height() + 4);
+            painter.setPen(Qt::NoPen); painter.setBrush(pink); painter.drawRoundedRect(label, 4, 4);
+            painter.setPen(Qt::white); painter.drawText(label, Qt::AlignCenter, text);
+        }
+        painter.restore();
+    }
+    // The size (or angle) of what's being dragged out, in a dark label just above and right of the point being dragged,
+    // the other side of it near the view's edge (mac de6837b drawDragOutSize).
+    if (const auto readout = dragOutSize()) {
+        const QPointF corner = target.topLeft() + readout->corner * zoom_;
+        QFont font = painter.font(); font.setPixelSize(11); font.setWeight(QFont::Medium); font.setStyleHint(QFont::Monospace);
+        painter.save();
+        painter.setFont(font);
+        const QSizeF text = QFontMetricsF(font).size(Qt::TextSingleLine, readout->text);
+        QRectF label(corner.x() + 14, corner.y() - 14 - (text.height() + 6), text.width() + 12, text.height() + 6);
+        if (label.right() > width() - 4) label.moveLeft(corner.x() - 14 - label.width());
+        if (label.top() < 4) label.moveTop(corner.y() + 14);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen); painter.setBrush(QColor::fromRgbF(.12f, .12f, .12f, .9f));
+        painter.drawRoundedRect(label, 4, 4);
+        painter.setPen(Qt::white);
+        painter.drawText(label, Qt::AlignCenter, readout->text);
+        painter.restore();
     }
     if (cloneSource_ && tool_ == Tool::Clone) {
         const QPointF point = target.topLeft() + *cloneIndicatorPosition() * zoom_;
@@ -962,6 +1171,13 @@ void CanvasWidget::resizeEvent(QResizeEvent *event)
     else emit viewportChanged();
 }
 
+double CanvasWidget::wheelZoomFactor(double deltaY, bool inverted)
+{
+    // In as the wheel turns away from you, out as it turns toward you, whichever way natural scrolling is set: that
+    // setting flips the deltas, so they're turned back to the way the wheel actually moved (mac 46af4f2, #336).
+    return std::exp((inverted ? -deltaY : deltaY) * 0.015);
+}
+
 void CanvasWidget::wheelEvent(QWheelEvent *event)
 {
     if (!document_ || movingLayer_ || cropDrag_ != CropDrag::None || guideDragging_) { event->accept(); return; }
@@ -969,7 +1185,7 @@ void CanvasWidget::wheelEvent(QWheelEvent *event)
     if (event->modifiers().testFlag(Qt::ControlModifier) || event->modifiers().testFlag(Qt::AltModifier)) {
         const QPoint pixels = event->pixelDelta();
         const double delta = !pixels.isNull() ? pixels.y() : event->angleDelta().y() / 8.0;
-        if (delta != 0.0) zoomTo(zoom_ * std::exp(delta * 0.015), event->position());
+        if (delta != 0.0) zoomTo(zoom_ * wheelZoomFactor(delta, event->inverted()), event->position());
         event->accept();
         return;
     }
@@ -1054,6 +1270,11 @@ void CanvasWidget::tabletEvent(QTabletEvent *event)
 
 void CanvasWidget::mousePressEvent(QMouseEvent *event)
 {
+    if (filterPoint_ && document_ && event->button() == Qt::LeftButton && !spaceHeld_) {
+        filterPointDragging_ = true;
+        emit filterPointMoved((event->position() - canvasRect().topLeft()) / zoom_);
+        event->accept(); return;
+    }
     const QRectF mini=navigatorRect();
     if(event->button()==Qt::LeftButton&&!mini.isEmpty()&&mini.contains(event->position())){navigatorDragging_=true;centerViewOn(NavigatorGeometry{document_->canvasSize,mini.size()}.documentPoint(event->position()-mini.topLeft()));event->accept();return;}
     // The badge under a mask shown alone has its own button back to the image.
@@ -1280,7 +1501,6 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
         if (!groupBounds.isEmpty()) {
             const QPointF point = (event->position() - canvasRect().topLeft()) / zoom_;
             const double tolerance = 8.0 / zoom_;
-            const QPointF rotationPoint(groupBounds.center().x(), groupBounds.top() - 28.0 / zoom_);
             QPoint handle;
             const std::array<QPoint, 8> handles = {QPoint(-1,-1), QPoint(0,-1), QPoint(1,-1), QPoint(-1,0),
                                                    QPoint(1,0), QPoint(-1,1), QPoint(0,1), QPoint(1,1)};
@@ -1290,8 +1510,8 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
                 if (QLineF(point, position).length() <= tolerance) { handle = candidate; break; }
             }
             TransformDrag drag = TransformDrag::None;
-            if (transformControlsVisible() && QLineF(point, rotationPoint).length() <= tolerance) drag = TransformDrag::Rotate;
-            else if (transformControlsVisible() && !handle.isNull()) drag = event->modifiers().testFlag(Qt::ControlModifier) ? TransformDrag::Distort : TransformDrag::Resize;
+            if (transformControlsVisible() && !handle.isNull()) drag = event->modifiers().testFlag(Qt::ControlModifier) ? TransformDrag::Distort : TransformDrag::Resize;
+            else if (transformControlsVisible() && nearRotationCorner(groupBounds, point)) drag = TransformDrag::Rotate;
             else if (groupBounds.contains(point) || !transformAutoSelect_ || forcePick || !underPointer) drag = TransformDrag::Move;
             if (drag != TransformDrag::None) {
                 transformOriginals_.clear();
@@ -1319,7 +1539,7 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
                                               groupBounds.center().y() - handle.y() * groupBounds.height() / 2.0);
                     setCursor(handle.x() == handle.y() ? Qt::SizeFDiagCursor : handle.x() == -handle.y() ? Qt::SizeBDiagCursor
                                                        : handle.x() == 0 ? Qt::SizeVerCursor : Qt::SizeHorCursor);
-                } else setCursor(drag == TransformDrag::Rotate ? Qt::CrossCursor : Qt::SizeAllCursor);
+                } else setCursor(drag == TransformDrag::Rotate ? rotationCursor(cornerAngle(groupBounds, point)) : QCursor(Qt::SizeAllCursor));
                 // Alt-dragging several layers (or a folder) duplicates all of them and drags the copies (mac
                 // beginDuplicateTransform).
                 duplicateOnMove_ = drag == TransformDrag::Move && event->modifiers().testFlag(Qt::AltModifier) && !forcePick;
@@ -1341,11 +1561,14 @@ void CanvasWidget::mousePressEvent(QMouseEvent *event)
             const QPointF local = transform.inverted(&invertible).map(point);
             const QRectF bounds(-displayed.size.width() / 2.0, -displayed.size.height() / 2.0,displayed.size.width(), displayed.size.height());
             const double tolerance = 8.0 / zoom_;
-            const QPointF rotationPoint(0, bounds.top() - 28.0 / zoom_);
-            if (transformControlsVisible() && invertible && QLineF(local, rotationPoint).length() <= tolerance) {
+            // Rotate from just outside any corner, as in Photoshop (mac 90e7948); a corner's own handle resizes.
+            bool onHandle = false;
+            for (const QPointF corner : {bounds.topLeft(), bounds.topRight(), bounds.bottomLeft(), bounds.bottomRight(), QPointF(0, bounds.top()), QPointF(0, bounds.bottom()), QPointF(bounds.left(), 0), QPointF(bounds.right(), 0)})
+                if (QLineF(local, corner).length() <= tolerance) onHandle = true;
+            if (transformControlsVisible() && invertible && !onHandle && nearRotationCorner(bounds, local)) {
                 movingLayer_ = true; transformDrag_ = TransformDrag::Rotate; transformStart_ = displayed; maskPlacementStart_=it->maskPlacement;
                 rotateStartAngle_ = std::atan2(point.y() - displayed.center().y(), point.x() - displayed.center().x());
-                duplicateOnMove_ = false; duplicateIssued_ = false; setCursor(Qt::CrossCursor); emit layerTransformStarted(false); event->accept(); return;
+                duplicateOnMove_ = false; duplicateIssued_ = false; setCursor(rotationCursor(cornerAngle(bounds, local) - displayed.rotation * M_PI / 180)); emit layerTransformStarted(false); event->accept(); return;
             }
             QPoint handle;
             const std::array<QPoint, 8> handles = {QPoint(-1,-1), QPoint(0,-1), QPoint(1,-1), QPoint(-1,0),
@@ -1426,6 +1649,10 @@ QPoint CanvasWidget::snapSelectionMoveEnd(const QPoint &current, Qt::KeyboardMod
 
 void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 {
+    if (filterPointDragging_ && filterPoint_ && document_) {
+        emit filterPointMoved((event->position() - canvasRect().topLeft()) / zoom_);
+        event->accept(); return;
+    }
     if(navigatorDragging_){const QRectF mini=navigatorRect();centerViewOn(NavigatorGeometry{document_->canvasSize,mini.size()}.documentPoint(event->position()-mini.topLeft()));event->accept();return;}
     if (brushTipDrag_) {
         // Left and right resize the tip, its edge following the pointer; with Shift they set its hardness, the full range
@@ -1439,6 +1666,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         update(); event->accept(); return;
     }
     if (document_) cursorDocument_ = (event->position() - canvasRect().topLeft()) / zoom_;
+    if (event->buttons() == Qt::NoButton) updateHoverDistances(event->modifiers());
     if (samplingColor_ && cursorDocument_) {
         const QPoint pixel(qFloor(cursorDocument_->x()), qFloor(cursorDocument_->y()));
         if (QRect(QPoint(), renderedDocument_.size()).contains(pixel)) { sampleCurrent_ = renderedDocument_.pixelColor(pixel); emit colorSampleRequested(pixel); }
@@ -1601,6 +1829,11 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
                                                                10.0 / zoom_, &snapGuideX_, &snapGuideY_);
                 const LayerTransform resized = resizedByHandle(transformStart_, resizeSign_, moveStartDocument_, resizePoint, fromCenter, lock);
                 group.size = resized.size; group.origin = resized.origin; group.flipX = resized.flipX; group.flipY = resized.flipY;
+                transformReadout_ = DragOutSize{QStringLiteral("%1 × %2 px").arg(qRound(std::abs(group.size.width()))).arg(qRound(std::abs(group.size.height()))), point};
+            }
+            if (transformDrag_ == TransformDrag::Rotate) {
+                const int degrees = int(std::round(transformStart_.rotation + rotationDelta));
+                transformReadout_ = DragOutSize{QStringLiteral("%1°").arg(((degrees + 180) % 360 + 360) % 360 - 180), point};
             }
             for (Layer &layer : document_->layers) {
                 const auto originalIt = transformOriginals_.constFind(layer.id);
@@ -1626,6 +1859,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
                     else layer.maskPlacement.reset();
                 }
             }
+            updateMovingDistances(QRectF(group.origin, group.size), QSet<QUuid>(transformOriginals_.keyBegin(), transformOriginals_.keyEnd()));
             renderDirty_ = true; update();
             emit layerTransformChanged();
             event->accept();
@@ -1663,8 +1897,14 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
                                                                10.0 / zoom_, &snapGuideX_, &snapGuideY_);
                 const LayerTransform resized = resizedByHandle(transformStart_, resizeSign_, moveStartDocument_, resizePoint, fromCenter, lock);
                 edited.size = resized.size; edited.origin = resized.origin; edited.flipX = resized.flipX; edited.flipY = resized.flipY;
+                transformReadout_ = DragOutSize{QStringLiteral("%1 × %2 px").arg(qRound(std::abs(edited.size.width()))).arg(qRound(std::abs(edited.size.height()))), point};
+            }
+            if (transformDrag_ == TransformDrag::Rotate) {
+                const int degrees = int(std::round(edited.rotation));
+                transformReadout_ = DragOutSize{QStringLiteral("%1°").arg(((degrees + 180) % 360 + 360) % 360 - 180), point};
             }
             if(!transformMask_&&!layer.mask.isNull()&&layer.mask.size()!=QSize(1,1)){if(layer.maskLinked){if(maskPlacementStart_)layer.maskPlacement=maskPlacementStart_->following(transformStart_,layer.transform);else layer.maskPlacement.reset();}else layer.maskPlacement=maskPlacementStart_.value_or(transformStart_);}
+            if (!transformMask_) updateMovingDistances(transformedBounds(edited), selectedLayerIds_.isEmpty() ? QSet<QUuid>{layer.id} : selectedLayerIds_);
             break;
         }
         renderDirty_ = true; update();
@@ -1690,9 +1930,20 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
             update(); event->accept(); return;
         }
         if (tool_ == Tool::Marquee) updateAutoscroll(event->position(), event->modifiers());
-        selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
+        const QPoint pixel = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
+        // Space held mid-drag moves the box rather than resizing it, its corners on whole pixels (mac fc3c81a).
+        if (tool_ == Tool::Marquee && spaceHeld_) {
+            if (!marqueeMoveStart_) marqueeMoveStart_ = MarqueeMove{pixel, selectionAnchor_, selectionCurrent_ - selectionAnchor_};
+            selectionAnchor_ = marqueeMoveStart_->anchor + pixel - marqueeMoveStart_->pixel;
+            selectionCurrent_ = selectionAnchor_ + marqueeMoveStart_->size;
+            emit marqueeDraftChanged();
+            update(); event->accept(); return;
+        }
+        marqueeMoveStart_.reset();
+        selectionCurrent_ = pixel;
         if (tool_ == Tool::Marquee) selectionCurrent_ = snapDragPoint(QPointF(selectionCurrent_), event->modifiers()).toPoint();
         if (!event->modifiers().testFlag(Qt::ShiftModifier)) marqueeConstrainArmed_ = true;
+        if (tool_ == Tool::Marquee) emit marqueeDraftChanged();
         update(); event->accept(); return;
     }
     if (brushDrawing_) {
@@ -1712,6 +1963,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         else creationCurrent_ = tool_ == Tool::Shape ? snapDragPoint(*cursorDocument_, event->modifiers()) : *cursorDocument_;
         creationSquare_ = event->modifiers().testFlag(Qt::ShiftModifier);
         creationFromCenter_ = fromCenter(event->modifiers());
+        if (tool_ == Tool::Shape) emit marqueeDraftChanged(); // the status bar shows the shape's size as it's dragged
         if (tool_ == Tool::Gradient && QLineF(creationAnchor_, creationCurrent_).length() >= .5)
             emit gradientRequested(creationAnchor_, creationCurrent_);
         update(); event->accept(); return;
@@ -1759,18 +2011,16 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
         for(auto layer=document_->layers.crbegin();layer!=document_->layers.crend();++layer)if(layer->visible&&!layer->group&&!layer->image.isNull()&&transformContains(layer->transform,hover)){underPointer=true;break;}
         QPoint handle; const double tolerance=8.0/zoom_;
         if (!group.isEmpty()) {
-            const QPointF rotationPoint(group.center().x(),group.top()-28.0/zoom_);
             const std::array<QPoint,8> signs={QPoint(-1,-1),QPoint(0,-1),QPoint(1,-1),QPoint(-1,0),QPoint(1,0),QPoint(-1,1),QPoint(0,1),QPoint(1,1)};
             if (transformControlsVisible()) for(const QPoint &sign:signs){const QPointF position=group.center()+QPointF(sign.x()*group.width()/2,sign.y()*group.height()/2);if(QLineF(hover,position).length()<=tolerance){handle=sign;break;}}
-            if(transformControlsVisible()&&QLineF(hover,rotationPoint).length()<=tolerance)setCursor(Qt::CrossCursor);
+            if(transformControlsVisible()&&handle.isNull()&&nearRotationCorner(group,hover))setCursor(rotationCursor(cornerAngle(group,hover)));
             else if(!handle.isNull())setCursor(event->modifiers().testFlag(Qt::ControlModifier)?Qt::CrossCursor:handle.x()==handle.y()?Qt::SizeFDiagCursor:handle.x()==-handle.y()?Qt::SizeBDiagCursor:handle.x()==0?Qt::SizeVerCursor:Qt::SizeHorCursor);
             else setCursor((group.contains(hover)||!transformAutoSelect_||!underPointer)?(event->modifiers().testFlag(Qt::AltModifier)?Qt::DragCopyCursor:Qt::SizeAllCursor):Qt::ArrowCursor);
         } else if (hasPlacement) {
             QTransform transform;transform.translate(placement.center().x(),placement.center().y());transform.rotate(placement.rotation);bool ok=false;const QPointF local=transform.inverted(&ok).map(hover);const QRectF box(-placement.size.width()/2,-placement.size.height()/2,placement.size.width(),placement.size.height());
-            const QPointF rotationPoint(0,box.top()-28.0/zoom_);
             const std::array<QPoint,8> signs={QPoint(-1,-1),QPoint(0,-1),QPoint(1,-1),QPoint(-1,0),QPoint(1,0),QPoint(-1,1),QPoint(0,1),QPoint(1,1)};
             if(transformControlsVisible()&&ok)for(const QPoint &sign:signs){const QPointF position(sign.x()*box.width()/2,sign.y()*box.height()/2);if(QLineF(local,position).length()<=tolerance){handle=sign;break;}}
-            if(transformControlsVisible()&&ok&&QLineF(local,rotationPoint).length()<=tolerance)setCursor(Qt::CrossCursor);
+            if(transformControlsVisible()&&ok&&handle.isNull()&&nearRotationCorner(box,local))setCursor(rotationCursor(cornerAngle(box,local)-placement.rotation*M_PI/180));
             else if(!handle.isNull())setCursor(event->modifiers().testFlag(Qt::ControlModifier)?Qt::CrossCursor:handle.x()==handle.y()?Qt::SizeFDiagCursor:handle.x()==-handle.y()?Qt::SizeBDiagCursor:handle.x()==0?Qt::SizeVerCursor:Qt::SizeHorCursor);
             else setCursor(ok&&(box.contains(local)||!transformAutoSelect_||!underPointer)?(event->modifiers().testFlag(Qt::AltModifier)?Qt::DragCopyCursor:Qt::SizeAllCursor):Qt::ArrowCursor);
         } else setCursor(Qt::ArrowCursor);
@@ -1782,6 +2032,7 @@ void CanvasWidget::mouseMoveEvent(QMouseEvent *event)
 
 void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (filterPointDragging_ && event->button() == Qt::LeftButton) { filterPointDragging_ = false; event->accept(); return; }
     if(navigatorDragging_&&event->button()==Qt::LeftButton){navigatorDragging_=false;event->accept();return;}
     if (brushTipDrag_ && event->button() == Qt::RightButton) {
         brushTipDrag_.reset();
@@ -1833,6 +2084,8 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
         const bool distorted = transformDrag_ == TransformDrag::Distort;
         movingLayer_ = false;
         transformDrag_ = TransformDrag::None;
+        transformReadout_.reset();
+        if (!distanceLines_.isEmpty()) { distanceLines_.clear(); update(); }
         transformOriginals_.clear();
         maskPlacementOriginals_.clear();
         duplicateOnMove_ = false; duplicateIssued_ = false;
@@ -1862,13 +2115,19 @@ void CanvasWidget::mouseReleaseEvent(QMouseEvent *event)
     }
     if (selectionDragging_ && event->button() == Qt::LeftButton) {
         selectionDragging_ = false;
+        const bool moved = marqueeMoveStart_.has_value() || (spaceHeld_ && tool_ == Tool::Marquee);
+        marqueeMoveStart_.reset();
+        emit marqueeDraftChanged();
         const int mode = selectionDragMode_;
         if (tool_ == Tool::Lasso && !polygonalLasso_) {
             const QPolygonF points = lassoPoints_; lassoPoints_.clear();
             emit polygonSelectionRequested(points, lassoMode_, selectionAntialiased_); update(); event->accept(); return;
         }
-        selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
-        if (tool_ == Tool::Marquee) selectionCurrent_ = snapDragPoint(QPointF(selectionCurrent_), event->modifiers()).toPoint();
+        // A box Space moved keeps where it was moved to; otherwise its corner is where the button came up.
+        if (!moved) {
+            selectionCurrent_ = ((event->position() - canvasRect().topLeft()) / zoom_).toPoint();
+            if (tool_ == Tool::Marquee) selectionCurrent_ = snapDragPoint(QPointF(selectionCurrent_), event->modifiers()).toPoint();
+        }
         snapGuideX_.reset(); snapGuideY_.reset();
         if (!event->modifiers().testFlag(Qt::ShiftModifier)) marqueeConstrainArmed_ = true;
         const QRect rect = tool_ == Tool::Crop ? QRect(selectionAnchor_, selectionCurrent_).normalized() : marqueeRect(event->modifiers());
@@ -1954,6 +2213,7 @@ void CanvasWidget::leaveEvent(QEvent *event)
 
 void CanvasWidget::keyPressEvent(QKeyEvent *event)
 {
+    if (event->key() == Qt::Key_Control) updateHoverDistances(event->modifiers() | Qt::ControlModifier);
     if (editorInteractionBlocked_) { QWidget::keyPressEvent(event); return; }
 
     const auto translated = ShortcutManager::instance().translateCanvasKeyEvent(event);
@@ -1966,7 +2226,7 @@ void CanvasWidget::keyPressEvent(QKeyEvent *event)
 
     // Holding Space turns any tool into the Hand until it is let go (mac spaceHeld).
     if (effectiveKey == Qt::Key_Space && effectiveModifiers == Qt::NoModifier && document_ && !brushDrawing_ && !movingLayer_) {
-        if (!event->isAutoRepeat() && !spaceHeld_) { spaceHeld_ = true; spaceKey_ = event->key(); refreshCursor(); }
+        if (!event->isAutoRepeat() && !spaceHeld_) { spaceHeld_ = true; spaceKey_ = event->key(); marqueeMoveStart_.reset(); refreshCursor(); }
         event->accept();
         return;
     }
@@ -2001,6 +2261,10 @@ void CanvasWidget::keyPressEvent(QKeyEvent *event)
         if (document_ && document_->selection && effectiveModifiers.testFlag(Qt::ControlModifier)
             && !effectiveModifiers.testFlag(Qt::AltModifier)) {
             emit selectedPixelsNudgeRequested(delta.toPoint()); event->accept(); return;
+        }
+        if (tool_ == Tool::Move && document_ && document_->activeLayerId && effectiveModifiers.testFlag(Qt::AltModifier)
+            && !effectiveModifiers.testFlag(Qt::ControlModifier) && !transformMask_) {
+            emit duplicateNudgeRequested(delta); event->accept(); return;
         }
         if (tool_ == Tool::Move && document_ && document_->activeLayerId) {
             Layer *active = nullptr;
@@ -2098,6 +2362,7 @@ void CanvasWidget::keyPressEvent(QKeyEvent *event)
 
 void CanvasWidget::keyReleaseEvent(QKeyEvent *event)
 {
+    if (event->key() == Qt::Key_Control) updateHoverDistances(event->modifiers() & ~Qt::ControlModifier);
     if (spaceHeld_ && !event->isAutoRepeat() && (event->key() == spaceKey_ || event->key() == Qt::Key_Space)) {
         spaceHeld_ = false;
         if (!panning_) refreshCursor();

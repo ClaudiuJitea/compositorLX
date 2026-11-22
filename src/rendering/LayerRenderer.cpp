@@ -57,6 +57,13 @@ bool LayerRenderer::effectivelyVisible(const Document &document, const Layer &la
         if (it == document.layers.cend() || !it->visible) return false;
         parent = it->parentId;
     }
+    // Hiding a clipping stack's base hides the layers clipped to it (mac dc3a211): drawn on their own they showed whole.
+    // Only a base below the layer: a live mask's source above its target is often hidden on purpose and still shapes it.
+    if (layer.maskSourceId) {
+        const auto self = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &l) { return l.id == layer.id; });
+        const auto base = std::find_if(document.layers.cbegin(), document.layers.cend(), [&](const Layer &l) { return l.id == *layer.maskSourceId; });
+        if (base != document.layers.cend() && self != document.layers.cend() && base < self && base->parentId == layer.parentId && !base->visible) return false;
+    }
     return true;
 }
 

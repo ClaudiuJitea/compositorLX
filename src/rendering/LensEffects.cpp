@@ -18,6 +18,10 @@
 // the renderer allows it, with these float planes as the CPU fallback and reference.
 namespace compositor {
 namespace {
+// What sizes are proportions of: the longer side of the whole document when a Lens Effects layer draws only part of it
+// (mac LensEffectSettings.apply(to:side:)), else the image's own. Set for the length of one apply().
+thread_local double documentSide = 0;
+double measure(int width, int height) { return documentSide > 0 ? documentSide : double(std::max(width, height)); }
 double clampValue(double value, double lo, double hi, double fallback)
 {
     return std::isfinite(value) ? std::clamp(value, lo, hi) : fallback;
@@ -363,7 +367,7 @@ Plane gpuGaussian(const Plane &p, double sigma, bool clamp);
 Plane sourceMask(const Light &image, double threshold, bool gpu)
 {
     if (!(threshold > .95)) return brightness(image, threshold);
-    const int side = std::max(image[0].width, image[0].height);
+    const double side = measure(image[0].width, image[0].height);
     const double density = std::min(1.0, (threshold - .95) / .05);
     Plane lit = brightness(image, .95);
     Plane solid = gpu ? gpuGaussian(lit, side * .03 * density, true) : gaussian(lit, side * .03 * density, true);
@@ -532,7 +536,8 @@ struct Turn {
 // saturated rather than whitening.
 Light anamorphic(const Light &image, const LensEffectSettings &s)
 {
-    const int w = image[0].width, h = image[0].height, side = std::max(w, h);
+    const int w = image[0].width, h = image[0].height;
+    const double side = measure(w, h);
     const double reach = side * s.flareLength / 100, thin = std::max(.5, side * .0008);
     const double amount = s.flareAmount / 50, blue = s.flareBlue / 100;
     const Light spread = gaussian(sources(image, s.threshold / 100), side * .004, true);
@@ -573,7 +578,8 @@ Light anamorphic(const Light &image, const LensEffectSettings &s)
 // in red than in blue, as diffraction spreads longer waves farther.
 Light starburst(const Light &image, const LensEffectSettings &s)
 {
-    const int w = image[0].width, h = image[0].height, side = std::max(w, h);
+    const int w = image[0].width, h = image[0].height;
+    const double side = measure(w, h);
     const Light light = sources(image, s.threshold / 100);
     const double reach = side * s.starLength / 100, thin = std::max(.5, side * .0006);
     const int spokes = std::max(1, s.starPoints / 2);
@@ -585,8 +591,10 @@ Light starburst(const Light &image, const LensEffectSettings &s)
             const Plane turned = turn.into(light[size_t(c)]);
             Plane rays(turned.width, turned.height);
             for (const auto &[fraction, weight] : {std::pair{.04, 1.8}, {.12, .9}, {.35, .35}, {1.0, .1}}) {
+                // Each light drawn out along the spike first, as far for all three colors (mac 7651033), so a small
+                // light spikes as a big one does; red's spike then reaches a little farther than blue's.
                 const double along = std::max(thin * 2, reach * fraction * (1 - .1 * c));
-                addStreakRows(turned, along, thin, along * .8, rays, weight * s.starAmount / 50);
+                addStreakRows(turned, along, thin, std::max(thin * 2, reach * fraction) * .8, rays, weight * s.starAmount / 50);
             }
             turn.addBack(rays, result[size_t(c)]);
         }
@@ -599,7 +607,7 @@ Light starburst(const Light &image, const LensEffectSettings &s)
 // brightening. The brightest lights scatter a little extra.
 Light mist(const Light &image, const LensEffectSettings &s)
 {
-    const int side = std::max(image[0].width, image[0].height);
+    const double side = measure(image[0].width, image[0].height);
     const Light light = linear(image);
     const double scale = side * (.2 + s.mistSize / 100 * 1.8) / 100;
     const double strength = s.mistStrength / 100, scatter = strength * .4;
@@ -616,12 +624,15 @@ Light mist(const Light &image, const LensEffectSettings &s)
 // echo into the shadows and nothing darkens. Blur softens the copies, more the farther they're pushed.
 Light prism(const Light &image, const LensEffectSettings &s)
 {
-    const int w = image[0].width, h = image[0].height, side = std::max(w, h);
+    const int w = image[0].width, h = image[0].height;
+    const double side = measure(w, h);
     const Light light = linear(image);
     const double theta = s.prismAngle * M_PI / 180, dx = std::cos(theta), dy = -std::sin(theta);
     const double shift = side * s.prismOffset / 100;
     const std::vector<double> ways = s.prismBothWays ? std::vector<double>{1, -1} : std::vector<double>{1};
-    const std::array<double, 3> fringes{.003, 0, -.003};
+    // Fringe splits each copy's red and blue apart by hundredths of a percent of the longer side (mac 6d49a23).
+    const double fringeShare = s.prismFringe / 10000;
+    const std::array<double, 3> fringes{fringeShare, 0, -fringeShare};
     Light result = light;
     // Farthest first, so each nearer copy shows over it.
     for (int copy = int(s.prismCopies); copy >= 1; --copy) {
@@ -716,7 +727,7 @@ Light disc(const Light &light, double radius, BokehShape shape, double ring)
 // boosted, blurred on their own and eased back, so a wide bright area doesn't blow out.
 Light bokeh(const Light &image, const LensEffectSettings &s)
 {
-    const int side = std::max(image[0].width, image[0].height);
+    const double side = measure(image[0].width, image[0].height);
     const double radius = side * s.bokehRadius / 100;
     // Even at its least, lights open into clear discs: Brightness says how much they glow, not whether.
     const Light light = linear(image);
@@ -930,7 +941,8 @@ Plane gpuGaussian(const Plane &p, double sigma, bool clamp)
 
 std::optional<Light> anamorphicGpu(const Pictures &image, const Plane &mask, const LensEffectSettings &s)
 {
-    const int w = image.width, h = image.height, side = std::max(w, h);
+    const int w = image.width, h = image.height;
+    const double side = measure(w, h);
     const double reach = side * s.flareLength / 100, thin = std::max(.5, side * .0008);
     const double amount = s.flareAmount / 50, blue = s.flareBlue / 100;
     const int size = std::max(3, int(side * .012) | 1);
@@ -1008,7 +1020,8 @@ std::vector<uint8_t> rayRows(const Turn &turn, const std::vector<Run> &runs, int
 
 std::optional<Light> starburstGpu(const Pictures &image, const Plane &mask, const LensEffectSettings &s)
 {
-    const int w = image.width, h = image.height, side = std::max(w, h);
+    const int w = image.width, h = image.height;
+    const double side = measure(w, h);
     const double reach = side * s.starLength / 100, thin = std::max(.5, side * .0006);
     const int spokes = std::max(1, s.starPoints / 2);
     // The turned frame goes in bands of rows, each with the rows its rays' blur reaches, so the working memory stays
@@ -1067,7 +1080,7 @@ std::optional<Light> starburstGpu(const Pictures &image, const Plane &mask, cons
                                               turn.cx + turn.umin * turn.ux + (turn.vmin + top) * turn.vx, turn.uy, turn.vy,
                                               turn.cy + turn.umin * turn.uy + (turn.vmin + top) * turn.vy);
                 for (int f = 0; f < 4; ++f) {
-                    const auto rays = k.squeezed(turned, along(f), thin, along(f) * .8);
+                    const auto rays = k.squeezed(turned, along(f), thin, std::max(thin * 2, reach * fractions[size_t(f)]) * .8);
                     // The band's own rows (not the ones its blur needed) into the packed plane.
                     const int offset = int(back[GpuParam::LensStreakBack::offset0 + f]);
                     GpuParameters paste{};
@@ -1102,7 +1115,8 @@ std::optional<Light> starburstGpu(const Pictures &image, const Plane &mask, cons
 
 std::optional<Light> mistGpu(const Pictures &image, const Plane &bright, const LensEffectSettings &s)
 {
-    const int w = image.width, h = image.height, side = std::max(w, h);
+    const int w = image.width, h = image.height;
+    const double side = measure(w, h);
     const Shared lit = shared(bright);
     const double scale = side * (.2 + s.mistSize / 100 * 1.8) / 100;
     const double strength = s.mistStrength / 100, scatter = strength * .4;
@@ -1123,11 +1137,13 @@ std::optional<Light> mistGpu(const Pictures &image, const Plane &bright, const L
 
 std::optional<Light> prismGpu(const Pictures &image, const LensEffectSettings &s)
 {
-    const int w = image.width, h = image.height, side = std::max(w, h);
+    const int w = image.width, h = image.height;
+    const double side = measure(w, h);
     const double theta = s.prismAngle * M_PI / 180, dx = std::cos(theta), dy = -std::sin(theta);
     const double shift = side * s.prismOffset / 100;
     const std::vector<double> ways = s.prismBothWays ? std::vector<double>{1, -1} : std::vector<double>{1};
-    const std::array<double, 3> fringes{.003, 0, -.003};
+    const double fringeShare = s.prismFringe / 10000;
+    const std::array<double, 3> fringes{fringeShare, 0, -fringeShare};
     Light result;
     for (int c = 0; c < 3; ++c) {
         Chain k;
@@ -1172,7 +1188,8 @@ std::optional<Light> prismGpu(const Pictures &image, const LensEffectSettings &s
 
 std::optional<Light> bokehGpu(const Pictures &image, const Plane &bright, const LensEffectSettings &s)
 {
-    const int w = image.width, h = image.height, side = std::max(w, h);
+    const int w = image.width, h = image.height;
+    const double side = measure(w, h);
     const double radius = side * s.bokehRadius / 100;
     // disc()'s smaller copy, with room for the discs reaching in from past the edge (more than the kernel reaches,
     // so two copies side by side never read each other where it matters).
@@ -1295,17 +1312,19 @@ LensEffectSettings LensEffectSettings::normalized() const
     r.prismOffset = clampValue(prismOffset, 0, 50, 6);
     r.prismAngle = clampValue(prismAngle, -180, 180, 180);
     r.prismBlur = clampValue(prismBlur, 0, 100, 0);
+    r.prismFringe = clampValue(prismFringe, 0, 100, 30);
     r.bokehRadius = clampValue(bokehRadius, bokehSizeMin, bokehSizeMax, 2);
     r.bokehBrightness = clampValue(bokehBrightness, 0, 100, 50);
     r.bokehRing = clampValue(bokehRing, 0, 100, 100);
     return r;
 }
 
-QImage LensEffectSettings::apply(const QImage &image, RenderBackend backend, bool *accelerated) const
+QImage LensEffectSettings::apply(const QImage &image, RenderBackend backend, bool *accelerated, double side) const
 {
     if (accelerated) *accelerated = false;
     if (image.isNull()) return image;
     const LensEffectSettings s = normalized();
+    struct Measure { explicit Measure(double side) { documentSide = side > 0 ? side : 0; } ~Measure() { documentSide = 0; } } measureScope(side);
     const bool hdr = DeepImage::isHDR(image), deep = DeepImage::isDeep(image);
     const QImage source = DeepImage::floating(image);
     if (source.isNull()) return {};

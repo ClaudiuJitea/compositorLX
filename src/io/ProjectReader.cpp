@@ -1,4 +1,5 @@
 #include "io/ProjectReader.h"
+#include "io/ProjectWriter.h"
 #include "io/GifIO.h"
 #include "io/AdjustmentJson.h"
 #include "io/HdrImage.h"
@@ -253,6 +254,16 @@ void validateAdjustmentSettings(const QJsonObject &adj, int version)
     if (isVersion9Adjustment(*kind) && version < 9) {
         invalid(QStringLiteral("%1 adjustment requires format version 9").arg(kindStr));
     }
+    // Vignette, Lens Effects and Tonal Contrast layers arrived in version 18, Sharpen in 19, Reduce Noise in 21, each
+    // with its own object in filterLayerSettings (mac ProjectStore.validate). Prism's Fringe (20) is not gated there.
+    const QJsonObject filterLayer = adj.value(QStringLiteral("filterLayerSettings")).toObject();
+    if ((adjustmentKindVersion(*kind) == 18 || filterLayer.contains(QStringLiteral("vignette")) || filterLayer.contains(QStringLiteral("tonal"))
+         || filterLayer.contains(QStringLiteral("lens"))) && version < 18)
+        invalid(QStringLiteral("%1 layers require format version 18").arg(kindStr));
+    if ((*kind == AdjustmentKind::Sharpen || filterLayer.contains(QStringLiteral("sharpen"))) && version < 19)
+        invalid(QStringLiteral("Sharpen layers require format version 19"));
+    if ((*kind == AdjustmentKind::ReduceNoise || filterLayer.contains(QStringLiteral("reduceNoise"))) && version < 21)
+        invalid(QStringLiteral("Reduce Noise layers require format version 21"));
 
     const double hue = number(adj, QStringLiteral("hue"), 0.0);
     const double saturation = number(adj, QStringLiteral("saturation"), 0.0);
@@ -475,6 +486,17 @@ std::optional<LayerShapeStyle> parseShape(const QJsonObject &obj)
     if (obj.contains(QStringLiteral("end"))) {
         style.end = parsePoint(obj.value(QStringLiteral("end")), QStringLiteral("end"));
     }
+    // All four stroke fields together, or none (mac ProjectStore.validate, version 22).
+    const bool anyStroke = obj.contains(QStringLiteral("strokeWidth")) || obj.contains(QStringLiteral("strokeRed"))
+        || obj.contains(QStringLiteral("strokeGreen")) || obj.contains(QStringLiteral("strokeBlue"));
+    if (anyStroke) {
+        for (const char *key : {"strokeWidth", "strokeRed", "strokeGreen", "strokeBlue"})
+            if (!obj.value(QLatin1String(key)).isDouble()) invalid(QStringLiteral("incomplete shape stroke"));
+        style.strokeWidth = number(obj, QStringLiteral("strokeWidth"), 0.0);
+        style.strokeRed = number(obj, QStringLiteral("strokeRed"), 0.0);
+        style.strokeGreen = number(obj, QStringLiteral("strokeGreen"), 0.0);
+        style.strokeBlue = number(obj, QStringLiteral("strokeBlue"), 0.0);
+    }
     if (!style.isValid()) invalid(QStringLiteral("invalid shape style"));
     return style;
 }
@@ -540,10 +562,10 @@ Document ProjectReader::load(const QString &projectDirectory)
 
     Document document;
     document.formatVersion = manifest.value(QStringLiteral("version")).toInt(-1);
-    // Every version a release has written (1 through 17), and 27 from the macOS GIF branch's own builds (macOS
+    // Every version a release has written (1 through 22), and 27 from the macOS GIF branch's own builds (macOS
     // ProjectManifest.supported); 27 passes every later-version gate below.
-    if ((document.formatVersion < 1 || document.formatVersion > 17) && document.formatVersion != 27) {
-        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–17 and 27.").arg(document.formatVersion));
+    if ((document.formatVersion < 1 || document.formatVersion > ProjectWriter::currentVersion) && document.formatVersion != 27) {
+        throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–%2 and 27.").arg(document.formatVersion).arg(ProjectWriter::currentVersion));
     }
     if (manifest.value(QStringLiteral("colorSpace")).toString() != QStringLiteral("sRGB")) {
         invalid(QStringLiteral("only the sRGB working space is supported"));
@@ -701,6 +723,9 @@ Document ProjectReader::load(const QString &projectDirectory)
                 invalid(QStringLiteral("Line styles require format version 15"));
             if (layer.shapeStyle && layer.shapeStyle->smoothing.value_or(false) && document.formatVersion < 14)
                 invalid(QStringLiteral("smooth corners require format version 14 or later"));
+            // A rectangle or ellipse's inside stroke arrived in version 22, and only those shapes have one.
+            if (layer.shapeStyle && layer.shapeStyle->strokeWidth && document.formatVersion < 22)
+                invalid(QStringLiteral("shape strokes require format version 22 or later"));
         }
 
         if (object.contains("gif")) {

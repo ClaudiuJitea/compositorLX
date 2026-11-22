@@ -98,10 +98,11 @@ private slots:
         };
         answer(7, QDialogButtonBox::Ok);
         feather->trigger();
-        QCOMPARE(window.session().selectionFeatherAmount(), 7);
+        // Expand, Contract and Feather share one amount (mac 9986d12).
+        QCOMPARE(window.session().selectionModifyAmount(), 7);
         answer(19, QDialogButtonBox::Cancel);
         feather->trigger();
-        QCOMPARE(window.session().selectionFeatherAmount(), 7);   // cancelled: unchanged
+        QCOMPARE(window.session().selectionModifyAmount(), 7);   // cancelled: unchanged
     }
 
     void renderingSettingsUseThePanel()

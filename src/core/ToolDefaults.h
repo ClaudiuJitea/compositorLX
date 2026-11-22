@@ -25,6 +25,28 @@ struct ToolDefaults {
         if (!enabled()) return;
         QSettings().setValue(QStringLiteral("tool/") + key, value);
     }
+    // Numbers and words remembered the same way (mac @AppStorage: New Canvas's size, Export As's format).
+    [[nodiscard]] static double number(const QString &key, double fallback)
+    {
+        if (!enabled()) return fallback;
+        bool ok = false;
+        const double value = QSettings().value(QStringLiteral("tool/") + key).toDouble(&ok);
+        return ok ? value : fallback;
+    }
+    static void set(const QString &key, int value) { setValue(key, value); }
+    static void set(const QString &key, double value) { setValue(key, value); }
+    [[nodiscard]] static QString text(const QString &key, const QString &fallback)
+    {
+        if (!enabled()) return fallback;
+        const QVariant value = QSettings().value(QStringLiteral("tool/") + key);
+        return value.isValid() ? value.toString() : fallback;
+    }
+    static void set(const QString &key, const QString &value) { setValue(key, value); }
+    static void setValue(const QString &key, const QVariant &value)
+    {
+        if (!enabled()) return;
+        QSettings().setValue(QStringLiteral("tool/") + key, value);
+    }
 };
 
 } // namespace compositor

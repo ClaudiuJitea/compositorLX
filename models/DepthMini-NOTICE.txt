@@ -1,0 +1,18 @@
+DepthMini depth model (models/depthmini.onnx)
+
+DepthMini is macOS Compositor's depth model for Volumetric Light, by Robbie Tilton, published at
+https://github.com/robbietilton/Compositor/releases/tag/depth-model-1 as a Core ML package. It is a 2.6 MB model
+distilled from Depth Anything V2 Small (Apache License 2.0, https://github.com/DepthAnything/Depth-Anything-V2) and
+uses parts of torchvision (BSD 3-Clause License, https://github.com/pytorch/vision).
+
+CompositorLX ships the same network converted from that Core ML program to ONNX by scripts/convert-depth-model.py:
+the same layers and weights (its 6-bit palettized weights kept as indices into their tables), run in 32-bit floats.
+
+Files converted (SHA-256):
+  Manifest.json  cfaa07eae081a343ff0e011c2875206d832335e55073252c29c79f73fd938929
+  model.mlmodel  c9e2f4f1e44409a2b9f5fb0b072ba41fb42d03a555c333f635f5162676feb744
+  weight.bin     63d066f1aefc362f2cc0805a624e08df13b6cff3be45dc4307b20a531a2a9f86
+Result:
+  depthmini.onnx e157ef8daf4d9912c3a878f384d29a0518e41ea58f27958b1ecc0beee4c4bd84
+
+Depth Anything V2 Small is licensed under the Apache License, Version 2.0: http://www.apache.org/licenses/LICENSE-2.0

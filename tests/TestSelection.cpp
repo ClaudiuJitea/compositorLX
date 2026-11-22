@@ -131,8 +131,8 @@ private slots:
         QCOMPARE(s.history().undoName(), QString("Expand Selection"));
         QCOMPARE(bounds(s), QRect(35, 35, 30, 30));
         QVERIFY(cov(s, 37, 50) == 255 && cov(s, 33, 50) == 0);
-        // Rounded corners: the corner pixel of the grown box is not selected.
-        QCOMPARE(cov(s, 35, 35), 0);
+        // A rectangle keeps its corners sharp (mac 9986d12): the grown box's corner pixel is selected.
+        QCOMPARE(cov(s, 35, 35), 255);
         QVERIFY(s.contractSelection(8));
         QCOMPARE(bounds(s), QRect(43, 43, 14, 14));
         s.undo(); QCOMPARE(bounds(s).width(), 30);

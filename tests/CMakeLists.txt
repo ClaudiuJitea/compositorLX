@@ -164,6 +164,14 @@ target_link_libraries(upstream158_tests PRIVATE compositor_ui Qt6::Test ${GIF_LI
 target_include_directories(upstream158_tests PRIVATE ${GIF_INCLUDE_DIR})
 add_test(NAME upstream158_tests COMMAND upstream158_tests -platform offscreen -nocrashhandler)
 
+add_executable(upstream170_tests TestUpstream170.cpp)
+target_link_libraries(upstream170_tests PRIVATE compositor_ui Qt6::Test)
+add_test(NAME upstream170_tests COMMAND upstream170_tests -platform offscreen -nocrashhandler)
+
+add_executable(filter_layers_gpu_tests TestFilterLayersGpu.cpp)
+target_link_libraries(filter_layers_gpu_tests PRIVATE compositor_core Qt6::Test)
+add_test(NAME filter_layers_gpu_tests COMMAND filter_layers_gpu_tests -platform offscreen)
+
 add_executable(rgb_split_gpu_tests TestRgbSplitGpu.cpp)
 target_link_libraries(rgb_split_gpu_tests PRIVATE compositor_core Qt6::Test)
 add_test(NAME rgb_split_gpu_tests COMMAND rgb_split_gpu_tests)

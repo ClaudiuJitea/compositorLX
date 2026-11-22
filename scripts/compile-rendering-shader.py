@@ -36,6 +36,12 @@ OPERATIONS = [
     ('Morphology', ['radius', 'axis', 'erode']),
     ('RgbSplit', ['distance', 'blur', 'directionX', 'directionY', 'centerX', 'centerY', 'reach', 'radial',
                   'spectralSamples', 'smearSamples', 'edges']),
+    # RGB Split with blur, in two passes (macOS 79f98de): the streaks into a copy padded by `pad` on every side, then
+    # the spectrum read from it.
+    ('RgbSmear', ['blur', 'directionX', 'directionY', 'centerX', 'centerY', 'reach', 'radial', 'smearSamples', 'edges',
+                  'pad']),
+    ('RgbSpectrum', ['distance', 'directionX', 'directionY', 'centerX', 'centerY', 'reach', 'radial', 'spectralSamples',
+                     'pad']),
     ('Mix', ['amount']),
     ('HueSaturation', ['colorize', 'hue', 'saturation', 'lightness']),
     ('BlackWhite', ['red', 'yellow', 'green', 'cyan', 'blue', 'magenta', 'tint', 'tintHue', 'tintSaturation']),
@@ -79,6 +85,28 @@ OPERATIONS = [
     # Camera Raw's composed color table on 8-bit pixels (macOS MetalCameraRawLookup.swift). Alpha comes back 0 where the
     # result lies within 0.01 of a rounding boundary, for the CPU to redo in double precision; else 1.
     ('CameraRawLookup', ['grid']),
+    # Sharpen (macOS CIUnsharpMask): stage 0 takes sRGB premultiplied pixels to premultiplied linear light; stage 1
+    # adds `amount` times the difference from the auxiliary blur back and returns to sRGB.
+    ('Sharpen', ['stage', 'amount']),
+    # A Vignette layer (adjust_colored_vignette, mac MetalFinishing): the frame is the document, placed relative to the
+    # region's first pixel; only pixels that are there are recolored.
+    ('Vignette', ['frameX', 'frameY', 'frameWidth', 'frameHeight', 'amount', 'midpoint', 'roundness', 'feather',
+                  'highlights', 'red', 'green', 'blue']),
+    # A Tonal Contrast layer (adjust_tonal_contrast): local detail against the auxiliary blur.
+    ('TonalContrast', ['amount', 'shadows', 'midtones', 'highlights']),
+    # Reduce Noise's non-local means (AdjustPixels.c nonlocal_means, mac MetalNonlocalMeans) on a Red32 brightness plane
+    # with its coverage as the auxiliary plane; each 8 × 8 group keeps its block and the search's reach in shared memory.
+    ('NonlocalMeans', ['search', 'patch', 'inverseH2', 'allowance', 'area']),
+    # Rim Light (macOS RimLight.swift / MetalRimLight): the Core Image steps between its blurs, by `mode` (RimMath in
+    # rendering.comp), its lit surface (RimSurface, on a pack of coverage, the outline blurred by `reach`, and the fine
+    # and coarse grays) and its loose strands (RimStrand, on a pack of the wide outline, how far each pixel stands out
+    # from the backdrop and how much that varies, with RimSurface's result as the auxiliary).
+    ('RimMath', ['mode', 'gain', 'bias', 'clamp', 'red', 'green', 'blue']),
+    ('RimSurface', ['directionX', 'directionY', 'directionZ', 'width', 'reach', 'detailScale', 'choke']),
+    ('RimStrand', ['directionX', 'directionY', 'directionZ']),
+    # Volumetric Light's beams (macOS MetalVolumetricLight volumetricBeams): each pixel of the half-size photo gathers
+    # what gives off light along the line back toward the light; the auxiliary is the subject, which blocks it.
+    ('VolumetricBeams', ['lightX', 'lightY', 'side', 'size', 'length', 'shafts', 'brightest']),
 ]
 # Lens operations can update their input in place over a region (GpuGraph::update); the region (x, y, width, height)
 # is passed in the last four parameter slots, which those operations leave free.

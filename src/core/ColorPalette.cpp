@@ -53,6 +53,15 @@ QString hex(const QColor &color)
         .arg(color.blue(), 2, 16, QLatin1Char('0')).toUpper();
 }
 
+std::optional<QColor> fromTypedHex(const QString &input)
+{
+    QString text = input.trimmed();
+    if (text.startsWith(QLatin1Char('#'))) text.remove(0, 1);
+    if (text.isEmpty() || text.size() > 6) return std::nullopt;
+    for (const QChar c : text) if (!c.isDigit() && !(c.toLower() >= QLatin1Char('a') && c.toLower() <= QLatin1Char('f'))) return std::nullopt;
+    return fromHex(text.leftJustified(6, QLatin1Char('0')));
+}
+
 std::optional<QColor> fromHex(const QString &input)
 {
     QString text = input.trimmed();

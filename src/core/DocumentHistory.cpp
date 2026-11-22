@@ -55,6 +55,14 @@ void DocumentHistory::end(const std::shared_ptr<Document> &document)
     pending_.reset();
     const std::optional<Document> afterDocument = document ? std::optional<Document>(*document) : std::nullopt;
     if (before.document == afterDocument) return;
+    // What starts a document (an image opened onto the welcome screen, a new canvas) is where its history starts:
+    // undoing all the way back stops at it rather than closing it (mac 4f9ed78).
+    if (!before.document) {
+        revision_ = QUuid::createUuid();
+        past_.clear();
+        future_.clear();
+        return;
+    }
     revision_ = QUuid::createUuid();
     past_.push_back({pendingName_, before, snapshot(document, revision_)});
     future_.clear();
