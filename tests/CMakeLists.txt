@@ -139,6 +139,10 @@ add_test(NAME io_audit_tests COMMAND io_audit_tests -platform offscreen)
 add_executable(ui_snapshot ../tools/UiSnapshot.cpp)
 target_include_directories(ui_snapshot PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(ui_snapshot PRIVATE compositor_ui Qt6::Test)
+# The README's screenshots (tools/ReadmeShots.cpp).
+add_executable(readme_shots ../tools/ReadmeShots.cpp)
+target_include_directories(readme_shots PRIVATE ../src ../vendor/compositor-rendering)
+target_link_libraries(readme_shots PRIVATE compositor_ui Qt6::Test)
 add_executable(ui_polish_tests
     TestUiPolish.cpp
 )

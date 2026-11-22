@@ -31,22 +31,22 @@
 On distributions older than glibc 2.43, [build from source](#build-from-source).
 
 <p align="center">
-  <img src="docs/screenshots/lens-effects.jpg" alt="CompositorLX with the Lens Effects panel adding a starburst to a night sky" width="920">
+  <img src="docs/screenshots/volumetric-light.jpg" alt="CompositorLX with the Volumetric Light panel casting sunbeams through a bluebell forest" width="920">
 </p>
 
 ## Main features
 
-- **Layers**: folders, all 24 blend modes, opacity, clipping, layer and folder masks, layer styles (stroke, shadows, glows, color overlay), and live adjustment and filter layers.
-- **Non-destructive transforms**: move, scale, rotate, flip and free distort without losing source resolution, with snapping, rulers and guides.
-- **Vector shapes and text**: rectangles, ellipses and styled lines, plus inline WYSIWYG text with per-letter fonts and colors.
+- **Layers**: folders, all 24 blend modes, opacity, clipping stacks, layer and folder masks, layer styles (stroke, shadows, glows, color overlay), live adjustment and filter layers, and Align and Distribute.
+- **Non-destructive transforms**: move, scale, rotate (from just outside a corner), flip and free distort without losing source resolution, with sizes and angles beside the pointer, snapping, rulers, guides and on-canvas distances.
+- **Vector shapes and text**: rectangles, ellipses and styled lines that stay editable (fill, inside stroke, corner radius, line width and dashes), plus inline WYSIWYG text with per-letter fonts and colors.
 - **Selections**: marquee, lasso, polygonal lasso, magic wand, Color Range, and content-aware fill.
-- **Painting and retouching**: brush, eraser, healing, clone stamp, smudge, blur, Liquify, gradients, and pen pressure.
+- **Painting and retouching**: brush (with a hard-edged pencil mode), eraser, healing, clone stamp, smudge, blur, Liquify, gradients, and pen pressure.
 - **Adjustments**: Levels, Curves, Hue/Saturation, Exposure, Color Balance, Black & White, Gradient Map, and a full **Camera Raw** filter.
 - **Filters**: blurs (Gaussian, Motion, Progressive), Sharpen, Reduce Noise, Bloom, RGB Split, Dither, Scanlines, Tonal Contrast, Vignette, Add Noise, Lens Correction, **Lens Effects**, **Rim Light** and **Volumetric Light**; most also as adjustment layers. **Remove Background**, Rim Light and Volumetric Light's depth run local AI models, never a web service.
 - **Animated GIFs**: one layer per GIF with a frame timeline. Play, paint, duplicate, delete and retime frames, then export animated GIFs.
 - **Deep color and print**: 16-bit and HDR layers (EXR, Radiance), CMYK proofing, and CMYK JPEG, TIFF and PDF export.
 - **Files**: `.comp` projects interchangeable with the macOS app (versions 1–22 and 27), PSD/PSB import with artboards and layered PSD export, SVG, PDF, Camera RAW, HEIC/HEIF, WebP, PNG, JPEG and TIFF.
-- **GPU rendering**: a shared Vulkan renderer for the canvas and filters, with the CPU as reference and fallback; the rest runs on every CPU core. Exports stay byte-identical on every machine. See the [GPU notes](docs/GPU_ROLLOUT.md) and [what 0.5.8 sped up](docs/PERFORMANCE_0.5.8.md).
+- **GPU rendering**: a shared Vulkan renderer for the canvas and filters, with the CPU as reference and fallback; the rest runs on every CPU core. Exports stay byte-identical on every machine. See the [GPU notes](docs/GPU_ROLLOUT.md) [what 0.5.8 sped up](docs/PERFORMANCE_0.5.8.md) and [0.7.0's measurements](docs/UPSTREAM_SYNC_1.7.0.md#measurements).
 - **Linux-native**: light, dark or follow-system themes, system fonts, HiDPI, Wayland support, customizable shortcuts, Search Commands (Ctrl+F), and crash-safe atomic saves.
 
 ## New in 0.7.0
@@ -54,7 +54,17 @@ On distributions older than glibc 2.43, [build from source](#build-from-source).
 Synced with macOS Compositor 1.7.0 (every release from 1.5.9 to 1.7.0).
 
 - **New filters**: Sharpen and Reduce Noise (both also as adjustment layers), **Rim Light** (up to three colored lights behind the subject) and **Volumetric Light** (light beams and haze, with depth from the bundled DepthMini model and Extract Depth). Vignette, Lens Effects and Tonal Contrast are adjustment layers too, and Lens Effects' Prism gains Fringe.
+
+<p align="center">
+  <img src="docs/screenshots/new-filters.jpg" alt="Before and after: Volumetric Light adds sunbeams and haze to a forest path; Rim Light catches the edges of a red maple leaf" width="920">
+</p>
+
 - **Editable shapes**: change a rectangle's or ellipse's fill, inside stroke and corner radius after drawing it, or a line's color, width, dashes and caps.
+
+<p align="center">
+  <img src="docs/screenshots/shape-editing.jpg" alt="The Shape bar editing a selected rectangle's fill, red stroke and corner radius while another shape is dragged out with its size beside the pointer" width="920">
+</p>
+
 - **Align and Distribute** from the Move bar and the Layer menu; **custom crop ratios**; **Export As › PSD** keeps the layers, folders, masks and clipping for Photoshop; right-click layers to export each as a PNG.
 - **Canvas**: sizes and angles beside the pointer, rotate from just outside a corner, View › Show › Distances, Space moves a Marquee mid-drag, Alt-arrow duplicates, a pencil (Brush › Anti-alias off), even strokes all the way round.
 - **Layers**: hiding a clipping base hides its stack, duplicates of a stack form their own, new layers join a clipping group, multi-layer Hide/Show, Clipping and 16/8-bit conversion, separate adjustment and filter menus under the panel.
@@ -128,4 +138,4 @@ MIT. CompositorLX is a Linux port of [Compositor](https://github.com/robbietilto
 
 PDF rendering uses Poppler (GPL-2.0-or-later), and GIF encoding uses giflib (MIT). The application source is MIT-licensed. Binaries linked with Poppler are distributed under GPL-2.0-or-later. Dependency notices are in `packaging/licenses/` and in installed packages.
 
-The screenshots use *Winter Grand Triangle* by Hajime Mizuno (mizuno-as) from the Ubuntu wallpapers, [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). The edited versions shown are shared under the same license.
+The screenshots use *Bluebells Suspended In Time* and *Red Acer* by mendhak from the Ubuntu wallpapers, [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). The edited versions shown are shared under the same license. The editor renders them itself with `readme_shots` (`tools/ReadmeShots.cpp`).
