@@ -46,7 +46,7 @@ On distributions older than glibc 2.43, [build from source](#build-from-source).
 - **Animated GIFs**: one layer per GIF with a frame timeline. Play, paint, duplicate, delete and retime frames, then export animated GIFs.
 - **Deep color and print**: 16-bit and HDR layers (EXR, Radiance), CMYK proofing, and CMYK JPEG, TIFF and PDF export.
 - **Files**: `.comp` projects interchangeable with the macOS app (versions 1–22 and 27), PSD/PSB import with artboards and layered PSD export, SVG, PDF, Camera RAW, HEIC/HEIF, WebP, PNG, JPEG and TIFF.
-- **GPU rendering**: a shared Vulkan renderer for the canvas and filters, with the CPU as reference and fallback; the rest runs on every CPU core. Exports stay byte-identical on every machine. See the [GPU notes](docs/GPU_ROLLOUT.md) [what 0.5.8 sped up](docs/PERFORMANCE_0.5.8.md) and [0.7.0's measurements](docs/UPSTREAM_SYNC_1.7.0.md#measurements).
+- **GPU rendering**: a shared Vulkan renderer for the canvas and filters, with the CPU as reference and fallback; the rest runs on every CPU core. Exports stay byte-identical on every machine. See the [GPU notes](docs/GPU_ROLLOUT.md), [what 0.5.8 sped up](docs/PERFORMANCE_0.5.8.md) and [0.7.0's measurements](docs/UPSTREAM_SYNC_1.7.0.md#measurements).
 - **Linux-native**: light, dark or follow-system themes, system fonts, HiDPI, Wayland support, customizable shortcuts, Search Commands (Ctrl+F), and crash-safe atomic saves.
 
 ## New in 0.7.0
