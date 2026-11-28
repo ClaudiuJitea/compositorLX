@@ -74,6 +74,17 @@ public:
     bool openProject(const QString &path);
     bool insertImage(const QImage &image, const QString &name, const std::optional<QPointF> &center = std::nullopt);
     bool insertGif(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
+    // Movie layers (mac b469ec1): a QuickTime or MPEG-4 movie comes in as a layer holding its first frame and linked to the
+    // movie, which the movie timeline plays and scrubs. The project keeps the frame and the link, not the movie.
+    bool insertMovie(const QString &path, const std::optional<QPointF> &center = std::nullopt, QString *error = nullptr);
+    // The frame a scrub or a pause settles on, `seconds` into the movie, as the layer's image ("Select Movie Frame").
+    bool setMovieFrame(const QUuid &layerId, const QImage &frame, double seconds);
+    // A still copy of the frame shown, as a new layer just above the movie, named for its time ("Grab Movie Frame").
+    bool grabMovieFrame(const QUuid &layerId, QString *error = nullptr);
+    // Links the layer to another movie and shows its first frame ("Relink Movie").
+    bool relinkMovie(const QUuid &layerId, const QString &path, QString *error = nullptr);
+    // The movie a layer's link names, whether or not it's there.
+    [[nodiscard]] static QString moviePath(const MovieLink &link);
     bool selectGifFrame(int index);
     // The selected frame, or the given one, which is selected first.
     bool duplicateGifFrame(std::optional<int> index = std::nullopt);
@@ -711,6 +722,10 @@ private:
         double previousPressure = 1;
         // Anti-alias off: hard pixel edges, like a pencil.
         bool pencil = false;
+        // The Brush's soft tip reaches past its nominal diameter, so a soft stroke keeps its visible width, and lays its
+        // dabs further apart (mac ac4f304 BrushSettings.tipDiameter, dabSpacing). Other tools keep the nominal tip.
+        double tipDiameter = 0;
+        double spacingFraction = .025;
         // A scaled-down layer not grown at the press (see beginBrushStroke), and the stroke's points so far, to paint
         // again on the layer at its displayed size if the stroke reaches past it (mac acfc5eb).
         bool deferredGrowth = false;

@@ -106,10 +106,11 @@ private slots:
         const Document before = *s->document();
         QVERIFY(s->beginBrushStroke(QPointF(40, 40), Qt::red, 40, 0, 1, false));
         QVERIFY(alphaAt(*s, 40, 40) > 230);
-        const int half = alphaAt(*s, 50, 40);
-        QVERIFY(half > 95 && half < 140);
-        QVERIFY(alphaAt(*s, 57, 40) < 40);
-        QCOMPARE(alphaAt(*s, 64, 40), 0);
+        // 0% hardness feathers like an airbrush over a tip 35% wider than its diameter (mac ac4f304 BrushTests).
+        const int half = alphaAt(*s, 53, 40);
+        QVERIFY2(half > 95 && half < 140, qPrintable(QString::number(half)));
+        QVERIFY(alphaAt(*s, 64, 40) < 40);
+        QCOMPARE(alphaAt(*s, 68, 40), 0);
         s->cancelBrushStroke();
         QVERIFY(*s->document() == before);
         QVERIFY(!s->beginBrushStroke(QPointF(-100, -100), Qt::red, 40, 0, 1, false) || (s->endBrushStroke(), true));
@@ -132,7 +133,10 @@ private slots:
         stroke(*s, {{20, 40}, {180, 40}}, Qt::red, 40, 0);
         const int line = alphaAt(*s, 100, 50);
         QVERIFY2(line > single + 60, qPrintable(QString("%1 vs %2").arg(line).arg(single)));
-        QVERIFY(line <= 255);
+        // The nominal radius is still feathered, and the middle builds to full (mac ac4f304).
+        const int feather = alphaAt(*s, 100, 60);
+        QVERIFY2(feather >= 25 && feather <= 140, qPrintable(QString::number(feather)));
+        QVERIFY(alphaAt(*s, 100, 40) >= 245);
     }
     void spacedDabsLeaveNoVisibleRipple()
     {
@@ -144,6 +148,21 @@ private slots:
                 for (int x = 300; x <= 600; ++x) { const int a = alphaAt(*s, x, 150 + offset); lo = std::min(lo, a); hi = std::max(hi, a); }
                 QVERIFY2(hi - lo <= 16, qPrintable(QString("hardness %1 offset %2 rippled %3").arg(hardness).arg(offset).arg(hi - lo)));
             }
+        }
+    }
+    // mac 01b4e66 RasterSnapshotTests.eightHundredPixelSoftStrokeHasNoPeriodicRidges: the airbrush's wider dab spacing
+    // still lays an even stroke. Measured outside both feathered end caps (a soft 800 px tip reaches 540 px).
+    void eightHundredPixelSoftStrokeHasNoPeriodicRidges()
+    {
+        std::unique_ptr<EditorSession> s(blankSession(4000, 4000));
+        stroke(*s, {{600, 1600}, {3400, 1600}}, Qt::white, 800, 0);
+        const QImage flat = LayerRenderer_flat(*s);
+        // macOS holds its Metal deposition integral (1 − exp(−∫density), in float) to 1 level. LX lays 8-bit dabs 16% of
+        // the 1080 px tip apart, as macOS's software path does: their sum ripples by up to 4 levels in the faint rim.
+        for (int y : {1600, 1700, 1800, 1900, 1980, 2070}) {
+            int lo = 255, hi = 0;
+            for (int x = 1200; x <= 2800; ++x) { const int a = flat.pixelColor(x, y).alpha(); lo = std::min(lo, a); hi = std::max(hi, a); }
+            QVERIFY2(hi - lo <= 4, qPrintable(QString("y %1 rippled %2").arg(y).arg(hi - lo)));
         }
     }
     // BrushIntersectionTests
@@ -235,10 +254,12 @@ private slots:
             std::unique_ptr<EditorSession> s(blankSession(600, 200));
             stroke(*s, {{300, 100}}, Qt::red, 20, hardness);
             const Layer *l = s->activeLayer();
-            QVERIFY(l->image.width() <= 20 && l->image.height() <= 20);
-            QVERIFY(l->transform.origin.x() >= 290 && l->transform.origin.y() >= 90);
+            // A soft tip reaches past its diameter (mac ac4f304: 28 px at 0%, 20 at 100%).
+            const int extent = hardness == 0 ? 28 : 20;
+            QVERIFY2(l->image.width() <= extent && l->image.height() <= extent, qPrintable(QString("%1x%2").arg(l->image.width()).arg(l->image.height())));
+            QVERIFY(l->transform.origin.x() >= 300 - extent / 2.0 && l->transform.origin.y() >= 100 - extent / 2.0);
             s->undo(); QVERIFY(s->activeLayer()->image.isNull());
-            s->redo(); QVERIFY(s->activeLayer()->image.width() <= 20);
+            s->redo(); QVERIFY(s->activeLayer()->image.width() <= extent);
         }
     }
     void blankLayerScaledDownPaintsAtDocumentResolution()

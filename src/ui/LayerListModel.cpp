@@ -256,8 +256,10 @@ QVariant LayerListModel::data(const QModelIndex &index, int role) const
         if (!layer.adjustment.isEmpty()) return tr("Adjustment · %1").arg(layer.adjustment.value(QStringLiteral("kind")).toString());
         if (!layer.image.isNull()) {
             QString text = QStringLiteral("%1 × %2 px").arg(layer.image.width()).arg(layer.image.height());
-            if (layer.gif) text += QStringLiteral(" · GIF");
-            if(DeepImage::isDeep(layer.image))text+=DeepImage::isHDR(layer.image)?QStringLiteral(" · HDR"):QStringLiteral(" · 16-Bit");
+            // One tag after the size: MOV for a movie layer, then GIF, then the depth (mac depthLabel).
+            if (layer.movie) text += QStringLiteral(" · MOV");
+            else if (layer.gif) text += QStringLiteral(" · GIF");
+            else if(DeepImage::isDeep(layer.image))text+=DeepImage::isHDR(layer.image)?QStringLiteral(" · HDR"):QStringLiteral(" · 16-Bit");
             // A layer keeps its full pixels however small it is scaled, so a scaled one says so: "100 × 100 px · 5%" rather
             // than looking as if it had been resampled (mac 67cc31e).
             const double scale = layer.transform.size.width() / std::max(1, layer.image.width());

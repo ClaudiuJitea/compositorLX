@@ -169,6 +169,13 @@ inline QHash<QString, QString> tokens(const QPalette &p)
     c[QStringLiteral("warning")] = dark ? QColor(255, 176, 64) : QColor(166, 98, 0);
     c[QStringLiteral("dangerSoft")] = mix(W, red, dark ? .22 : .14);
     c[QStringLiteral("dangerBorder")] = mix(W, red, dark ? .45 : .5);
+    // The editor toolbar's solid pills and project tabs (mac 2fc7936, 475acdd EditorToolbarPillStyle): the active tab and
+    // every button white 0.19, pressed 0.25; an inactive tab a step darker, 45/255, with its text dimmed.
+    c[QStringLiteral("pill")] = dark ? QColor(48, 48, 48) : mix(W, T, .075);
+    c[QStringLiteral("pillHover")] = dark ? QColor(56, 56, 56) : mix(W, T, .11);
+    c[QStringLiteral("pillPressed")] = dark ? QColor(64, 64, 64) : mix(W, T, .15);
+    c[QStringLiteral("tabInactive")] = dark ? QColor(45, 45, 45) : mix(W, T, .04);
+    c[QStringLiteral("tabInactiveText")] = mix(T, W, dark ? .4 : .38);
     c[QStringLiteral("tooltip")] = p.color(QPalette::ToolTipBase);
     c[QStringLiteral("tooltipText")] = p.color(QPalette::ToolTipText);
     QHash<QString, QString> result;
@@ -201,27 +208,35 @@ inline QString editorStyleTemplate()
         QMessageBox QLabel#qt_msgbox_label { color: @text@; font-size: 13px; min-width: 300px; }
         QMessageBox QLabel#qt_msgbox_informativelabel { color: @textMuted@; }
         QMessageBox QPushButton, QDialogButtonBox QPushButton { min-width: 86px; min-height: 31px; border-radius: 6px; }
+        QDialogButtonBox[roundedControls="true"] QPushButton { min-height: 28px; max-height: 28px; border-radius: 14px; padding: 0 14px; }
         QWidget#tabBar { background: @chrome@; border-bottom: 1px solid @separator@; }
         QWidget#documentTab { background: @control@; border: 1px solid @border@; border-radius: 15px; }
         QTabBar#documentTabs { background: transparent; border: 0; }
-        QTabBar#documentTabs::tab { background: transparent; color: @textMuted@; border: 1px solid transparent; border-radius: 5px; min-width: 122px; max-width: 190px; height: 26px; padding: 0 4px 0 10px; margin-right: 3px; }
-        QTabBar#documentTabs::tab:selected { background: @panelAlt@; color: @textStrong@; border-color: @borderSoft@; }
-        QTabBar#documentTabs::tab:hover:!selected { background: @panel@; color: @text@; }
+        QTabBar#documentTabs::tab { background: @tabInactive@; color: @tabInactiveText@; border: 0; border-radius: 14px; min-width: 122px; max-width: 190px; height: 28px; padding: 0 5px 0 12px; margin-right: 6px; }
+        QTabBar#documentTabs::tab:selected { background: @pill@; color: @textStrong@; }
+        QTabBar#documentTabs::tab:hover:!selected { background: @pillHover@; color: @text@; }
         QToolButton#documentTabClose { background: transparent; border: 0; border-radius: 4px; min-width: 20px; max-width: 20px; min-height: 20px; max-height: 20px; padding: 0; }
         QToolButton#documentTabClose:hover { background: @controlHover@; }
         QToolButton#documentTabClose:pressed { background: @controlPressed@; }
-        QToolButton#tabOverflow { border: 1px solid @border@; border-radius: 8px; padding: 1px 8px; color: @textMuted@; background: transparent; }
+        QToolButton#tabOverflow { border: 0; border-radius: 14px; min-height: 28px; max-height: 28px; padding: 0 11px; color: @tabInactiveText@; background: @tabInactive@; }
+        QToolButton#tabOverflow:hover { background: @pillHover@; color: @text@; }
         QToolButton#tabOverflow::menu-indicator { image: none; }
         QLabel#tabDot { color: @textStrong@; font-size: 15px; }
         QToolButton#tabClose { border: 0; background: transparent; color: @textMuted@; font-size: 16px; }
         QToolButton#newTabButton, QToolButton#menuRestoreButton, QToolButton#roundTool { background: transparent; border: 1px solid transparent; border-radius: 13px; }
         QToolButton#menuRestoreButton::menu-indicator { image: none; }
-        QToolButton#newTabButton { color: @text@; font-size: 18px; font-weight: 300; min-width: 25px; max-width: 25px; min-height: 25px; max-height: 25px; padding: 0 0 2px 0; }
+        QToolButton#newTabButton { color: @text@; background: @pill@; border: 0; border-radius: 14px; font-size: 18px; font-weight: 400; min-width: 28px; max-width: 28px; min-height: 28px; max-height: 28px; padding: 0 0 2px 0; }
+        QToolButton#newTabButton:hover { background: @pillHover@; border: 0; }
+        QToolButton#newTabButton:pressed { background: @pillPressed@; }
+        QToolButton#newTabButton:disabled { color: @textDisabled@; background: @pill@; }
         QToolButton#menuRestoreButton { color: @text@; font-size: 16px; min-width: 25px; max-width: 25px; min-height: 25px; max-height: 25px; padding: 0 0 2px 0; }
         QToolButton#roundTool { min-width: 25px; max-width: 25px; min-height: 25px; max-height: 25px; }
         QToolButton#newTabButton:hover, QToolButton#menuRestoreButton:hover, QToolButton#roundTool:hover { background: @controlHover@; border-color: @border@; }
         QToolButton#newTabButton:pressed, QToolButton#menuRestoreButton:pressed, QToolButton#roundTool:pressed { background: @controlPressed@; }
-        QPushButton#toolbarPill { min-width: 42px; min-height: 25px; max-height: 25px; padding: 0 8px; border-radius: 12px; }
+        QPushButton#toolbarPill, QToolButton#toolbarPill { background: @pill@; color: @textStrong@; border: 0; font-size: 13px; font-weight: 500; min-width: 42px; min-height: 28px; max-height: 28px; padding: 0 8px; border-radius: 14px; }
+        QPushButton#toolbarPill:hover, QToolButton#toolbarPill:hover { background: @pillHover@; }
+        QPushButton#toolbarPill:pressed, QToolButton#toolbarPill:pressed { background: @pillPressed@; }
+        QPushButton#toolbarPill:disabled, QToolButton#toolbarPill:disabled { background: @pill@; color: @textDisabled@; }
         QWidget#transformBar QWidget, QWidget#inspector QWidget { font-size: 11px; }
         QWidget#transformBar { background: @panel@; border-bottom: 1px solid @borderSoft@; }
         QWidget#transformBar QPushButton, QWidget#transformBar QToolButton, QWidget#transformBar QComboBox, QWidget#transformBar QDoubleSpinBox, QWidget#transformBar QSpinBox { min-height: 26px; max-height: 26px; height: 26px; }
@@ -431,15 +446,16 @@ inline QString editorStyleTemplate()
         QWidget#inspectorHeading QToolButton:checked { background: transparent; }
         QWidget#inspectorHeading QToolButton::menu-indicator { image: none; width: 0; }
         QWidget#inspectorHeading QLineEdit#layerSearch { border: 1px solid @focus@; border-radius: 6px; }
-        QWidget#gifTimeline { border-top: 1px solid @separator@; }
-        QFrame#gifDivider { color: @separator@; background: @separator@; border: none; max-width: 1px; }
-        QToolButton#gifPlay { border: none; border-radius: 19px; background: @control@; min-width: 70px; max-width: 70px; min-height: 40px; max-height: 40px; padding: 0; }
-        QToolButton#gifPlay:hover { background: @controlHover@; }
-        QToolButton#gifPlay:pressed { background: @controlPressed@; }
-        QToolButton#gifDelay { border: none; background: transparent; color: @textMuted@; min-height: 0; padding: 2px 6px; }
-        QToolButton#gifDelay:hover { color: @text@; }
+        QWidget#gifTimeline, QWidget#movieTimeline { border-top: 1px solid @separator@; }
+        QFrame#gifDivider { color: @separator@; background: @separator@; border: none; max-height: 1px; }
+        QToolButton#gifPlay, QToolButton#moviePlay, QToolButton#movieMute { border: 0; border-radius: 6px; background: transparent; min-height: 0; padding: 0; }
+        QToolButton#gifPlay:hover, QToolButton#moviePlay:hover, QToolButton#movieMute:hover { background: @controlHover@; }
+        QToolButton#gifPlay:pressed, QToolButton#moviePlay:pressed, QToolButton#movieMute:pressed { background: @controlPressed@; }
+        QToolButton#gifDelay { min-height: 24px; max-height: 24px; padding: 0 9px; border-radius: 6px; }
         QToolButton#gifDelay::menu-indicator { image: none; width: 0; }
-        QListWidget#gifFrames { background: transparent; border: none; }
+        QLabel#gifFrameCounter, QLabel#movieTime { color: @text@; padding-left: 2px; }
+        QLabel#movieFailure { color: @warning@; font-size: 11px; }
+        QListWidget#gifFrames { background: transparent; border: none; padding: 2px 8px 0 8px; }
         QListWidget#gifFrames::item { color: @textMuted@; background: transparent; border: none; }
         QListWidget#gifFrames::item:selected { color: @text@; background: transparent; }
         QTextEdit#inlineTextEditor { background: transparent; border: 0; border-radius: 0; padding: 0; selection-background-color: @accent@; }
@@ -453,9 +469,6 @@ inline QString editorStyleTemplate()
         QScrollBar:vertical { width: 9px; background: transparent; }
         QScrollBar::handle:vertical { background: @border@; border-radius: 4px; min-height: 30px; }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-        QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: @border@; }
-        QSlider::sub-page:horizontal { background: @accent@; border-radius: 2px; }
-        QSlider::handle:horizontal { width: 14px; margin: -5px 0; border-radius: 7px; background: @textStrong@; }
         QWidget#layerFooter { border-top: 1px solid @separator@; }
         QWidget#bottomStatus { background: @panel@; border-top: 1px solid @separator@; }
         QWidget#bottomStatus QLabel { color: @textMuted@; font-size: 11px; }
@@ -566,7 +579,7 @@ private:
     bool pending_ = false;
 };
 
-// The application's look: Fusion with click-to-position sliders, the editor's palette (or the desktop's) and the
+// The application's look: Fusion with the slim click-to-position sliders (SliderJumpStyle), the editor's palette (or the desktop's) and the
 // stylesheet built from it. One place, so the app and the UI snapshot tool cannot drift apart.
 inline void applyEditorTheme(QApplication &application, std::optional<ThemeMode> mode = std::nullopt)
 {

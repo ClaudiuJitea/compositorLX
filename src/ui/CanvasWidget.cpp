@@ -265,8 +265,23 @@ void CanvasWidget::setBlendModePreview(const std::optional<QUuid> &layerId, cons
     invalidateDocument();
 }
 
+void CanvasWidget::setMoviePreview(const QUuid &layerId, const QImage &frame)
+{
+    if (frame.isNull()) {
+        if (!moviePreview_) return;
+        moviePreview_.reset();
+    } else {
+        moviePreview_ = qMakePair(layerId, frame);
+    }
+    invalidateDocument();
+}
+
 void CanvasWidget::applyPreviewState(Document &snapshot) const
 {
+    // The frame playing in place of the movie layer's own; it may be decoded smaller, and is shown at the layer's size.
+    if (moviePreview_) for (Layer &layer : snapshot.layers) if (layer.id == moviePreview_->first && layer.movie) {
+        layer.image = moviePreview_->second; break;
+    }
     if (textEditingLayer_) for (Layer &layer : snapshot.layers) if (layer.id == *textEditingLayer_) layer.visible = false;
     if (blendModePreview_) for (Layer &layer : snapshot.layers) if (layer.id == blendModePreview_->first) {
         layer.blendMode = blendModePreview_->second; break;

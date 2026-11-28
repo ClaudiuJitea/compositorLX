@@ -2,6 +2,8 @@
 #include "ui/MainWindow.h"
 #include "ui/PanelDialog.h"
 #include "ui/GifTimeline.h"
+#include "ui/MovieTimeline.h"
+#include "io/MovieDecoder.h"
 #include "core/ToolDefaults.h"
 #include "core/SelectionOps.h"
 #include "io/AdjustmentJson.h"
@@ -1270,9 +1272,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     auto *tabBar = new QWidget(shell);
     tabBar->setObjectName(QStringLiteral("tabBar"));
-    tabBar->setFixedHeight(37);
+    tabBar->setFixedHeight(40);
     auto *tabLayout = new QHBoxLayout(tabBar);
-    tabLayout->setContentsMargins(10, 4, 12, 4);
+    tabLayout->setContentsMargins(10, 6, 12, 6);
     tabLayout->setSpacing(5);
     menuRestoreButton_ = new QToolButton(tabBar);
     menuRestoreButton_->setText(QStringLiteral("≡"));
@@ -1284,13 +1286,14 @@ MainWindow::MainWindow(QWidget *parent)
     newButton->setText(QStringLiteral("+"));
     newButton->setToolTip(tr("New canvas tab"));
     newButton->setObjectName(QStringLiteral("newTabButton"));
-    newButton->setFixedSize(25, 25);
+    newButton->setAccessibleName(tr("New canvas"));
+    newButton->setFixedSize(28, 28);
     tabLayout->addWidget(newButton);
     tabs_ = new QTabBar(tabBar); tabs_->setObjectName(QStringLiteral("documentTabs")); tabs_->setMovable(true); tabs_->setTabsClosable(false); tabs_->setExpanding(false);
     tabs_->setElideMode(Qt::ElideRight); tabs_->setUsesScrollButtons(true); tabs_->setDrawBase(false);
     tabs_->setAcceptDrops(true); tabs_->installEventFilter(this);
     newButton->setAcceptDrops(true); newButton->setProperty("newTabDropTarget", true); newButton->installEventFilter(this);
-    tabs_->addTab(tr("Untitled")); installTabCloseButton(0); tabs_->setCurrentIndex(0); tabs_->setMinimumWidth(155); tabs_->setFixedHeight(29);
+    tabs_->addTab(tr("Untitled")); installTabCloseButton(0); tabs_->setCurrentIndex(0); tabs_->setMinimumWidth(155); tabs_->setFixedHeight(28);
     workspaceTabs_.push_back(session_);
     tabRecoveryPaths_.push_back(newRecoveryPath());
     tabWatchers_.push_back(nullptr);
@@ -1316,13 +1319,19 @@ MainWindow::MainWindow(QWidget *parent)
     });
     tabLayout->addWidget(tabs_);
     tabLayout->addStretch();
+    // Solid pills, 28 high, six apart: Fit, 100%, Zoom In, Zoom Out (mac 2fc7936 EditorToolbarPillStyle).
     auto *fitTop = new QPushButton(tr("Fit"), tabBar); fitTop->setObjectName(QStringLiteral("toolbarPill"));
     auto *actualTop = new QPushButton(tr("100%"), tabBar); actualTop->setObjectName(QStringLiteral("toolbarPill"));
-    auto *zoomOutTop = new QToolButton(tabBar); zoomOutTop->setIcon(editorIcon(13)); zoomOutTop->setObjectName(QStringLiteral("roundTool")); zoomOutTop->setToolTip(tr("Zoom out"));
-    auto *zoomInTop = new QToolButton(tabBar); zoomInTop->setIcon(editorIcon(14)); zoomInTop->setObjectName(QStringLiteral("roundTool")); zoomInTop->setToolTip(tr("Zoom in"));
-    fitTop->setFixedSize(52, 25); actualTop->setFixedSize(58, 25);
-    zoomOutTop->setFixedSize(25, 25); zoomInTop->setFixedSize(25, 25);
-    tabLayout->addWidget(fitTop); tabLayout->addWidget(actualTop); tabLayout->addSpacing(2); tabLayout->addWidget(zoomOutTop); tabLayout->addWidget(zoomInTop);
+    auto *zoomOutTop = new QToolButton(tabBar); zoomOutTop->setIcon(editorIcon(13)); zoomOutTop->setObjectName(QStringLiteral("toolbarPill")); zoomOutTop->setToolTip(tr("Zoom out"));
+    auto *zoomInTop = new QToolButton(tabBar); zoomInTop->setIcon(editorIcon(14)); zoomInTop->setObjectName(QStringLiteral("toolbarPill")); zoomInTop->setToolTip(tr("Zoom in"));
+    fitTop->setToolTip(tr("Fit canvas in window (Ctrl+0)")); actualTop->setToolTip(tr("Actual pixels (Ctrl+1)"));
+    zoomOutTop->setAccessibleName(tr("Zoom out")); zoomInTop->setAccessibleName(tr("Zoom in"));
+    fitTop->setFixedSize(46, 28); actualTop->setFixedSize(58, 28);
+    zoomOutTop->setFixedSize(42, 28); zoomInTop->setFixedSize(42, 28);
+    zoomOutTop->setIconSize(QSize(16, 16)); zoomInTop->setIconSize(QSize(16, 16));
+    auto *zoomPills = new QHBoxLayout; zoomPills->setSpacing(6);
+    zoomPills->addWidget(fitTop); zoomPills->addWidget(actualTop); zoomPills->addWidget(zoomInTop); zoomPills->addWidget(zoomOutTop);
+    tabLayout->addLayout(zoomPills);
     shellLayout->addWidget(tabBar);
 
     auto *transformBar = new QWidget(shell);
@@ -2120,8 +2129,12 @@ MainWindow::MainWindow(QWidget *parent)
     canvasGrid->addWidget(horizontalRuler_, 0, 1);
     canvasGrid->addWidget(verticalRuler_, 1, 0);
     canvasGrid->addWidget(canvasStack_, 1, 1);
+    // A movie layer's bar, then a GIF layer's timeline, under the canvas (mac ContentView).
+    movieTimeline_ = new MovieTimeline(session_, [this] { syncDocumentViews(); },
+                                       [this](const QUuid &id, const QImage &frame) { if (canvas_) canvas_->setMoviePreview(id, frame); }, canvasContainer);
+    canvasGrid->addWidget(movieTimeline_, 2, 0, 1, 2);
     gifTimeline_ = new GifTimeline(session_, [this] { syncDocumentViews(); }, canvasContainer);
-    canvasGrid->addWidget(gifTimeline_, 2, 0, 1, 2);
+    canvasGrid->addWidget(gifTimeline_, 3, 0, 1, 2);
     canvasGrid->setRowStretch(1, 1);
     canvasGrid->setColumnStretch(1, 1);
 
@@ -2238,7 +2251,7 @@ MainWindow::MainWindow(QWidget *parent)
         noMatchLayout->addWidget(message); noMatchLayout->addWidget(clearAll, 0, Qt::AlignCenter);
     }
     inspectorLayout->addWidget(layerNoMatch_, 1);
-    auto *layerFooter = new QWidget(inspector); layerFooter->setObjectName(QStringLiteral("layerFooter")); layerFooter->setFixedHeight(36);
+    auto *layerFooter = new QWidget(inspector); layerFooter->setObjectName(QStringLiteral("layerFooter")); layerFooter->setFixedHeight(layersFooterHeight);
     auto *footerLayout = new QHBoxLayout(layerFooter); footerLayout->setContentsMargins(8, 4, 6, 4); footerLayout->setSpacing(4);
     const auto layerButton = [layerFooter, footerLayout](int icon, const QString &name, const QString &tip) {
         auto *button = new QToolButton(layerFooter);
@@ -2716,6 +2729,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(canvas_, &CanvasWidget::brushStrokeStarted, this, [this, explainRefusal](const QPointF &point, bool erasing) {
         if (explainRefusal()) return;
         if (gifTimeline_) gifTimeline_->stop();
+        if (movieTimeline_) movieTimeline_->stop();
         session_.setViewportZoom(canvas_->zoom());
         session_.setBrushSmoothing(brushSmoothing_);
         session_.setPenInput(canvas_->usingPen() ? canvas_->penPressure() : 1, canvas_->usingPen() && findChild<QCheckBox *>("penSize")->isChecked(), canvas_->usingPen() && findChild<QCheckBox *>("penOpacity")->isChecked());
@@ -6830,7 +6844,7 @@ void MainWindow::removeRecentProject(const QString &path)
 void MainWindow::importImages()
 {
     const QStringList paths = QFileDialog::getOpenFileNames(this, tr("Import…"), {},
-        tr("Images, PDF, SVG, Photoshop and Camera RAW Files (*.pdf *.gif *.png *.jpg *.jpeg *.webp *.exr *.hdr *.hif *.heic *.heif *.tif *.tiff *.svg *.svgz *.psd *.psb *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;Vector Graphics (*.svg *.svgz);;Photoshop Files (*.psd *.psb);;Camera RAW Files (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;All Files (*)"));
+        tr("Images, Movies, PDF, SVG, Photoshop and Camera RAW Files (*.mov *.mp4 *.m4v *.qt *.pdf *.gif *.png *.jpg *.jpeg *.webp *.exr *.hdr *.hif *.heic *.heif *.tif *.tiff *.svg *.svgz *.psd *.psb *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;Movies (*.mov *.mp4 *.m4v *.qt);;Vector Graphics (*.svg *.svgz);;Photoshop Files (*.psd *.psb);;Camera RAW Files (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.raf);;All Files (*)"));
     importImageFiles(paths);
 }
 
@@ -6917,6 +6931,13 @@ bool MainWindow::importImageFiles(const QStringList &paths, const std::optional<
             continue;
         }
 
+        // A QuickTime or MPEG-4 movie comes in as a movie layer (mac b469ec1).
+        if (MovieDecoder::isMovieFile(path)) {
+            QString error;
+            if (session_.insertMovie(path, center, &error)) imported = true;
+            else failures << tr("%1: %2").arg(QFileInfo(path).fileName(), error);
+            continue;
+        }
         if (suffix == QStringLiteral("gif")) {
             QString error;
             if (session_.insertGif(path, center, &error)) imported = true;
@@ -8010,6 +8031,13 @@ bool MainWindow::openProject(const QString &requestedPath)
         return true;
     }
 
+    if (MovieDecoder::isMovieFile(path)) {
+        EditorSession opened; QString error;
+        if (!opened.insertMovie(path, std::nullopt, &error)) { showMessage(this, tr("Could Not Open Movie"), error); return false; }
+        // Export and Save start from the movie's name and folder (mac sourceImageURL for a file that starts a document).
+        opened.sourceImagePath = QFileInfo(path).absoluteFilePath();
+        installInNewTab(std::move(opened), QFileInfo(path).completeBaseName()); return true;
+    }
     if (suffix == QStringLiteral("gif")) {
         EditorSession opened; QString error;
         if (!opened.insertGif(path, std::nullopt, &error)) { showMessage(this, tr("Could Not Open GIF"), error); return false; }
@@ -8314,6 +8342,7 @@ void MainWindow::selectLayer(const QModelIndex &index)
 void MainWindow::updateInspector()
 {
     if (gifTimeline_) gifTimeline_->refresh(canvasOnly_);
+    if (movieTimeline_) movieTimeline_->refresh(canvasOnly_);
     if (!document_ || !document_->activeLayerId) {
         const std::array<QWidget *, 14> fields = {xLabel_, xField_, yLabel_, yField_, widthLabel_, widthField_, heightLabel_, heightField_, scaleField_, rotationLabel_, rotationField_, sampling_, blendMode_, opacitySlider_};
         for (QWidget *field : fields) {
@@ -8505,6 +8534,7 @@ void MainWindow::toggleCanvasOnly()
     }
     canvasOnly_ = entering;
     if (gifTimeline_) gifTimeline_->refresh(canvasOnly_);
+    if (movieTimeline_) movieTimeline_->refresh(canvasOnly_);
     for (const char *name : {"tabBar", "transformBar", "toolRail", "inspector", "bottomStatus"})
         if (auto *widget = findChild<QWidget *>(QLatin1String(name))) widget->setVisible(!entering);
     // Collapsed rather than hidden, so the menus' shortcuts keep working.

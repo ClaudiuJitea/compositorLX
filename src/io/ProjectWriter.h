@@ -60,7 +60,7 @@ struct ExpectedDestinationState final {
 class ProjectWriter final {
 public:
     // The newest format version (mac ProjectManifest.current). New saves write the lowest version their content needs.
-    static constexpr int currentVersion = 22;
+    static constexpr int currentVersion = 23;
     using SaveResult = compositor::SaveResult;
     using ExpectedDestinationState = compositor::ExpectedDestinationState;
     using WorkerDelayHook = std::function<void(const QString &stage, const QString &destination)>;

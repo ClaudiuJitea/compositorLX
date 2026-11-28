@@ -1197,10 +1197,10 @@ void TestFilters::colorTracksRunFromTheCoolOrMutedEndToTheWarmOrStrongEnd()
     QVERIFY(chroma.last().redF() > chroma.last().greenF() + 0.4);
     const QColor green = SliderTrack::luminance(120).last();
     QVERIFY(green.greenF() > green.redF() && green.greenF() > green.blueF());
-    QVERIFY(!SliderTrack::styleSheet(temperature).isEmpty());
-    // A real slider takes the track as its groove.
+    // A real slider takes the track as its groove, painted by the editor's slider style.
     QSlider slider; SliderTrack::apply(&slider, temperature);
-    QVERIFY(slider.styleSheet().contains(QStringLiteral("qlineargradient")));
+    QCOMPARE(slider.property("trackGradient").toList().size(), temperature.size());
+    QCOMPARE(slider.property("trackGradient").toList().first().value<QColor>(), temperature.first());
 }
 
 void TestFilters::colorBalanceTracksRunFromEachColorToItsOpposite()

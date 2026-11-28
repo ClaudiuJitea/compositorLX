@@ -179,6 +179,10 @@ public:
     void invalidateDocument();
     [[nodiscard]] quint64 renderGeneration() const { return renderGeneration_; }
     void setBlendModePreview(const std::optional<QUuid> &layerId, const std::optional<BlendMode> &mode);
+    // A movie layer's frame while it plays or is scrubbed, drawn in place of the layer's image without touching the
+    // document (mac moviePreview, displayedAsset(for:onCanvas:)). A null image clears it.
+    void setMoviePreview(const QUuid &layerId, const QImage &frame);
+    [[nodiscard]] bool hasMoviePreview() const { return moviePreview_.has_value(); }
     void setTextEditingLayer(const std::optional<QUuid> &id) { textEditingLayer_ = id; invalidateDocument(); }
 
 signals:
@@ -322,6 +326,7 @@ private:
     QFutureWatcher<QImage> renderWatcher_;
     bool renderActive_ = false;
     std::optional<QPair<QUuid, BlendMode>> blendModePreview_;
+    std::optional<QPair<QUuid, QImage>> moviePreview_;
     std::optional<QUuid> textEditingLayer_;
     double zoom_ = 1.0;
     bool fitPending_ = true;

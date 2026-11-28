@@ -1,11 +1,12 @@
 #pragma once
 
-// The colored slider tracks of macOS CameraRawSlider.swift (CameraRawSliderTrack) as Qt style sheets, shared by the
-// Camera Raw dialog and the Color Balance / Hue-Saturation panels.
+// The colored slider tracks of macOS CameraRawSlider.swift (CameraRawSliderTrack), shared by the Camera Raw dialog and
+// the Color Balance / Hue-Saturation panels.
 #include <QColor>
 #include <QSlider>
 #include <QString>
 #include <QStringList>
+#include <QVariant>
 #include <cmath>
 
 namespace compositor {
@@ -32,17 +33,20 @@ inline QList<QColor> cyanRed() { return {QColor::fromRgbF(.10, .72, .80), QColor
 inline QList<QColor> magentaGreen() { return {QColor::fromRgbF(.80, .22, .70), QColor::fromRgbF(.24, .70, .30)}; }
 inline QList<QColor> yellowBlue() { return {QColor::fromRgbF(.95, .82, .18), QColor::fromRgbF(.22, .40, .92)}; }
 
-inline QString styleSheet(const QList<QColor> &colors)
+// The track's colors, painted along the whole groove by the editor's slider style (SliderJumpStyle), 4 px thick as macOS's
+// color tracks are.
+inline QVariantList gradient(const QList<QColor> &colors)
 {
-    QString stops;
-    for (int i = 0; i < colors.size(); ++i)
-        stops += QStringLiteral("stop:%1 %2%3").arg(colors.size() > 1 ? double(i) / (colors.size() - 1) : 0.0, 0, 'f', 4).arg(colors[i].name(), i + 1 < colors.size() ? QStringLiteral(", ") : QString());
-    return QStringLiteral("QSlider::groove:horizontal{height:6px;border-radius:3px;background:qlineargradient(x1:0,y1:0,x2:1,y2:0,%1);}"
-                          "QSlider::handle:horizontal{width:12px;margin:-4px 0;border-radius:6px;background:#eeeeee;border:1px solid #444444;}").arg(stops);
+    QVariantList list;
+    for (const QColor &color : colors) list.push_back(color);
+    return list;
 }
 inline void apply(QSlider *slider, const QList<QColor> &colors)
 {
-    if (slider && !colors.isEmpty()) { slider->setStyleSheet(styleSheet(colors)); slider->setProperty("trackColors", int(colors.size())); }
+    if (!slider || colors.isEmpty()) return;
+    slider->setProperty("trackGradient", gradient(colors));
+    slider->setProperty("trackColors", int(colors.size()));
+    slider->update();
 }
 
 } // namespace SliderTrack

@@ -2698,6 +2698,13 @@ static QRect nonzeroBounds(const QImage &gray)
     return right < left ? QRect() : QRect(QPoint(left, top), QPoint(right, bottom));
 }
 
+// mac ac4f304 BrushSettings: the Brush's airbrush feather, (1 − hardness)², widens the tip by up to 35% and its dab
+// spacing from 2.5% to 16% of the tip, so a 0% stroke fades over a wider, smoother rim.
+static double airbrushFeather(bool airbrush, bool antialiased, double hardness)
+{
+    return airbrush && antialiased ? (1 - hardness) * (1 - hardness) : 0;
+}
+
 bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor &color, double diameter,
                                      double hardness, double opacity, bool erasing, const std::optional<QPointF> &cloneSource,
                                      int healMode, quint32 effectSeed)
@@ -2713,6 +2720,10 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
     const QUuid id = layer->id;
     const int index = indexOf(id);
     if ((cloneSource || healMode >= 0) && paintingMask) return false;
+    // The Brush (paint and erase, on pixels or a mask) feathers like an airbrush; Clone, Healing and Blur don't.
+    const bool airbrush = !cloneSource && healMode < 0;
+    const double feather = airbrushFeather(airbrush, brushAntialiased, hardness);
+    const double tipDiameter = diameter * (1 + .35 * feather);
     if (!restartingBrush_) beginEdit(paintingMask ? QStringLiteral("Paint Mask") : cloneSource ? QStringLiteral("Clone Stamp") : healMode == 3 ? QStringLiteral("Blur")
                                                               : healMode >= 0 ? QStringLiteral("Spot Healing")
                                                               : erasing ? QStringLiteral("Erase") : QStringLiteral("Brush Stroke"));
@@ -2729,7 +2740,7 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
             QSize size(std::max(1, qRound(layer->transform.size.width())), std::max(1, qRound(layer->transform.size.height())));
             sparseBlank = !cloneSource && healMode < 0 && target.transform.rotation == 0 && !target.transform.flipX && !target.transform.flipY;
             if (sparseBlank) {
-                const double radius = diameter/2+3;
+                const double radius = tipDiameter/2+3;
                 const QRect patch = QRectF(documentPoint-QPointF(radius,radius),QSizeF(radius*2,radius*2)).toAlignedRect()
                     .intersected(QRect(QPoint(),document_->canvasSize));
                 if (patch.isEmpty()) { endEdit(); return false; }
@@ -2793,6 +2804,8 @@ bool EditorSession::beginBrushStroke(const QPointF &documentPoint, const QColor 
     // Anti-alias off is the Brush's alone (it paints and erases); a pencil is always hard (mac 1f1d84c).
     brush_->pencil = !brushAntialiased && !cloneSource && healMode < 0;
     if (brush_->pencil) brush_->hardness = 1;
+    brush_->tipDiameter = tipDiameter;
+    brush_->spacingFraction = .025 + .135 * feather;
     brush_->pressureSize = penSize_; brush_->pressureOpacity = penOpacity_; brush_->previousPressure = penPressure_;
     brush_->sparseBlank = sparseBlank;
     brush_->deferredGrowth = deferredGrowth;
@@ -2978,7 +2991,9 @@ static QVector<QPointF> dabsAlong(const QPointF &from, const QPointF &to, double
     return dabs;
 }
 
-static double softDabSpacing(double radius, double scale) { return std::max(0.25 / std::max(1e-9, scale), radius * 2 * 0.025); }
+// A soft tip's dab spacing as a share of its diameter (mac BrushSettings.dabSpacing), at least a quarter pixel.
+static double softDabSpacing(double radius, double fraction) { return std::max(0.25, radius * 2 * fraction); }
+
 
 // A run of the stroke on the settled coverage and (when given) the coverage that also shows the provisional tail.
 static void stampCoverageLine(QImage &coverage, const QPointF &from, const QPointF &to, double radius, double hardness,
@@ -3250,7 +3265,7 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
         const auto pixel = documentToPixel(shown.transform, documentPoint, brush_->original.size());
         const double scale = std::max(1e-9, std::min(shown.transform.size.width() / std::max(1, brush_->original.width()),
                                                      shown.transform.size.height() / std::max(1, brush_->original.height())));
-        const double reach = brush_->diameter / 2 / scale;
+        const double reach = brush_->tipDiameter / 2 / scale;
         if (!pixel || !QRectF(brush_->sourceRect).adjusted(reach, reach, -reach, -reach).contains(*pixel)) {
             restartBrushAtDisplayedSize(documentPoint);
             return;
@@ -3259,7 +3274,7 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
     }
     Layer &layer = document_->layers[index];
     if (brush_->sparseBlank) {
-        const double radius = brush_->diameter/2+3;
+        const double radius = brush_->tipDiameter/2+3;
         const QRectF patch = QRectF(documentPoint-QPointF(radius,radius),QSizeF(radius*2,radius*2))
             .intersected(QRectF(QPointF(),document_->canvasSize));
         if (!patch.isEmpty()) if (const auto offset = growLayerOverCanvas(layer,document_->canvasSize,patch)) {
@@ -3283,8 +3298,8 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
     if (!current) return;
     const double scale = std::max(1e-9, (placement.size.width() / brush_->original.width()
                                       + placement.size.height() / brush_->original.height()) / 2.0);
-    const double radius = std::max(.5, brush_->diameter / scale / 2.0);
-    const double spacing = softDabSpacing(radius, 1.0);
+    const double radius = std::max(.5, brush_->tipDiameter / scale / 2.0);
+    const double spacing = softDabSpacing(radius, brush_->spacingFraction);
     QRect dirty = brush_->dirtyPixels;
     brush_->dirtyPixels = {};
     if (brush_->pressureStroke) {
@@ -3433,8 +3448,8 @@ bool EditorSession::endBrushStroke()
             const LayerTransform placement = brush_->mask ? layer.maskPlacement.value_or(layer.transform) : layer.transform;
             const double scale = std::max(1e-9, (placement.size.width() / brush_->original.width()
                                               + placement.size.height() / brush_->original.height()) / 2.0);
-            const double radius = std::max(.5, brush_->diameter / scale / 2.0);
-            const double spacing = softDabSpacing(radius, 1.0);
+            const double radius = std::max(.5, brush_->tipDiameter / scale / 2.0);
+            const double spacing = softDabSpacing(radius, brush_->spacingFraction);
             const int count = brush_->samples.size();
             QRect dirty = brush_->tailBounds;
             restoreCoverage(brush_->coverage, brush_->settledCoverage, brush_->tailBounds);
@@ -4143,7 +4158,11 @@ bool EditorSession::distortSelectedLayers(const std::array<QPointF, 4> &corners,
     for (const Result &result : results) {
         Layer &layer = document_->layers[result.index];
         if (result.maskOnly) { layer.mask = result.mask; layer.maskPlacement = result.maskPlacement; }
-        else { layer.image = result.image; layer.transform = result.transform; layer.mask = result.mask; layer.maskPlacement = result.maskPlacement; rasterizeLayer(layer); }
+        else {
+            layer.image = result.image; layer.transform = result.transform; layer.mask = result.mask; layer.maskPlacement = result.maskPlacement; rasterizeLayer(layer);
+            // The warped frame is plain pixels from now on (mac e234dd4); moving or scaling a movie layer keeps its link.
+            layer.movie.reset();
+        }
     }
     endEdit(); return true;
 }

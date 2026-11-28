@@ -44,6 +44,11 @@ chmod +x "$tool_dir"/*.AppImage
 DESTDIR="$app_dir" cmake --install "$work_dir" --prefix /usr
 # mktemp makes the AppDir 0700; appimagetool refuses an AppDir others could not read and run.
 chmod -R a+rX "$app_dir"
+# A Qt Multimedia from CMAKE_PREFIX_PATH isn't where the loader looks: linuxdeploy is told where it is.
+multimedia_cmake=$(sed -nE 's/^Qt6Multimedia_DIR:PATH=(.*)/\1/p' "$work_dir/CMakeCache.txt")
+multimedia_libdir=${multimedia_cmake:+$(cd "$multimedia_cmake/../.." && pwd)}
+original_library_path=${LD_LIBRARY_PATH-}
+export LD_LIBRARY_PATH="${multimedia_libdir}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 (
     cd "$work_dir"
     EXTRA_PLATFORM_PLUGINS="libqoffscreen.so${EXTRA_PLATFORM_PLUGINS:+;$EXTRA_PLATFORM_PLUGINS}" \
@@ -52,9 +57,35 @@ chmod -R a+rX "$app_dir"
         --appdir "$app_dir" \
         --desktop-file "$source_dir/packaging/compositor-lx.desktop" \
         --icon-file "$source_dir/packaging/icons/compositor-lx-512.png" \
-        --plugin qt \
+        --plugin qt
+)
+# Movie sound: Qt Multimedia's FFmpeg backend, from where the build's Qt Multimedia is (it may not be among the system's
+# plugins, where linuxdeploy-plugin-qt looks). It links Qt Quick for its QML video sinks, which LX never loads, so it is
+# added after the Qt plugin has run (which would otherwise deploy QML) and only its libraries are bundled.
+multimedia_plugin=$(sed -nE 's/.*COMPOSITOR_DEV_PLUGIN_DIR=\\?"([^"\\]+).*/\1/p' "$work_dir/build.ninja" | head -n1)
+for plugins in "$multimedia_plugin" "$(qmake6 -query QT_INSTALL_PLUGINS)"; do
+    if [[ -n "$plugins" && -f "$plugins/multimedia/libffmpegmediaplugin.so" ]]; then
+        mkdir -p "$app_dir/usr/plugins/multimedia"
+        cp "$plugins/multimedia/libffmpegmediaplugin.so" "$app_dir/usr/plugins/multimedia/"
+        chmod -R a+rX "$app_dir/usr/plugins/multimedia"
+        break
+    fi
+done
+# appimagetool makes the AppImage's own icon (.DirIcon) from a PNG named for the desktop file's Icon at the AppDir's top.
+cp "$source_dir/packaging/icons/compositor-lx-256.png" "$app_dir/compositor-lx.png"
+chmod a+r "$app_dir/compositor-lx.png"
+(
+    cd "$work_dir"
+    "$tool_dir/linuxdeploy-x86_64.AppImage" \
+        --appimage-extract-and-run \
+        --appdir "$app_dir" \
+        --desktop-file "$source_dir/packaging/compositor-lx.desktop" \
+        --icon-file "$source_dir/packaging/icons/compositor-lx-512.png" \
+        ${multimedia_plugin:+--deploy-deps-only "$app_dir/usr/plugins/multimedia"} \
         --output appimage
 )
+# The smoke tests below run the AppImage as a user would, with only what it bundles.
+if [[ -n "$original_library_path" ]]; then export LD_LIBRARY_PATH="$original_library_path"; else unset LD_LIBRARY_PATH; fi
 cp "$work_dir/CompositorLX-${appimage_arch}.AppImage" \
     "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage"
 chmod +x "$output_dir/CompositorLX-${version}-${appimage_arch}.AppImage"

@@ -738,6 +738,15 @@ struct LayerTransform {
 [[nodiscard]] LayerTransform resizedByHandle(const LayerTransform &start, const QPoint &sign, const QPointF &startPoint,
                                              const QPointF &point, bool fromCenter, bool lockRatio);
 
+// A movie layer's link to its movie (mac b469ec1 MovieLink, format 23): where the movie is, how long its video track runs,
+// and the time of the frame the layer's image holds. The image is that frame, so the project opens without the movie.
+struct MovieLink {
+    QByteArray bookmark;
+    double duration = 0;
+    double seconds = 0;
+    bool operator==(const MovieLink &) const = default;
+};
+
 struct Layer {
     QUuid id;
     QString name;
@@ -761,6 +770,7 @@ struct Layer {
     std::optional<LayerEffects> effects;
     std::optional<TextStyle> text;
     std::optional<LayerShapeStyle> shapeStyle;
+    std::optional<MovieLink> movie;
 
     bool operator==(const Layer &) const = default;
 };

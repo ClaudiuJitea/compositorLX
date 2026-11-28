@@ -39,6 +39,7 @@ class QMenu;
 namespace compositor {
 
 class GifTimeline;
+class MovieTimeline;
 class CanvasWidget;
 class ColorPickerDialog;
 class CanvasRulerWidget;
@@ -302,6 +303,8 @@ private:
                          const QString &historyName = QString());
 
     GifTimeline *gifTimeline_ = nullptr;
+
+    MovieTimeline *movieTimeline_ = nullptr;
     CanvasWidget *canvas_ = nullptr;
     CanvasRulerCornerWidget *rulerCorner_ = nullptr;
     CanvasRulerWidget *horizontalRuler_ = nullptr;

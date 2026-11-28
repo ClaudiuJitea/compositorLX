@@ -289,6 +289,19 @@ public:
             p.restore();
             break;
         }
+        case 52: case 53: { // Sound on, sound off (mac speaker.wave.2.fill, speaker.slash.fill)
+            QPainterPath speaker;
+            speaker.moveTo(4.5, 9.5); speaker.lineTo(8, 9.5); speaker.lineTo(12.5, 5.5); speaker.lineTo(12.5, 18.5);
+            speaker.lineTo(8, 14.5); speaker.lineTo(4.5, 14.5); speaker.closeSubpath();
+            p.save(); p.setPen(Qt::NoPen); p.setBrush(ink); p.drawPath(speaker); p.restore();
+            if (kind_ == 52) {
+                p.drawArc(QRectF(10.5, 8.5, 7, 7), -55 * 16, 110 * 16);
+                p.drawArc(QRectF(9, 5.5, 12, 13), -55 * 16, 110 * 16);
+            } else {
+                p.drawLine(QPointF(4, 4.5), QPointF(20, 19.5));
+            }
+            break;
+        }
         default: break;
         }
 

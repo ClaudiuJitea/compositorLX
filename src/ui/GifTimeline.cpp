@@ -4,6 +4,8 @@
 #include <QActionGroup>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QLabel>
+#include <QSlider>
 #include <QListWidget>
 #include <QMenu>
 #include <QPainter>
@@ -12,7 +14,16 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 namespace compositor {
-static constexpr int thumbnailSide = 72;
+static constexpr int thumbnailSide = GifTimeline::thumbnailSide;
+
+// Digits that keep their width as they count, as SwiftUI's monospacedDigit.
+static QFont tabularDigits(QFont font)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    font.setFeature(QFont::Tag("tnum"), 1);
+#endif
+    return font;
+}
 
 // A frame's thumbnail fitted into a rounded box, outlined in the accent while it is the frame shown.
 static QPixmap framePixmap(const QImage &thumbnail, bool selected, const QPalette &palette, qreal ratio)
@@ -38,14 +49,28 @@ static QPixmap framePixmap(const QImage &thumbnail, bool selected, const QPalett
 GifTimeline::GifTimeline(EditorSession &session, std::function<void()> changed, QWidget *parent)
     : QWidget(parent), session_(session), changed_(std::move(changed))
 {
-    setObjectName("gifTimeline"); setFixedHeight(110); setAttribute(Qt::WA_StyledBackground);
-    auto *layout = new QHBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(0);
-    auto *controls = new QVBoxLayout; controls->setContentsMargins(18, 0, 18, 0); controls->setSpacing(8); controls->setAlignment(Qt::AlignCenter);
-    play_ = new QToolButton(this); play_->setObjectName("gifPlay"); play_->setFixedSize(70, 40); play_->setIconSize(QSize(18, 18));
+    setObjectName("gifTimeline"); setAttribute(Qt::WA_StyledBackground);
+    setFixedHeight(stripHeight + 1 + layersFooterHeight);
+    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(0);
+    // The strip of frames, 56-point thumbnails (mac 8c6ebeb: .frame(height: 88), padding 12 across, 8 above, 6 below).
+    frames_ = new QListWidget(this); frames_->setObjectName("gifFrames"); frames_->setViewMode(QListView::IconMode);
+    frames_->setFlow(QListView::LeftToRight); frames_->setWrapping(false); frames_->setMovement(QListView::Static);
+    frames_->setIconSize(QSize(thumbnailSide, thumbnailSide)); frames_->setSpacing(4); frames_->setFrameShape(QFrame::NoFrame);
+    frames_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff); frames_->setContextMenuPolicy(Qt::CustomContextMenu);
+    frames_->setFixedHeight(stripHeight);
+    layout->addWidget(frames_);
+    auto *divider = new QFrame(this); divider->setFrameShape(QFrame::HLine); divider->setFrameShadow(QFrame::Plain); divider->setObjectName("gifDivider");
+    divider->setFixedHeight(1);
+    layout->addWidget(divider);
+    // The playback bar: play, the delay menu, the frame scrubber and "03 / 12", as tall as the Layers footer.
+    auto *bar = new QWidget(this); bar->setObjectName("gifPlaybackBar"); bar->setFixedHeight(layersFooterHeight);
+    auto *row = new QHBoxLayout(bar); row->setContentsMargins(10, 0, 10, 0); row->setSpacing(8);
+    play_ = new QToolButton(bar); play_->setObjectName("gifPlay"); play_->setFixedSize(28, 24); play_->setIconSize(QSize(14, 14));
     play_->setIcon(editorIcon(34)); play_->setToolTip(tr("Play")); play_->setAccessibleName(tr("Play"));
     // The delay as a menu of common ones: Original, each frame for its own, or every frame for the same time.
-    delay_ = new QToolButton(this); delay_->setObjectName("gifDelay"); delay_->setAutoRaise(true);
+    delay_ = new QToolButton(bar); delay_->setObjectName("gifDelay");
     delay_->setPopupMode(QToolButton::InstantPopup); delay_->setToolTip(tr("How long each frame shows"));
+    delay_->setAccessibleName(tr("Frame delay")); delay_->setFont(tabularDigits(delay_->font()));
     delayMenu_ = new QMenu(delay_); delayMenu_->setObjectName("gifDelayMenu");
     auto *group = new QActionGroup(delayMenu_); group->setExclusive(true);
     auto *original = delayMenu_->addAction(tr("Original")); original->setObjectName("gifDelayOriginal"); original->setCheckable(true); group->addAction(original);
@@ -56,15 +81,11 @@ GifTimeline::GifTimeline(EditorSession &session, std::function<void()> changed, 
         action->setCheckable(true); action->setData(milliseconds); action->setObjectName(QStringLiteral("gifDelay%1").arg(milliseconds)); group->addAction(action);
     }
     delay_->setMenu(delayMenu_);
-    controls->addWidget(play_, 0, Qt::AlignHCenter); controls->addWidget(delay_, 0, Qt::AlignHCenter);
-    layout->addLayout(controls);
-    auto *divider = new QFrame(this); divider->setFrameShape(QFrame::VLine); divider->setFrameShadow(QFrame::Plain); divider->setObjectName("gifDivider");
-    layout->addWidget(divider);
-    frames_ = new QListWidget(this); frames_->setObjectName("gifFrames"); frames_->setViewMode(QListView::IconMode);
-    frames_->setFlow(QListView::LeftToRight); frames_->setWrapping(false); frames_->setMovement(QListView::Static);
-    frames_->setIconSize(QSize(thumbnailSide, thumbnailSide)); frames_->setSpacing(4); frames_->setFrameShape(QFrame::NoFrame);
-    frames_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff); frames_->setContextMenuPolicy(Qt::CustomContextMenu);
-    layout->addWidget(frames_, 1);
+    scrubber_ = new QSlider(Qt::Horizontal, bar); scrubber_->setObjectName("gifScrubber"); scrubber_->setAccessibleName(tr("GIF frame"));
+    scrubber_->setRange(1, 1); scrubber_->setSingleStep(1); scrubber_->setPageStep(1);
+    counter_ = new QLabel(bar); counter_->setObjectName("gifFrameCounter"); counter_->setFont(tabularDigits(counter_->font()));
+    row->addWidget(play_); row->addWidget(delay_); row->addWidget(scrubber_, 1); row->addWidget(counter_);
+    layout->addWidget(bar);
     // Right-click duplicates or deletes the frame under the pointer; triggered otherwise, the frame shown.
     duplicate_ = new QAction(tr("Duplicate Frame"), this); duplicate_->setObjectName("gifDuplicate"); addAction(duplicate_);
     delete_ = new QAction(tr("Delete Frame"), this); delete_->setObjectName("gifDelete"); addAction(delete_);
@@ -80,17 +101,25 @@ GifTimeline::GifTimeline(EditorSession &session, std::function<void()> changed, 
         duplicate_->setData({}); delete_->setData({});
     });
     timer_ = new QTimer(this); timer_->setSingleShot(true); timer_->setTimerType(Qt::PreciseTimer);
+    requestTimer_ = new QTimer(this); requestTimer_->setSingleShot(true); requestTimer_->setInterval(0);
+    connect(requestTimer_, &QTimer::timeout, this, [this] { showRequestedFrame(); });
     connect(play_, &QToolButton::clicked, this, [this] {
         if (playing_) { stop(); return; }
-        const auto *l = session_.activeLayer(); if (!l || !l->gif || l->gif->frames.size() < 2) return;
+        const auto *l = session_.activeLayer(); if (!l || !l->gif || l->gif->frames.size() < 2 || requestedFrame_) return;
         playing_ = true;
-        play_->setIcon(editorIcon(35)); play_->setToolTip(tr("Pause")); play_->setAccessibleName(tr("Pause"));
+        updatePlayButton();
         startPlayback();
     });
     connect(timer_, &QTimer::timeout, this, [this] { wake(); });
     connect(frames_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (refreshing_ || row < 0) return;
-        stop(); if (session_.selectGifFrame(frames_->item(row)->data(Qt::UserRole).toInt())) { changed_(); refresh(); }
+        requestFrame(frames_->item(row)->data(Qt::UserRole).toInt());
+    });
+    connect(scrubber_, &QSlider::valueChanged, this, [this](int number) {
+        if (refreshing_) return;
+        const auto *l = session_.activeLayer(); if (!l || !l->gif) return;
+        const int position = number - 1;
+        if (position >= 0 && position < l->gif->frames.size()) requestFrame(l->gif->frames[position].index);
     });
     connect(group, &QActionGroup::triggered, this, [this, original](QAction *action) {
         if (refreshing_) return;
@@ -99,6 +128,34 @@ GifTimeline::GifTimeline(EditorSession &session, std::function<void()> changed, 
         refresh();
     });
     hide();
+}
+void GifTimeline::requestFrame(int index)
+{
+    if (playing_) stop();
+    const auto *l = session_.activeLayer();
+    const int shown = requestedFrame_.value_or(l && l->gif ? l->gif->selected : -1);
+    if (index == shown) return;
+    requestedFrame_ = index;
+    updatePlayButton();
+    // Shown once the events already queued, such as more of a scrub, have been seen: only the latest is decoded.
+    if (!requestTimer_->isActive()) requestTimer_->start();
+}
+void GifTimeline::showRequestedFrame()
+{
+    if (!requestedFrame_) return;
+    const int index = *requestedFrame_;
+    const bool shown = session_.selectGifFrame(index);
+    if (requestedFrame_ == index) requestedFrame_.reset();
+    if (shown) changed_();
+    refresh();
+    if (requestedFrame_) requestTimer_->start();
+}
+void GifTimeline::updatePlayButton()
+{
+    play_->setIcon(editorIcon(playing_ ? 35 : 34));
+    play_->setToolTip(playing_ ? tr("Pause") : tr("Play")); play_->setAccessibleName(play_->toolTip());
+    const auto *l = session_.activeLayer();
+    play_->setEnabled(l && l->gif && l->gif->frames.size() > 1 && !requestedFrame_);
 }
 void GifTimeline::editFrame(QAction *action, bool duplicate)
 {
@@ -109,7 +166,7 @@ void GifTimeline::editFrame(QAction *action, bool duplicate)
 void GifTimeline::stop()
 {
     playing_ = false; playback_ = {};
-    timer_->stop(); play_->setIcon(editorIcon(34)); play_->setToolTip(tr("Play")); play_->setAccessibleName(tr("Play"));
+    timer_->stop(); updatePlayButton();
 }
 void GifTimeline::startPlayback()
 {
@@ -141,7 +198,11 @@ void GifTimeline::wake()
     }
     timer_->start(int(std::max<qint64>(0, playback_.next() - clock_.nsecsElapsed() / 1000 + 999) / 1000));
 }
-QString GifTimeline::originalDelays(const GifAnimation &a, bool spaced)
+QString GifTimeline::frameCounter(int number, int count)
+{
+    return QStringLiteral("%1 / %2").arg(number, 2, 10, QLatin1Char('0')).arg(count, 2, 10, QLatin1Char('0'));
+}
+QString GifTimeline::originalDelays(const GifAnimation &a)
 {
     int shortest = 0, longest = 0;
     for (int i = 0; i < a.frames.size(); ++i) {
@@ -151,8 +212,7 @@ QString GifTimeline::originalDelays(const GifAnimation &a, bool spaced)
         shortest = i ? std::min(shortest, delay) : delay; longest = i ? std::max(longest, delay) : delay;
     }
     if (a.frames.isEmpty()) return {};
-    return (shortest == longest ? QString::number(shortest) : QStringLiteral("%1–%2").arg(shortest).arg(longest))
-           + (spaced ? QStringLiteral(" ms") : QStringLiteral("ms"));
+    return (shortest == longest ? QString::number(shortest) : QStringLiteral("%1–%2").arg(shortest).arg(longest)) + QStringLiteral(" ms");
 }
 void GifTimeline::refresh(bool canvasOnly)
 {
@@ -186,12 +246,22 @@ void GifTimeline::refresh(bool canvasOnly)
         if (f.index == a.selected) current = item;
     }
     if (current) { frames_->setCurrentItem(current); frames_->scrollToItem(current); }
-    delay_->setText(a.sameDelay ? tr("%1ms").arg(a.uniformDelay) : originalDelays(a, false));
+    // The frame scrubber and "03 / 12" (mac 8c6ebeb); a lone frame has nothing to scrub.
+    // The frame asked for, while it's still being shown (mac shownFrame).
+    const int shown = requestedFrame_.value_or(a.selected);
+    int number = 1;
+    for (int i = 0; i < a.frames.size(); ++i) if (a.frames[i].index == shown) number = i + 1;
+    scrubber_->setRange(1, std::max(1, int(a.frames.size())));
+    if (!scrubber_->isSliderDown()) scrubber_->setValue(number);
+    scrubber_->setEnabled(a.frames.size() > 1);
+    counter_->setText(frameCounter(number, int(a.frames.size())));
+    counter_->setAccessibleName(tr("Frame %1 of %2").arg(number).arg(a.frames.size()));
+    delay_->setText(a.sameDelay ? tr("%1 ms").arg(a.uniformDelay) : originalDelays(a));
     if (auto *original = delayMenu_->findChild<QAction *>("gifDelayOriginal", Qt::FindDirectChildrenOnly))
         original->setText(tr("%1 · Original").arg(originalDelays(a)));
     for (auto *action : delayMenu_->actions())
         if (action->isCheckable()) action->setChecked(action->data().isValid() ? a.sameDelay && action->data().toInt() == a.uniformDelay : !a.sameDelay);
-    play_->setEnabled(a.frames.size() > 1); if (a.frames.size() < 2) stop();
+    updatePlayButton(); if (a.frames.size() < 2) stop();
     refreshing_ = false;
     if (playing_) {
         QVector<int> identities; QVector<qint64> durations;

@@ -102,6 +102,14 @@ int main(int argc, char **argv)
         if (file.open(QIODevice::WriteOnly)) { file.write(QByteArray::fromBase64("R0lGODlhCAAIAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQIBAAAACwAAAAACAAIAAAIDwABCBxIsKDBgwgTKkwYEAAh+QQICAAAACwAAAAACAAIAIEAgAAAAAAAAAAAAAAIDwABCBxIsKDBgwgTKkwYEAAh+QQIDAAAACwAAAAACAAIAIEAAP8AAAAAAAAAAAAIDwABCBxIsKDBgwgTKkwYEAA7")); file.close(); }
         if (s.insertGif(path, QPointF(800, 450))) { s.duplicateGifFrame(); window.syncDocumentViews(); grab(QStringLiteral("gif-timeline")); s.undo(); s.undo(); window.syncDocumentViews(); }
     }
+    // A movie layer and its bar under the canvas (the test fixture with sound, when the source tree is at hand).
+    {
+        const QString clip = QStringLiteral(COMPOSITOR_SOURCE_DIR "/tests/fixtures/movies/sound.mp4");
+        if (QFile::exists(clip) && s.insertMovie(clip, QPointF(800, 450))) {
+            Layer *movie = s.activeLayer(); movie->transform.size = QSizeF(640, 480); movie->transform.origin = QPointF(480, 210);
+            window.syncDocumentViews(); grab(QStringLiteral("movie-timeline")); s.undo(); window.syncDocumentViews();
+        }
+    }
     // Dialogs: open each through its menu action, grab it while it runs, close it.
     for (const Layer &layer : s.document()->layers) if (layer.name == QLatin1String("Sky")) { s.selectLayer(layer.id); s.selectMaskTarget(false); break; }
     s.deselect();

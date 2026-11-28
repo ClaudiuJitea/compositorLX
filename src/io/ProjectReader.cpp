@@ -562,7 +562,7 @@ Document ProjectReader::load(const QString &projectDirectory)
 
     Document document;
     document.formatVersion = manifest.value(QStringLiteral("version")).toInt(-1);
-    // Every version a release has written (1 through 22), and 27 from the macOS GIF branch's own builds (macOS
+    // Every version a release has written (1 through 23), and 27 from the macOS GIF branch's own builds (macOS
     // ProjectManifest.supported); 27 passes every later-version gate below.
     if ((document.formatVersion < 1 || document.formatVersion > ProjectWriter::currentVersion) && document.formatVersion != 27) {
         throw ProjectError(QStringLiteral("This project uses format version %1. This app supports versions 1–%2 and 27.").arg(document.formatVersion).arg(ProjectWriter::currentVersion));
@@ -728,6 +728,22 @@ Document ProjectReader::load(const QString &projectDirectory)
                 invalid(QStringLiteral("shape strokes require format version 22 or later"));
         }
 
+        // A movie layer (mac b469ec1 ProjectStore.load): only in a version 23 manifest, on a layer whose image is the frame
+        // shown, not a folder or a GIF, with a length above 0 and the frame's time within it.
+        if (object.contains(QStringLiteral("movie")) && !object.value(QStringLiteral("movie")).isNull()) {
+            const QJsonValue value = object.value(QStringLiteral("movie"));
+            if (!value.isObject()) invalid(QStringLiteral("Invalid movie layer"));
+            const QJsonObject link = value.toObject();
+            const QJsonValue bookmark = link.value(QStringLiteral("bookmark")), duration = link.value(QStringLiteral("duration")),
+                             seconds = link.value(QStringLiteral("seconds"));
+            if (!bookmark.isString() || !duration.isDouble() || !seconds.isDouble()) invalid(QStringLiteral("Invalid movie layer"));
+            const auto decoded = QByteArray::fromBase64Encoding(bookmark.toString().toLatin1(), QByteArray::AbortOnBase64DecodingErrors);
+            MovieLink movie{decoded.decoded, duration.toDouble(), seconds.toDouble()};
+            if (!decoded || document.formatVersion != 23 || layer.imageFile.isEmpty() || layer.group || object.contains(QStringLiteral("gif"))
+                || !std::isfinite(movie.duration) || movie.duration <= 0 || !(movie.seconds >= 0 && movie.seconds <= movie.duration))
+                invalid(QStringLiteral("Invalid movie layer or format version"));
+            layer.movie = movie;
+        }
         if (object.contains("gif")) {
             if (document.formatVersion < 17 || !object.value("gif").isObject() || layer.group || !layer.adjustment.isEmpty() || layer.text || layer.shapeStyle || layer.image.isNull())
                 invalid(QStringLiteral("Invalid GIF layer or format version"));

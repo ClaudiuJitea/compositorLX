@@ -368,6 +368,7 @@ int ProjectWriter::minimumRequiredVersion(const Document &document)
     int minRequired = 1;
     for (const Layer &layer : document.layers) {
         if (layer.gif) minRequired = std::max(minRequired, 17);
+        if (layer.movie) minRequired = std::max(minRequired, 23);
         if (layer.group || layer.parentId.has_value()) minRequired = std::max(minRequired, 2);
         if (layer.opacity != 1.0 || layer.blendMode != BlendMode::Normal) minRequired = std::max(minRequired, 3);
         if (!layer.mask.isNull() || !layer.maskFile.isEmpty()) {
@@ -595,6 +596,19 @@ SaveResult ProjectWriter::saveAtomicChecked(const Document &document,
             for (auto it = a.pixels.begin(); it != a.pixels.end(); ++it)
                 if (!DeepImage::canonical(it.value()).save(root.filePath("images/" + id + QStringLiteral(".frame-%1.png").arg(it.key())), "PNG")) fail(QStringLiteral("Could not save GIF frame"));
             value.insert("gif", GifIO::metadata(a, id));
+        }
+        // A movie layer's link (mac b469ec1 ProjectLayerRecord.movie): macOS reads it only from a version 23 manifest, from
+        // a layer with its frame as an image, not a folder or a GIF.
+        if (layer.movie) {
+            const MovieLink &movie = *layer.movie;
+            if (targetVersion != 23 || layer.image.isNull() || layer.group || layer.gif || !std::isfinite(movie.duration) || movie.duration <= 0
+                || !std::isfinite(movie.seconds) || movie.seconds < 0 || movie.seconds > movie.duration)
+                fail(QStringLiteral("Movie layers require format version 23; this document is version %1.").arg(targetVersion));
+            QJsonObject link;
+            link.insert(QStringLiteral("bookmark"), QString::fromLatin1(movie.bookmark.toBase64()));
+            link.insert(QStringLiteral("duration"), movie.duration);
+            link.insert(QStringLiteral("seconds"), movie.seconds);
+            value.insert(QStringLiteral("movie"), link);
         }
         if (layer.text.has_value()) {
             value.insert(QStringLiteral("text"), textObject(*layer.text));

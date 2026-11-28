@@ -231,7 +231,7 @@ private slots:
     }
     void timelineAndSearchControlsWorkInWindow() {
         QTemporaryDir dir; MainWindow w;w.resize(1100,700);w.show();QVERIFY(w.openProject(fixture(dir)));QCoreApplication::processEvents();
-        auto *frames=w.findChild<QListWidget *>("gifFrames");QVERIFY(frames);QCOMPARE(frames->count(),3);frames->setCurrentRow(2);QCOMPARE(w.session().activeLayer()->gif->selected,2);
+        auto *frames=w.findChild<QListWidget *>("gifFrames");QVERIFY(frames);QCOMPARE(frames->count(),3);frames->setCurrentRow(2);QTRY_COMPARE(w.session().activeLayer()->gif->selected,2);
         auto *duplicate=w.findChild<QAction *>("gifDuplicate");QVERIFY(duplicate);duplicate->trigger();QCOMPARE(w.session().activeLayer()->gif->frames.size(),4);
         auto *search=w.findChild<QLineEdit *>("layerSearch");QVERIFY(search);w.findChild<QToolButton *>("layerSearchButton")->click();QVERIFY(search->isVisible());search->setText("not here");QCOMPARE(w.layerModel()->rowCount(),0);search->clear();QVERIFY(w.layerModel()->rowCount()>0);
         w.session().markSaved();

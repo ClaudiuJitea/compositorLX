@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.7.2-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.7.6-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-20-00599C">
@@ -24,8 +24,8 @@
 | **Architecture** | x86_64 | amd64 |
 | **glibc** | 2.43 or newer | 2.43 or newer |
 | **Tested on** | Ubuntu 26.04 | Ubuntu 26.04 |
-| **Libraries** | Bundled (Qt 6.10, Poppler, LibRaw, OpenEXR, ONNX Runtime…) | From the system via `apt`: Qt 6.10, libheif, LibRaw 0.21, OpenEXR 3.1, lcms2, lensfun, Poppler Qt6, giflib, libtiff, libjpeg |
-| **To run** | FUSE in the kernel (most desktops have it). Without FUSE: `--appimage-extract-and-run` | `sudo apt install ./compositorlx_0.7.2_amd64.deb` |
+| **Libraries** | Bundled (Qt 6.10, Poppler, LibRaw, OpenEXR, FFmpeg, ONNX Runtime…) | From the system via `apt`: Qt 6.10 (with Multimedia), FFmpeg 8, libheif, LibRaw 0.21, OpenEXR 3.1, lcms2, lensfun, Poppler Qt6, giflib, libtiff, libjpeg |
+| **To run** | FUSE in the kernel (most desktops have it). Without FUSE: `--appimage-extract-and-run` | `sudo apt install ./compositorlx_0.7.6_amd64.deb` |
 | **GPU (optional)** | A Vulkan 1.0 driver (tested on Intel and Mesa lavapipe; AMD and NVIDIA untested); otherwise the CPU renders everything | Same |
 
 On distributions older than glibc 2.43, [build from source](#build-from-source).
@@ -43,11 +43,23 @@ On distributions older than glibc 2.43, [build from source](#build-from-source).
 - **Painting and retouching**: brush (with a hard-edged pencil mode), eraser, healing, clone stamp, smudge, blur, Liquify, gradients, and pen pressure.
 - **Adjustments**: Levels, Curves, Hue/Saturation, Exposure, Color Balance, Black & White, Gradient Map, and a full **Camera Raw** filter.
 - **Filters**: blurs (Gaussian, Motion, Progressive), Sharpen, Reduce Noise, Bloom, RGB Split, Dither, Scanlines, Tonal Contrast, Vignette, Add Noise, Lens Correction, **Lens Effects**, **Rim Light** and **Volumetric Light**; most also as adjustment layers. **Remove Background**, Rim Light and Volumetric Light's depth run local AI models, never a web service.
-- **Animated GIFs**: one layer per GIF with a frame timeline. Play, paint, duplicate, delete and retime frames, then export animated GIFs.
+- **Animated GIFs and movies**: one layer per GIF with a frame timeline and scrubber. Play, paint, duplicate, delete and retime frames, then export animated GIFs. MOV and MP4 files come in as movie layers: play them with sound or scrub them on the canvas, and grab any frame as a still.
 - **Deep color and print**: 16-bit and HDR layers (EXR, Radiance), CMYK proofing, and CMYK JPEG, TIFF and PDF export.
-- **Files**: `.comp` projects interchangeable with the macOS app (versions 1–22 and 27), PSD/PSB import with artboards and layered PSD export, SVG, PDF, Camera RAW, HEIC/HEIF, WebP, PNG, JPEG and TIFF.
+- **Files**: `.comp` projects interchangeable with the macOS app (versions 1–23 and 27), PSD/PSB import with artboards and layered PSD export, SVG, PDF, Camera RAW, HEIC/HEIF, WebP, PNG, JPEG and TIFF.
 - **GPU rendering**: a shared Vulkan renderer for the canvas and filters, with the CPU as reference and fallback; the rest runs on every CPU core. Exports stay byte-identical on every machine. See the [GPU notes](docs/GPU_ROLLOUT.md), [what 0.5.8 sped up](docs/PERFORMANCE_0.5.8.md) and [0.7.0's measurements](docs/UPSTREAM_SYNC_1.7.0.md#measurements).
 - **Linux-native**: light, dark or follow-system themes, system fonts, HiDPI, Wayland support, customizable shortcuts, Search Commands (Ctrl+F), and crash-safe atomic saves.
+
+## New in 0.7.6
+
+Synced with macOS Compositor 1.7.6 (every release from 1.7.1 to 1.7.6).
+
+- **Movie layers**: import MOV and MP4 files as layers. Play them (with sound, and a mute button) or scrub them right on the canvas; the frame you stop on becomes the layer's image. Right-click the movie bar to **Grab Frame** as a still layer or **Relink…** a moved movie. Projects link to the movie rather than copy it (format 23), and HDR movies show the same colors playing and paused.
+- **Softer brushes**: at low hardness the Brush fades like an airbrush, over a tip up to 35% wider, so soft strokes keep their visible width.
+- **GIF timeline**: compact frame strip with a playback bar: play, the frame delay, a frame scrubber and "03 / 12".
+- **Look**: slim sliders with a round knob everywhere, solid pill buttons in the toolbar (Fit, 100%, zoom), clearer active and inactive project tabs, rounded RAW import buttons.
+- **Fixes**: a gradient dragged on a mask placed apart from its layer shows while dragging; distorting a movie layer turns its frame into plain pixels.
+
+Details, measurements and Linux differences: [port audit for 1.7.6](docs/UPSTREAM_SYNC_1.7.6.md).
 
 ## New in 0.7.0
 
@@ -79,11 +91,11 @@ Download the [AppImage or Debian package](https://github.com/ClaudiuJitea/compos
 
 ```sh
 # AppImage
-chmod +x CompositorLX-0.7.2-x86_64.AppImage
-./CompositorLX-0.7.2-x86_64.AppImage
+chmod +x CompositorLX-0.7.6-x86_64.AppImage
+./CompositorLX-0.7.6-x86_64.AppImage
 
 # Debian / Ubuntu
-sudo apt install ./compositorlx_0.7.2_amd64.deb
+sudo apt install ./compositorlx_0.7.6_amd64.deb
 compositor-lx
 ```
 
@@ -94,7 +106,8 @@ Verify downloads with `sha256sum --check SHA256SUMS`.
 ```sh
 sudo apt install qt6-base-dev qt6-image-formats-plugins libheif-dev libraw-dev zlib1g-dev \
     libopenexr-dev libimath-dev liblcms2-dev libjpeg-dev libtiff-dev liblensfun-dev liblensfun-data-v1 \
-    libpoppler-qt6-dev libgif-dev libvulkan-dev cmake ninja-build
+    libpoppler-qt6-dev libgif-dev libvulkan-dev cmake ninja-build \
+    libavformat-dev libavcodec-dev libswscale-dev qt6-multimedia-dev
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
@@ -121,6 +134,7 @@ ctest --test-dir build
 
 ## Version history
 
+- **0.7.6**: macOS 1.7.6 sync (1.7.1–1.7.6). Movie layers with playback, scrubbing, Grab Frame and Relink (format 23); softer airbrush brushes; compact GIF timeline with a scrubber; slim sliders, solid toolbar pills and clearer tabs.
 - **0.7.2**: closing the welcome panel leaves the area empty; File › New Canvas or the + tab brings it back.
 - **0.7.1**: the welcome panel can be closed from its corner, and its recent projects show the three latest, each removable from the list.
 - **0.7.0**: macOS 1.7.0 sync (1.5.9–1.7.0). Sharpen, Reduce Noise, Rim Light, Volumetric Light, editable shapes, Align and Distribute, PSD export, custom crop ratios, Distances, project formats 18–22.

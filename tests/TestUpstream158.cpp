@@ -501,21 +501,20 @@ private slots:
         QTemporaryDir dir; EditorSession s; s.createDocument(8, 8); QVERIFY(s.insertGif(colorsGif(dir)));
         const GifAnimation &a = *s.activeLayer()->gif;
         QCOMPARE(GifTimeline::originalDelays(a), QStringLiteral("40–120 ms"));
-        QCOMPARE(GifTimeline::originalDelays(a, false), QStringLiteral("40–120ms"));
         GifAnimation same = a; for (const auto &f : same.frames) same.delays.insert(f.index, 70);
         QCOMPARE(GifTimeline::originalDelays(same), QStringLiteral("70 ms"));
         // The GIF's own delays, even while one delay plays for all.
         same.sameDelay = true; same.uniformDelay = 500;
-        QCOMPARE(GifTimeline::originalDelays(same, false), QStringLiteral("70ms"));
+        QCOMPARE(GifTimeline::originalDelays(same), QStringLiteral("70 ms"));
     }
 
     void timelineMenuAndLabelInWindow()
     {
         QTemporaryDir dir; MainWindow w; w.resize(1100, 700); w.show(); QVERIFY(w.openProject(colorsGif(dir))); QCoreApplication::processEvents();
-        auto *delay = w.findChild<QToolButton *>("gifDelay"); QCOMPARE(delay->text(), QStringLiteral("40–120ms"));
+        auto *delay = w.findChild<QToolButton *>("gifDelay"); QCOMPARE(delay->text(), QStringLiteral("40–120 ms"));
         auto *original = w.findChild<QAction *>("gifDelayOriginal"); QCOMPARE(original->text(), QStringLiteral("40–120 ms · Original"));
         w.findChild<QAction *>("gifDelay50")->trigger();
-        QCOMPARE(delay->text(), QStringLiteral("50ms"));
+        QCOMPARE(delay->text(), QStringLiteral("50 ms"));
         QCOMPARE(original->text(), QStringLiteral("40–120 ms · Original"));
         auto *timeline = static_cast<GifTimeline *>(w.findChild<QWidget *>("gifTimeline")); QVERIFY(timeline);
         // A paused timeline decodes nothing; playing advances through the frames on their delays and wraps around.
@@ -551,9 +550,9 @@ private slots:
         QCOMPARE(load(16), QStringLiteral("v16"));
         // 27, from the macOS GIF branch's own builds, opens and saves again as the current format.
         QCOMPARE(load(27), QStringLiteral("v17"));
-        // 1.7.0 reads 18–22 too (mac ProjectManifest.current 22); the message names the newest (mac 7b5ba97 … 3adce92).
-        for (int version : {0, 23, 26, 28})
-            QCOMPARE(load(version), QStringLiteral("This project uses format version %1. This app supports versions 1–22 and 27.").arg(version));
+        // 1.7.2 reads 18–23 too (mac ProjectManifest.current 23); the message names the newest (mac 7b5ba97 … b469ec1).
+        for (int version : {0, 24, 26, 28})
+            QCOMPARE(load(version), QStringLiteral("This project uses format version %1. This app supports versions 1–23 and 27.").arg(version));
     }
 };
 QTEST_MAIN(TestUpstream158)

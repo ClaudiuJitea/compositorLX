@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CompositorLX VERSION 0.7.2 LANGUAGES C CXX)
+project(CompositorLX VERSION 0.7.6 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(FetchContent)
@@ -114,6 +114,9 @@ add_library(compositor_core
     src/core/EditorSessionGif.cpp
     src/io/ChannelPack.cpp
     src/io/GifIO.cpp
+    src/io/MovieDecoder.cpp
+    src/io/MovieDecoder.h
+    src/core/EditorSessionMovie.cpp
     src/core/EditorSession.cpp
     src/core/EditorSessionLayers.cpp
     src/core/ShapeEditing.cpp
@@ -240,6 +243,25 @@ if(LIBRAW_LIBRARY)
     target_link_libraries(compositor_core PRIVATE "${LIBRAW_LIBRARY}")
     target_compile_definitions(compositor_core PUBLIC COMPOSITOR_HAVE_LIBRAW=1)
 endif()
+# Movie layers read video through FFmpeg (mac AVFoundation). The versioned names find the runtime libraries when the
+# development symlinks aren't installed system-wide (the headers then come from CMAKE_PREFIX_PATH).
+find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h PATH_SUFFIXES x86_64-linux-gnu ffmpeg)
+foreach(component avformat:62 avcodec:62 avutil:60 swscale:9)
+    string(REPLACE ":" ";" parts "${component}")
+    list(GET parts 0 name)
+    list(GET parts 1 major)
+    string(TOUPPER "${name}" upper)
+    find_library(FFMPEG_${upper}_LIBRARY NAMES lib${name}.so.${major} lib${name}.so ${name})
+    if(NOT FFMPEG_${upper}_LIBRARY)
+        message(FATAL_ERROR "FFmpeg's lib${name} is required for movie layers (apt install lib${name}-dev)")
+    endif()
+    list(APPEND FFMPEG_LIBRARIES "${FFMPEG_${upper}_LIBRARY}")
+endforeach()
+if(NOT FFMPEG_INCLUDE_DIR)
+    message(FATAL_ERROR "FFmpeg's headers are required for movie layers (apt install libavformat-dev libavcodec-dev libswscale-dev)")
+endif()
+target_include_directories(compositor_core PRIVATE "${FFMPEG_INCLUDE_DIR}")
+target_link_libraries(compositor_core PRIVATE ${FFMPEG_LIBRARIES})
 target_compile_options(compositor_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(compositor_ui STATIC
@@ -264,6 +286,8 @@ add_library(compositor_ui STATIC
     src/ui/LayerListModel.h
     src/ui/MainWindowPort.cpp
     src/ui/GifTimeline.cpp
+    src/ui/MovieTimeline.cpp
+    src/ui/MovieTimeline.h
     src/ui/MainWindowFilterLayers.cpp
     src/ui/MainWindow.cpp
     src/ui/MainWindowLayerMenu.cpp
@@ -281,6 +305,22 @@ add_library(compositor_ui STATIC
 target_include_directories(compositor_ui PUBLIC src vendor/compositor-rendering)
 target_link_libraries(compositor_ui PUBLIC compositor_core Qt6::Widgets Qt6::Concurrent Qt6::Network)
 target_compile_options(compositor_ui PRIVATE -Wall -Wextra -Wpedantic)
+# A movie layer's sound plays through Qt Multimedia (mac AVPlayer); without it, movies play silently.
+# Qt looks for its modules beside its own; looked for by name, Multimedia may come from CMAKE_PREFIX_PATH too.
+find_package(Qt6Multimedia QUIET)
+if(TARGET Qt6::Multimedia)
+    target_link_libraries(compositor_ui PRIVATE Qt6::Multimedia)
+    target_compile_definitions(compositor_ui PRIVATE COMPOSITOR_HAVE_MULTIMEDIA=1)
+    # Qt finds its FFmpeg media backend among the system's plugins; a Multimedia from CMAKE_PREFIX_PATH has it beside
+    # itself, which development builds add to the search path.
+    get_filename_component(COMPOSITOR_MULTIMEDIA_PLUGINS "${Qt6Multimedia_DIR}/../../qt6/plugins" ABSOLUTE)
+    if(EXISTS "${COMPOSITOR_MULTIMEDIA_PLUGINS}/multimedia")
+        target_compile_definitions(compositor_ui PRIVATE COMPOSITOR_DEV_PLUGIN_DIR="${COMPOSITOR_MULTIMEDIA_PLUGINS}")
+    endif()
+    message(STATUS "Movie sound: Qt Multimedia ${Qt6Multimedia_VERSION}")
+else()
+    message(STATUS "Movie sound: off (Qt Multimedia not found)")
+endif()
 if(TARGET Qt6::OpenGLWidgets)
     target_link_libraries(compositor_ui PRIVATE Qt6::OpenGLWidgets)
     target_compile_definitions(compositor_ui PRIVATE COMPOSITOR_GPU_CANVAS=1)
@@ -328,5 +368,16 @@ set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 set(CPACK_GENERATOR "TGZ;DEB")
 set(CPACK_DEBIAN_PACKAGE_SECTION "graphics")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+# Qt Multimedia may come from CMAKE_PREFIX_PATH rather than an installed package, which dpkg-shlibdeps can't name: its
+# directory is private to the build, and the package is named here (movie sound; FFmpeg's libraries are found as usual).
+if(TARGET Qt6::Multimedia)
+    get_target_property(COMPOSITOR_MULTIMEDIA_LIBRARY Qt6::Multimedia IMPORTED_LOCATION_RELEASE)
+    if(NOT COMPOSITOR_MULTIMEDIA_LIBRARY)
+        get_target_property(COMPOSITOR_MULTIMEDIA_LIBRARY Qt6::Multimedia LOCATION)
+    endif()
+    get_filename_component(COMPOSITOR_MULTIMEDIA_LIBDIR "${COMPOSITOR_MULTIMEDIA_LIBRARY}" DIRECTORY)
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS_PRIVATE_DIRS "${COMPOSITOR_MULTIMEDIA_LIBDIR}")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt6multimedia6 (>= 6.5)")
+endif()
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 include(CPack)

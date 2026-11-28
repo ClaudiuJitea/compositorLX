@@ -139,6 +139,7 @@ add_test(NAME io_audit_tests COMMAND io_audit_tests -platform offscreen)
 add_executable(ui_snapshot ../tools/UiSnapshot.cpp)
 target_include_directories(ui_snapshot PRIVATE ../src ../vendor/compositor-rendering)
 target_link_libraries(ui_snapshot PRIVATE compositor_ui Qt6::Test)
+target_compile_definitions(ui_snapshot PRIVATE COMPOSITOR_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 # The README's screenshots (tools/ReadmeShots.cpp).
 add_executable(readme_shots ../tools/ReadmeShots.cpp)
 target_include_directories(readme_shots PRIVATE ../src ../vendor/compositor-rendering)
@@ -171,6 +172,11 @@ add_test(NAME upstream158_tests COMMAND upstream158_tests -platform offscreen -n
 add_executable(upstream170_tests TestUpstream170.cpp)
 target_link_libraries(upstream170_tests PRIVATE compositor_ui Qt6::Test)
 add_test(NAME upstream170_tests COMMAND upstream170_tests -platform offscreen -nocrashhandler)
+
+add_executable(upstream176_tests TestUpstream176.cpp)
+target_link_libraries(upstream176_tests PRIVATE compositor_ui Qt6::Test)
+target_compile_definitions(upstream176_tests PRIVATE FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+add_test(NAME upstream176_tests COMMAND upstream176_tests -platform offscreen -nocrashhandler)
 
 add_executable(filter_layers_gpu_tests TestFilterLayersGpu.cpp)
 target_link_libraries(filter_layers_gpu_tests PRIVATE compositor_core Qt6::Test)

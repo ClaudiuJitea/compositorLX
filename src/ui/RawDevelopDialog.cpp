@@ -118,6 +118,8 @@ RawDevelopDialog::RawDevelopDialog(QWidget *parent, const QString &filePath)
 
     // The desktop's button order: Reset at the side, Import as the dialog's default.
     auto *buttons = new QDialogButtonBox(this);
+    // Capsule action buttons (mac a44be45 roundedControls: buttonBorderShape(.capsule)).
+    buttons->setProperty("roundedControls", true);
     resetButton_ = buttons->addButton(QDialogButtonBox::Reset);
     resetButton_->setEnabled(!settings_.isAsShot());
     connect(resetButton_, &QPushButton::clicked, this, &RawDevelopDialog::onResetClicked);

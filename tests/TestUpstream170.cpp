@@ -225,11 +225,12 @@ private slots:
         QVERIFY(session.insertImage(solid(10, 10, Qt::red), "Plain"));
         const QString url = dir.filePath("Plain.comp");
         ProjectWriter::save(*session.document(), url);
-        for (int version = 1; version <= 22; ++version) {
+        // 1.7.2's range: 1–23 (mac b469ec1).
+        for (int version = 1; version <= 23; ++version) {
             rewriteVersion(url, version);
             try { ProjectReader::load(url); } catch (const ProjectError &e) { QFAIL(qPrintable(QStringLiteral("version %1: %2").arg(version).arg(e.message()))); }
         }
-        rewriteVersion(url, 23);
+        rewriteVersion(url, 24);
         QVERIFY_THROWS_EXCEPTION(ProjectError, ProjectReader::load(url));
     }
 

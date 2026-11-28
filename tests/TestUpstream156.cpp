@@ -105,14 +105,14 @@ private slots:
 
     void gifTimelineControlsInWindow() {
         QTemporaryDir dir; MainWindow w; w.resize(1100, 700); w.show(); QVERIFY(w.openProject(fixture(dir))); QCoreApplication::processEvents();
-        auto *timeline = w.findChild<QWidget *>("gifTimeline"); QVERIFY(timeline && timeline->isVisible()); QCOMPARE(timeline->height(), 110);
+        auto *timeline = w.findChild<QWidget *>("gifTimeline"); QVERIFY(timeline && timeline->isVisible()); QCOMPARE(timeline->height(), GifTimeline::stripHeight + 1 + layersFooterHeight);
         auto *frames = w.findChild<QListWidget *>("gifFrames"); QCOMPARE(frames->count(), 3); QCOMPARE(frames->item(1)->text(), QStringLiteral("2"));
         // 1.5.7: the label shows the GIF's own delays, shortest to longest, rather than "Original".
-        auto *delay = w.findChild<QToolButton *>("gifDelay"); QCOMPARE(delay->text(), QStringLiteral("40–120ms"));
+        auto *delay = w.findChild<QToolButton *>("gifDelay"); QCOMPARE(delay->text(), QStringLiteral("40–120 ms"));
         w.findChild<QAction *>("gifDelay100")->trigger();
-        QVERIFY(w.session().activeLayer()->gif->sameDelay); QCOMPARE(delay->text(), QStringLiteral("100ms"));
+        QVERIFY(w.session().activeLayer()->gif->sameDelay); QCOMPARE(delay->text(), QStringLiteral("100 ms"));
         QVERIFY(w.findChild<QAction *>("gifDelay100")->isChecked());
-        w.findChild<QAction *>("gifDelayOriginal")->trigger(); QCOMPARE(delay->text(), QStringLiteral("40–120ms"));
+        w.findChild<QAction *>("gifDelayOriginal")->trigger(); QCOMPARE(delay->text(), QStringLiteral("40–120 ms"));
         auto *play = w.findChild<QToolButton *>("gifPlay"); QVERIFY(play->isEnabled());
         play->click(); QTRY_VERIFY_WITH_TIMEOUT(w.session().activeLayer()->gif->selected != 0, 1000);
         play->click(); QCOMPARE(play->toolTip(), QStringLiteral("Play"));
