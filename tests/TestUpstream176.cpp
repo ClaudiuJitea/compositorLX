@@ -23,6 +23,8 @@
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QToolButton>
+#include <QVBoxLayout>
+#include <QDialog>
 
 using namespace compositor;
 
@@ -420,13 +422,11 @@ private slots:
         slider.setStyle(new SliderJumpStyle(QStringLiteral("Fusion")));
         QImage image(slider.size(), QImage::Format_ARGB32_Premultiplied); image.fill(Qt::transparent);
         slider.render(&image, {}, {}, QWidget::DrawChildren);
-        // Away from the knob, the track is at most 3 pixels thick.
-        int rows = 0;
-        for (int y = 0; y < image.height(); ++y) if (qAlpha(image.pixel(30, y)) > 40) ++rows;
-        QVERIFY2(rows >= 2 && rows <= 4, qPrintable(QString::number(rows)));
+        // Away from the knob, the track is exactly 2 pixels, crisp: no half-covered rows either side.
+        int rows = 0, soft = 0;
+        for (int y = 0; y < image.height(); ++y) { const int a = qAlpha(image.pixel(30, y)); if (a > 200) ++rows; else if (a > 0) ++soft; }
+        QVERIFY2(rows == 2 && soft == 0, qPrintable(QStringLiteral("%1 solid, %2 soft").arg(rows).arg(soft)));
         // The fill reaches the knob's center, the knob sits at the middle and is round: its corner box is clear.
-        const QRect knob = slider.style()->subControlRect(QStyle::CC_Slider, nullptr, QStyle::SC_SliderHandle, &slider);
-        Q_UNUSED(knob);
         QStyleOptionSlider option; option.initFrom(&slider); option.minimum = 0; option.maximum = 100; option.sliderPosition = 50; option.orientation = Qt::Horizontal;
         const QRect handle = slider.style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, &slider);
         QCOMPARE(handle.size(), QSize(SliderLook::knob, SliderLook::knob));
@@ -441,6 +441,21 @@ private slots:
         image.fill(Qt::transparent); slider.render(&image, {}, {}, QWidget::DrawChildren);
         const QColor left = image.pixelColor(6, handle.center().y()), right = image.pixelColor(193, handle.center().y());
         QVERIFY2(left.blue() > left.red() && right.red() > right.blue(), qPrintable(left.name() + right.name()));
+    }
+
+    // Dialogs open wide enough for their title between the title bar's buttons; frameless panels are left as they are.
+    void dialogsOpenWideEnoughForTheirTitle()
+    {
+        applyEditorTheme(*qApp, ThemeMode::Dark);
+        QDialog dialog; dialog.setWindowTitle(QStringLiteral("Canvas Size"));
+        auto *layout = new QVBoxLayout(&dialog); layout->addWidget(new QLabel(QStringLiteral("x")));
+        dialog.show(); QCoreApplication::processEvents();
+        QVERIFY(dialog.width() >= DialogTitleFit::widthFor(dialog.windowTitle()));
+        QVERIFY(DialogTitleFit::widthFor(QStringLiteral("A much longer dialog title than any field would need")) > DialogTitleFit::minimumWidth);
+        QDialog panel(nullptr, Qt::FramelessWindowHint); panel.setWindowTitle(QStringLiteral("Panel")); panel.resize(120, 80);
+        panel.show(); QCoreApplication::processEvents();
+        QCOMPARE(panel.width(), 120);
+        dialog.close(); panel.close();
     }
 
     void toolbarPillsInMacOrder()

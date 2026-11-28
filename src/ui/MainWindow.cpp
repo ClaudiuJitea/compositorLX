@@ -1696,12 +1696,16 @@ MainWindow::MainWindow(QWidget *parent)
     refreshToolTips();
     connect(&ShortcutManager::instance(), &ShortcutManager::shortcutsChanged, this, refreshToolTips);
     auto *colors = new QWidget(rail); colors->setFixedSize(42, 48);
-    foregroundSwatch_ = new QLabel(colors); foregroundSwatch_->setGeometry(4, 3, 22, 22); foregroundSwatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid #8c8c8c;border-radius:4px;"));
-    backgroundSwatch_ = new QLabel(colors); backgroundSwatch_->setGeometry(16, 17, 22, 22); backgroundSwatch_->setStyleSheet(QStringLiteral("background:#ffffff;border:1px solid #8c8c8c;border-radius:4px;"));
+    // The background color half a swatch behind the foreground, which a gap in the rail's color sets on top of it
+    // (mac ColorPaletteControls: equal swatches, offset 12 of 24, a 2-point gap around the front one).
+    auto *swatchGap = new QLabel(colors); swatchGap->setObjectName(QStringLiteral("swatchGap")); swatchGap->setGeometry(2, 2, 26, 26);
+    swatchGap->setAttribute(Qt::WA_TransparentForMouseEvents);
+    foregroundSwatch_ = new QLabel(colors); foregroundSwatch_->setGeometry(4, 4, 22, 22); foregroundSwatch_->setStyleSheet(QStringLiteral("background:#000000;border:1px solid #8c8c8c;border-radius:4px;"));
+    backgroundSwatch_ = new QLabel(colors); backgroundSwatch_->setGeometry(15, 15, 22, 22); backgroundSwatch_->setStyleSheet(QStringLiteral("background:#ffffff;border:1px solid #8c8c8c;border-radius:4px;"));
     foregroundSwatch_->setObjectName(QStringLiteral("foregroundSwatch"));
     backgroundSwatch_->setObjectName(QStringLiteral("backgroundSwatch"));
     foregroundSwatch_->installEventFilter(this); backgroundSwatch_->installEventFilter(this);
-    foregroundSwatch_->raise();
+    backgroundSwatch_->lower(); swatchGap->raise(); foregroundSwatch_->raise();
     {   // Swap (X) and default colors (D), as small glyphs at the swatches' corners, so the keys are discoverable.
         // Drawn at 2x and sized to the 16 px buttons; strokes thick enough to read at 1x.
         const auto glyph = [](bool swap) {
@@ -1722,7 +1726,7 @@ MainWindow::MainWindow(QWidget *parent)
             return QIcon(pixmap);
         };
         auto *swap = new QToolButton(colors); swap->setObjectName(QStringLiteral("swapColorsButton")); swap->setAutoRaise(true); swap->setIcon(glyph(true));
-        swap->setIconSize(QSize(16, 16)); swap->setGeometry(26, 0, 16, 16); swap->setToolTip(tr("Swap foreground and background (X)")); swap->setCursor(Qt::PointingHandCursor);
+        swap->setIconSize(QSize(14, 14)); swap->setGeometry(27, 0, 14, 14); swap->setToolTip(tr("Swap foreground and background (X)")); swap->setCursor(Qt::PointingHandCursor);
         auto *reset = new QToolButton(colors); reset->setObjectName(QStringLiteral("resetColorsButton")); reset->setAutoRaise(true); reset->setIcon(glyph(false));
         reset->setIconSize(QSize(16, 16)); reset->setGeometry(0, 32, 16, 16); reset->setToolTip(tr("Default colors, black and white (D)")); reset->setCursor(Qt::PointingHandCursor);
         connect(swap, &QToolButton::clicked, this, [this] { if (textEditorHasFocus() || session_.isPainting()) return; session_.swapPaletteColors(); refreshPaletteSwatches(); });
@@ -6560,6 +6564,9 @@ void MainWindow::resizeImageDialog()
         draft->syncing = true;
         const QString suffix = units->currentIndex() == 0 ? tr(" px") : units->currentIndex() == 1 ? tr(" %")
             : units->currentIndex() == 2 ? tr(" in") : tr(" cm");
+        // Whole pixels, two places of a percent, three of an inch or centimeter.
+        const int places = units->currentIndex() == 0 ? 0 : units->currentIndex() == 1 ? 2 : 3;
+        width->setDecimals(places); height->setDecimals(places);
         width->setSuffix(suffix); height->setSuffix(suffix);
         // Scrubbing stays within the side and surface limits (mac 42eb9b2); typing is checked below.
         if (draft->resample && units->currentIndex() == 0) {
@@ -6720,6 +6727,9 @@ void MainWindow::resizeCanvasDialog()
         draft->syncing = true;
         const QString suffix = units->currentIndex() == 0 ? tr(" px") : units->currentIndex() == 1 ? tr(" %")
             : units->currentIndex() == 2 ? tr(" in") : tr(" cm");
+        // Whole pixels, two places of a percent, three of an inch or centimeter.
+        const int places = units->currentIndex() == 0 ? 0 : units->currentIndex() == 1 ? 2 : 3;
+        width->setDecimals(places); height->setDecimals(places);
         width->setSuffix(suffix); height->setSuffix(suffix); width->setValue(displayed(true)); height->setValue(displayed(false));
         draft->syncing = false;
         const int finalWidth = qRound(draft->width), finalHeight = qRound(draft->height);

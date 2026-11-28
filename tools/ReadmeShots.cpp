@@ -1,9 +1,9 @@
 // Developer tool: renders the README's screenshots from the real editor, offscreen.
-//   readme_shots <output-dir> <forest-photo> <leaf-photo>
+//   readme_shots <output-dir> <forest-photo> <leaf-photo> [movie]
 // The README uses mendhak's "Bluebells Suspended In Time" and "Red Acer" from the Ubuntu wallpapers (CC BY-SA 4.0,
 // /usr/share/backgrounds). Writes volumetric-light.jpg (the editor with the Volumetric Light panel), new-filters.jpg
-// (Volumetric Light and Rim Light before and after) and shape-editing.jpg (a stroked shape being edited while another
-// is dragged out).
+// (Volumetric Light and Rim Light before and after) and, given a movie, movie-layers.jpg (the movie scrubbed on the
+// canvas, with its bar). The README's movie is a slow zoom over "Red Acer", made with ffmpeg's zoompan.
 #include "core/EditorSession.h"
 #include "rendering/RimLight.h"
 #include "rendering/VolumetricLight.h"
@@ -19,6 +19,7 @@
 #include <QMenu>
 #include <QPainter>
 #include <QPushButton>
+#include <QSlider>
 #include <QTest>
 #include <QTimer>
 #include <cstdio>
@@ -72,8 +73,9 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     compositor::applyEditorTheme(app, compositor::themeModeFromKey(QStringLiteral("dark")));
     QApplication::setOrganizationName(QStringLiteral("readme-shots"));
-    if (argc < 4) { std::fprintf(stderr, "usage: readme_shots <output-dir> <forest-photo> <leaf-photo>\n"); return 1; }
+    if (argc < 4) { std::fprintf(stderr, "usage: readme_shots <output-dir> <forest-photo> <leaf-photo> [movie]\n"); return 1; }
     const QString out = QString::fromLocal8Bit(argv[1]), forestPath = QString::fromLocal8Bit(argv[2]), leafPath = QString::fromLocal8Bit(argv[3]);
+    const QString moviePath = argc > 4 ? QString::fromLocal8Bit(argv[4]) : QString();
     QDir().mkpath(out);
     const QImage forest = QImage(forestPath).convertToFormat(QImage::Format_RGBA8888_Premultiplied);
     const QImage leaf = QImage(leafPath).convertToFormat(QImage::Format_RGBA8888_Premultiplied);
@@ -133,39 +135,23 @@ int main(int argc, char **argv)
         sheet.save(QDir(out).filePath(QStringLiteral("new-filters.jpg")), "JPG", 90);
     }
 
-    // 3. Shape editing: a rounded, stroked rectangle selected with the Shape tool, its fill, stroke and radius on the bar,
-    // while an ellipse is dragged out with its size beside the pointer.
-    {
+    // 3. A movie layer: the clip opened as a layer and scrubbed part way, its frame on the canvas, the movie bar under it
+    // and "MOV" in the Layers panel.
+    if (!moviePath.isEmpty()) {
         MainWindow window;
         window.resize(1866, 1000);
         window.show();
-        EditorSession &s = window.session();
-        s.createDocument(1920, 1080, false);
-        s.insertImage(leaf.scaled(1920, 1080, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation), QStringLiteral("Red Acer"));
+        if (!window.importImageFiles({moviePath})) { std::fprintf(stderr, "could not open the movie\n"); return 4; }
         window.syncDocumentViews();
-        auto *canvas = window.findChild<CanvasWidget *>();
-        canvas->setTool(CanvasWidget::Tool::Shape);
-        window.syncDocumentViews();
-        s.shapeToolActive = false; // each shape from the values set here, not the one just drawn
-        s.setForegroundColor(QColor(250, 244, 232));
-        s.shapeStrokeColor = QColor(196, 40, 52); s.shapeStrokeWidth = 14; s.shapeCornerRadius = 36;
-        s.drawShape(ShapeKind::Rectangle, QRectF(140, 150, 620, 360));
-        s.setForegroundColor(QColor(255, 214, 120));
-        s.shapeStrokeColor = QColor(40, 30, 30); s.shapeStrokeWidth = 8;
-        s.drawShape(ShapeKind::Ellipse, QRectF(1260, 700, 360, 260));
-        s.shapeToolActive = true;
-        s.selectLayer(s.document()->layers.at(1).id);
-        window.syncDocumentViews();
-        QTest::qWait(800);
-        canvas->setFocus();
-        const auto at = [&](double x, double y) { return (canvas->canvasRect().topLeft() + QPointF(x, y) * canvas->zoom()).toPoint(); };
-        QTest::mousePress(canvas, Qt::LeftButton, {}, at(1000, 220));
-        QTest::mouseMove(canvas, at(1220, 360));
-        QTest::mouseMove(canvas, at(1430, 470));
-        QTest::qWait(400);
-        composite(window).save(QDir(out).filePath(QStringLiteral("shape-editing.jpg")), "JPG", 90);
-        QTest::keyClick(canvas, Qt::Key_Escape);
-        QTest::mouseRelease(canvas, Qt::LeftButton, {}, at(1430, 470));
+        QTest::qWait(600);
+        auto *playhead = window.findChild<QSlider *>(QStringLiteral("moviePlayhead"));
+        if (!playhead) { std::fprintf(stderr, "no movie bar\n"); return 5; }
+        playhead->setSliderDown(true);
+        playhead->setValue(int(playhead->maximum() * .62));
+        playhead->setSliderDown(false);
+        QTest::qWait(2500);   // the exact frame is decoded and taken
+        composite(window).save(QDir(out).filePath(QStringLiteral("movie-layers.jpg")), "JPG", 90);
+        window.session().markSaved();
     }
     return 0;
 }

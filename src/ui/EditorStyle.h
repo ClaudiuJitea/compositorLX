@@ -5,6 +5,8 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QDialog>
+#include <QFontMetrics>
 #include <QEvent>
 #include <QFont>
 #include <QHash>
@@ -137,11 +139,12 @@ inline QHash<QString, QString> tokens(const QPalette &p)
     c[QStringLiteral("panelAlt")] = dark ? mix(W, T, .05) : mix(W, T, .03);
     c[QStringLiteral("rail")] = dark ? mix(W, T, .01) : mix(W, T, .02);
     c[QStringLiteral("menu")] = dark ? mix(W, T, .055) : base;
-    c[QStringLiteral("control")] = B;
-    c[QStringLiteral("controlHover")] = mix(B, T, .08);
-    c[QStringLiteral("controlPressed")] = mix(B, dark ? black : T, .12);
-    c[QStringLiteral("controlDisabled")] = mix(W, B, .5);
-    c[QStringLiteral("field")] = dark ? mix(B, black, .05) : base;
+    // Controls are flat fills a step off the panel, with no outline (a focused one gets the focus ring).
+    c[QStringLiteral("control")] = dark ? mix(W, T, .085) : mix(W, T, .075);
+    c[QStringLiteral("controlHover")] = dark ? mix(W, T, .13) : mix(W, T, .11);
+    c[QStringLiteral("controlPressed")] = dark ? mix(W, T, .055) : mix(W, T, .14);
+    c[QStringLiteral("controlDisabled")] = dark ? mix(W, T, .045) : mix(W, T, .04);
+    c[QStringLiteral("field")] = dark ? mix(W, T, .06) : mix(W, T, .055);
     c[QStringLiteral("fieldDeep")] = dark ? mix(W, black, .05) : base;
     c[QStringLiteral("border")] = mix(B, T, dark ? .12 : .22);
     c[QStringLiteral("borderSoft")] = mix(W, T, dark ? .13 : .14);
@@ -194,12 +197,12 @@ inline QString editorStyleTemplate()
 {
     return QStringLiteral(R"css(
         QMainWindow#editorWindow { background: @surface@; }
-        QMenuBar { background: @chrome@; color: @text@; font-size: 13px; font-weight: 500; border-bottom: 1px solid @borderSoft@; padding: 4px 9px; spacing: 3px; }
-        QMenuBar::item { background: transparent; padding: 5px 10px; border-radius: 5px; }
+        QMenuBar { background: @chrome@; color: @text@; font-size: 12px; font-weight: 400; border-bottom: 1px solid @borderSoft@; padding: 3px 8px; spacing: 2px; }
+        QMenuBar::item { background: transparent; padding: 4px 9px; border-radius: 5px; }
         QMenuBar::item:selected { background: @controlHover@; color: @textStrong@; }
         QMenuBar::item:pressed { background: @accentSoft@; color: @accentText@; }
-        QMenu { background: @menu@; color: @text@; font-size: 13px; border: 1px solid @border@; border-radius: 8px; padding: 6px; }
-        QMenu::item { min-width: 190px; min-height: 28px; padding: 4px 30px 4px 12px; border-radius: 5px; }
+        QMenu { background: @menu@; color: @text@; font-size: 12px; border: 1px solid @border@; border-radius: 8px; padding: 5px; }
+        QMenu::item { min-width: 180px; min-height: 24px; padding: 3px 28px 3px 10px; border-radius: 5px; }
         QMenu::item:selected { background: @accentStrong@; color: @onAccent@; }
         QMenu::item:disabled { color: @textDisabled@; background: transparent; }
         QMenu::separator { height: 1px; background: @border@; margin: 5px 7px; }
@@ -207,7 +210,7 @@ inline QString editorStyleTemplate()
         QDialog, QMessageBox { background: @surface@; color: @text@; }
         QMessageBox QLabel#qt_msgbox_label { color: @text@; font-size: 13px; min-width: 300px; }
         QMessageBox QLabel#qt_msgbox_informativelabel { color: @textMuted@; }
-        QMessageBox QPushButton, QDialogButtonBox QPushButton { min-width: 86px; min-height: 31px; border-radius: 6px; }
+        QMessageBox QPushButton, QDialogButtonBox QPushButton { min-width: 80px; min-height: 28px; border-radius: 6px; }
         QDialogButtonBox[roundedControls="true"] QPushButton { min-height: 28px; max-height: 28px; border-radius: 14px; padding: 0 14px; }
         QWidget#tabBar { background: @chrome@; border-bottom: 1px solid @separator@; }
         QWidget#documentTab { background: @control@; border: 1px solid @border@; border-radius: 15px; }
@@ -225,7 +228,7 @@ inline QString editorStyleTemplate()
         QToolButton#tabClose { border: 0; background: transparent; color: @textMuted@; font-size: 16px; }
         QToolButton#newTabButton, QToolButton#menuRestoreButton, QToolButton#roundTool { background: transparent; border: 1px solid transparent; border-radius: 13px; }
         QToolButton#menuRestoreButton::menu-indicator { image: none; }
-        QToolButton#newTabButton { color: @text@; background: @pill@; border: 0; border-radius: 14px; font-size: 18px; font-weight: 400; min-width: 28px; max-width: 28px; min-height: 28px; max-height: 28px; padding: 0 0 2px 0; }
+        QToolButton#newTabButton { color: @text@; background: @pill@; border: 0; border-radius: 14px; font-size: 18px; font-weight: 400; min-width: 28px; max-width: 28px; min-height: 26px; max-height: 26px; padding: 0 0 2px 0; }
         QToolButton#newTabButton:hover { background: @pillHover@; border: 0; }
         QToolButton#newTabButton:pressed { background: @pillPressed@; }
         QToolButton#newTabButton:disabled { color: @textDisabled@; background: @pill@; }
@@ -239,14 +242,14 @@ inline QString editorStyleTemplate()
         QPushButton#toolbarPill:disabled, QToolButton#toolbarPill:disabled { background: @pill@; color: @textDisabled@; }
         QWidget#transformBar QWidget, QWidget#inspector QWidget { font-size: 11px; }
         QWidget#transformBar { background: @panel@; border-bottom: 1px solid @borderSoft@; }
-        QWidget#transformBar QPushButton, QWidget#transformBar QToolButton, QWidget#transformBar QComboBox, QWidget#transformBar QDoubleSpinBox, QWidget#transformBar QSpinBox { min-height: 26px; max-height: 26px; height: 26px; }
+        QWidget#transformBar QPushButton, QWidget#transformBar QToolButton, QWidget#transformBar QComboBox, QWidget#transformBar QDoubleSpinBox, QWidget#transformBar QSpinBox { min-height: 24px; max-height: 24px; height: 24px; }
         QWidget#transformBar QLabel#sectionTitle { color: @textStrong@; padding-right: 8px; }
         QWidget#transformBar QLabel[scrubbable="true"] { color: @textMuted@; font-size: 11px; padding: 0 2px; }
         QWidget#transformBar QLabel[scrubbable="true"]:hover { color: @textStrong@; }
         QWidget#transformBar QAbstractSpinBox:focus, QWidget#transformBar QComboBox:focus { border: 1px solid @focus@; }
         QWidget#transformBar QToolButton:checked { background: @accentSoft@; border-color: @focus@; }
         QWidget#segmentedControl,
-        QWidget[segmented="true"] { background: @control@; border: 1px solid @border@; border-radius: 6px; }
+        QWidget[segmented="true"] { background: @control@; border: 1px solid transparent; border-radius: 5px; }
         QWidget#segmentedControl QToolButton,
         QWidget[segmented="true"] QToolButton,
         QWidget#segmentedControl QPushButton,
@@ -259,9 +262,9 @@ inline QString editorStyleTemplate()
             padding: 0 10px;
             font-size: 11px;
             font-weight: 500;
-            min-height: 28px;
-            max-height: 28px;
-            height: 28px;
+            min-height: 22px;
+            max-height: 22px;
+            height: 22px;
         }
         QWidget#segmentedControl QToolButton[segmentIconOnly="true"],
         QWidget[segmented="true"] QToolButton[segmentIconOnly="true"] {
@@ -404,30 +407,31 @@ inline QString editorStyleTemplate()
         QCheckBox::indicator:checked:disabled { background: @accentDisabled@; border-color: @accentDisabled@; }
         QCheckBox::indicator:hover:!checked { border-color: @textFaint@; }
         QCheckBox::indicator:focus { border-color: @focus@; }
-        QPushButton, QToolButton, QComboBox, QDoubleSpinBox, QSpinBox { background: @control@; border: 1px solid @border@; border-radius: 6px; min-height: 27px; color: @text@; }
+        QPushButton, QToolButton, QComboBox, QDoubleSpinBox, QSpinBox { background: @control@; border: 1px solid transparent; border-radius: 5px; min-height: 24px; color: @text@; }
         QPushButton { padding: 0 11px; }
         QPushButton:hover, QToolButton:hover, QComboBox:hover { background: @controlHover@; }
         QPushButton:pressed, QToolButton:pressed { background: @controlPressed@; }
         QPushButton:focus, QComboBox:focus, QAbstractSpinBox:focus { border-color: @focus@; }
-        QPushButton:disabled, QToolButton:disabled, QComboBox:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled { color: @textDisabled@; background: @controlDisabled@; border-color: @borderDisabled@; }
+        QPushButton:disabled, QToolButton:disabled, QComboBox:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled { color: @textDisabled@; background: @controlDisabled@; border-color: transparent; }
         QPushButton#primaryButton:enabled, QPushButton#textDone:enabled { background: @accent@; border-color: @accentHover@; color: @onAccent@; }
         QPushButton#primaryButton:enabled:hover, QPushButton#textDone:enabled:hover { background: @accentHover@; }
         QFontComboBox#textFont { padding-right: 28px; }
-        QLineEdit { background: @field@; color: @text@; border: 1px solid @border@; border-radius: 6px; padding: 4px 7px; selection-background-color: @accent@; selection-color: @onAccent@; }
+        QLineEdit { background: @field@; color: @text@; border: 1px solid transparent; border-radius: 5px; padding: 3px 7px; selection-background-color: @accent@; selection-color: @onAccent@; }
         QLineEdit:focus { border-color: @focus@; }
         QDoubleSpinBox, QSpinBox { padding: 0 7px; background: @field@; selection-background-color: @accent@; selection-color: @onAccent@; }
-        QAbstractSpinBox::up-button, QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; border: 0; border-left: 1px solid @border@; border-top-right-radius: 5px; background: @control@; }
-        QAbstractSpinBox::down-button, QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; border: 0; border-left: 1px solid @border@; border-bottom-right-radius: 5px; background: @control@; }
+        QAbstractSpinBox::up-button, QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 16px; border: 0; border-top-right-radius: 4px; background: transparent; }
+        QAbstractSpinBox::down-button, QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 16px; border: 0; border-bottom-right-radius: 4px; background: transparent; }
         QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover, QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover { background: @accentSoftHover@; }
         QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed, QSpinBox::up-button:pressed, QSpinBox::down-button:pressed, QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed { background: @accentSoftPressed@; }
-        QAbstractSpinBox::up-arrow, QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url(@chevronUp@); width: 12px; height: 12px; }
-        QAbstractSpinBox::down-arrow, QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url(@chevronDown@); width: 12px; height: 12px; }
+        QAbstractSpinBox::up-arrow, QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url(@chevronUp@); width: 9px; height: 9px; }
+        QAbstractSpinBox::down-arrow, QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url(@chevronDown@); width: 9px; height: 9px; }
         QComboBox { padding: 0 28px 0 8px; font-weight: 400; }
         QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right; border: 0; width: 24px; }
-        QComboBox::down-arrow { image: url(@chevronDown@); width: 12px; height: 12px; }
-        QComboBox::drop-down:hover { background: @accentSoftHover@; border-top-right-radius: 5px; border-bottom-right-radius: 5px; }
+        QComboBox::down-arrow { image: url(@chevronDown@); width: 10px; height: 10px; }
+        QComboBox::drop-down:hover { background: transparent; }
         QComboBox QAbstractItemView { background: @menu@; color: @text@; border: 1px solid @border@; selection-background-color: @accentStrong@; selection-color: @onAccent@; }
         QWidget#toolRail { background: @rail@; border-right: 1px solid @separator@; }
+        QLabel#swatchGap { background: @rail@; border: 0; border-radius: 6px; }
         QScrollArea#toolRailScroll, QScrollArea#toolRailScroll > QWidget, QWidget#toolRailTools { background: transparent; border: 0; }
         QScrollArea#toolRailScroll QScrollBar:vertical { width: 6px; }
         QWidget#toolRail QToolButton { border: 1px solid transparent; background: transparent; border-radius: 8px; padding: 0; }
@@ -477,7 +481,7 @@ inline QString editorStyleTemplate()
         QLabel#emptyStateTitle { color: @textStrong@; font-size: 20px; font-weight: 600; }
         QLabel#emptyStateSubtitle { color: @textMuted@; font-size: 12px; }
         QLabel#emptyStateHint { color: @textFaint@; font-size: 11px; }
-        QWidget#newCanvasPanel QSpinBox { min-height: 35px; background: @fieldDeep@; border: 1px solid @border@; border-radius: 7px; padding: 0 10px; font-size: 13px; selection-background-color: @accent@; }
+        QWidget#newCanvasPanel QSpinBox { min-height: 32px; background: @field@; border: 1px solid transparent; border-radius: 7px; padding: 0 10px; font-size: 13px; selection-background-color: @accent@; }
         QWidget#newCanvasPanel QSpinBox:focus { border-color: @focus@; }
         QWidget#newCanvasPanel QSpinBox::up-button { border-top-right-radius: 6px; }
         QWidget#newCanvasPanel QSpinBox::down-button { border-bottom-right-radius: 6px; }
@@ -579,6 +583,35 @@ private:
     bool pending_ = false;
 };
 
+// Every dialog opens wide enough to read its title: a window title is centered between the title bar's buttons, so a
+// dialog sized only to its fields ("Canvas Si…") cut it off. Frameless panels and popups have no title bar to fit.
+class DialogTitleFit final : public QObject {
+public:
+    using QObject::QObject;
+    static constexpr int titleBarButtons = 120;   // close, maximize and minimize, and their margins, on either side
+    static constexpr int minimumWidth = 340;
+    static int widthFor(const QString &title)
+    {
+        QFont font = QApplication::font(); font.setBold(true);
+        return std::max(minimumWidth, QFontMetrics(font).horizontalAdvance(title) + 2 * titleBarButtons);
+    }
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Show) {
+            auto *dialog = qobject_cast<QDialog *>(watched);
+            // Popup and ToolTip are window types, not single bits: they are compared, not masked.
+            const Qt::WindowType type = dialog ? dialog->windowType() : Qt::Widget;
+            if (dialog && dialog->isWindow() && type != Qt::Popup && type != Qt::ToolTip && type != Qt::SplashScreen
+                && !(dialog->windowFlags() & Qt::FramelessWindowHint) && !dialog->windowTitle().isEmpty()) {
+                const int wanted = widthFor(dialog->windowTitle());
+                if (dialog->minimumWidth() < wanted && dialog->maximumWidth() >= wanted) dialog->setMinimumWidth(wanted);
+                if (dialog->width() < wanted) dialog->resize(wanted, dialog->height());
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
 // The application's look: Fusion with the slim click-to-position sliders (SliderJumpStyle), the editor's palette (or the desktop's) and the
 // stylesheet built from it. One place, so the app and the UI snapshot tool cannot drift apart.
 inline void applyEditorTheme(QApplication &application, std::optional<ThemeMode> mode = std::nullopt)
@@ -588,6 +621,8 @@ inline void applyEditorTheme(QApplication &application, std::optional<ThemeMode>
     applyThemeMode(application, mode.value_or(savedThemeMode()));
     static EditorThemeWatcher *watcher = nullptr;
     if (!watcher) watcher = new EditorThemeWatcher(application);
+    static DialogTitleFit *titles = nullptr;
+    if (!titles) { titles = new DialogTitleFit(&application); application.installEventFilter(titles); }
 }
 
 // Chooses and remembers the scheme (View > Theme).

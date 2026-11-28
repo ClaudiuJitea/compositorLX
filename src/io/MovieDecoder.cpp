@@ -173,7 +173,13 @@ struct MovieDecoder::Private {
                 outSize = orientation.swapsSides() ? fitted.transposed() : fitted;
             }
         }
-        const auto source = AVPixelFormat(frame->format);
+        // FFmpeg's "J" formats are full-range YUV under an old name, which swscale warns about: read them as the plain
+        // formats, with the range set below.
+        auto source = AVPixelFormat(frame->format);
+        const bool legacyFull = source == AV_PIX_FMT_YUVJ420P || source == AV_PIX_FMT_YUVJ422P || source == AV_PIX_FMT_YUVJ444P;
+        if (source == AV_PIX_FMT_YUVJ420P) source = AV_PIX_FMT_YUV420P;
+        else if (source == AV_PIX_FMT_YUVJ422P) source = AV_PIX_FMT_YUV422P;
+        else if (source == AV_PIX_FMT_YUVJ444P) source = AV_PIX_FMT_YUV444P;
         const bool hdr = isHdrTransfer(frame->color_trc);
         const AVPixelFormat target = hdr ? AV_PIX_FMT_RGB48LE : AV_PIX_FMT_RGBA;
         sws = sws_getCachedContext(sws, width, height, source, outSize.width(), outSize.height(), target,
@@ -181,8 +187,7 @@ struct MovieDecoder::Private {
         if (!sws) return {};
         // The matrix and range the track declares, read into full-range RGB.
         const int *coefficients = sws_getCoefficients(swsColorspace(frame->colorspace, height));
-        const bool full = frame->color_range == AVCOL_RANGE_JPEG
-                          || source == AV_PIX_FMT_YUVJ420P || source == AV_PIX_FMT_YUVJ422P || source == AV_PIX_FMT_YUVJ444P;
+        const bool full = frame->color_range == AVCOL_RANGE_JPEG || legacyFull;
         sws_setColorspaceDetails(sws, coefficients, full ? 1 : 0, sws_getCoefficients(SWS_CS_DEFAULT), 1, 0, 1 << 16, 1 << 16);
         QImage image;
         if (!hdr) {
