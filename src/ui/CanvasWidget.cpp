@@ -1,6 +1,7 @@
 #include "ui/GpuViewport.h"
 #include "rendering/GpuRenderer.h"
 #include "ui/CanvasWidget.h"
+#include "ui/EditorIcons.h"
 #include "rendering/ShapeLine.h"
 #include <QTabletEvent>
 #include "rendering/ShapePath.h"
@@ -11,6 +12,7 @@
 #include "core/SelectionOps.h"
 
 #include "core/EditorSession.h"
+#include <cstring>
 #include "rendering/LayerRenderer.h"
 #include "rendering/DownsampleCache.h"
 #include "ui/ShortcutManager.h"
@@ -80,10 +82,18 @@ static QCursor zoomCursor(bool out)
 
 static QCursor eyedropperCursor()
 {
-    QPixmap pixmap(28, 28); pixmap.fill(Qt::transparent); QPainter painter(&pixmap); painter.setRenderHint(QPainter::Antialiasing);
-    QPolygonF shape{QPointF(6,4),QPointF(10,2),QPointF(16,8),QPointF(14,10),QPointF(22,18),QPointF(18,22),QPointF(10,14),QPointF(8,16),QPointF(5,15),QPointF(12,8)};
-    painter.setPen(QPen(Qt::black, 3)); painter.setBrush(QColor(235,235,235)); painter.drawPolygon(shape); painter.setPen(QPen(Qt::white,1)); painter.drawPolygon(shape); painter.end();
-    return QCursor(pixmap, 6, 23);
+    // The toolbar's pipette, white with a dark outline so it reads on any picture; the hot spot is its tip.
+    constexpr int side = 28; constexpr double scale = side / 24.0;
+    QPixmap pixmap(side, side); pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap); painter.setRenderHint(QPainter::Antialiasing); painter.scale(scale, scale);
+    const PipetteParts pipette = pipetteParts();
+    painter.setPen(QPen(QColor(10, 10, 10), 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); painter.setBrush(Qt::NoBrush);
+    painter.drawPath(pipette.tube.united(pipette.collar).united(pipette.bulb));
+    painter.setPen(Qt::NoPen); painter.setBrush(QColor(250, 250, 250));
+    painter.drawPath(pipette.tube); painter.drawPath(pipette.collar); painter.drawPath(pipette.bulb);
+    painter.setPen(QPen(QColor(10, 10, 10), .8)); painter.setBrush(Qt::NoBrush); painter.drawPath(pipette.collar);
+    painter.end();
+    return QCursor(pixmap, qRound(pipetteTip.x() * scale), qRound(pipetteTip.y() * scale));
 }
 
 static QRectF dragBox(const QPointF &anchor, const QPointF &point, bool square, bool fromCenter)
@@ -206,12 +216,35 @@ CanvasWidget::CanvasWidget(QWidget *parent)
     connect(&renderWatcher_, &QFutureWatcher<QImage>::finished, this, [this] {
         renderActive_ = false;
         const quint64 completed = renderWatcher_.property("generation").toULongLong();
-        const QImage image = renderWatcher_.result();
-        if (completed == renderGeneration_ && !image.isNull()) {
-            renderedDocument_ = image;
-            renderDirty_ = false;
-            update();
+        const QRect region = renderWatcher_.property("region").toRect();
+        // Taken out of the future, so the frame is not shared and a later rectangle is drawn into it in place.
+        QFuture<QImage> future = renderWatcher_.future();
+        QImage image = future.isValid() && future.resultCount() > 0 ? future.takeResult() : QImage();
+        // A frame of the document on show is shown even when the document has changed since it began: while a tool
+        // is dragged it changes on every pointer move, and waiting for a render nothing overtook would show nothing
+        // new until the pointer stops. The next render follows at once.
+        const bool current = document_ && renderWatcher_.property("document").value<quintptr>() == quintptr(document_.get());
+        bool shown = false;
+        if (current && !image.isNull()) {
+            if (region.isEmpty() && image.size() == document_->canvasSize) {
+                renderedDocument_ = std::move(image);
+                shown = true;
+            } else if (!region.isEmpty() && image.size() == region.size() && renderedDocument_.size() == document_->canvasSize
+                       && renderedDocument_.depth() == 32 && QRect(QPoint(), renderedDocument_.size()).contains(region)) {
+                displayImageCache_ = {}; displayImageKey_ = 0; // may share the frame; it is made again from it
+                const bool reductionsCurrent = reducedKey_ == renderedDocument_.cacheKey();
+                const QImage piece = image.convertToFormat(renderedDocument_.format());
+                uchar *bits = renderedDocument_.bits(); const qsizetype stride = renderedDocument_.bytesPerLine();
+                for (int y = 0; y < region.height(); ++y)
+                    std::memcpy(bits + (region.top() + y) * stride + qsizetype(region.left()) * 4, piece.constScanLine(y), size_t(region.width()) * 4);
+                if (reductionsCurrent) { patchReductions(region); reducedKey_ = renderedDocument_.cacheKey(); }
+                shown = true;
+            }
         }
+        if (shown) {
+            if (completed == renderGeneration_) renderDirty_ = false;
+            update();
+        } else lastRendered_.reset(); // the frame does not show what was sent: the next render is of everything
         if (renderAgain_ || completed != renderGeneration_) {
             renderAgain_ = false;
             startBackgroundRender();
@@ -313,10 +346,126 @@ void CanvasWidget::startBackgroundRender()
     if (!document_ || renderedDocument_.isNull()) return;
     if (renderActive_) return;
     Document snapshot = *document_;
+    const std::optional<QRect> stroked = mirrorStroke(snapshot);
     applyPreviewState(snapshot);
+    QVector<RenderedLayer> rendered;
+    rendered.reserve(snapshot.layers.size());
+    for (const Layer &layer : snapshot.layers) {
+        RenderedLayer kept{layer, layer.image.cacheKey(), layer.mask.cacheKey()};
+        kept.layer.image = QImage(); kept.layer.mask = QImage();
+        rendered.push_back(std::move(kept));
+    }
+    // While a stroke paints and nothing else changes, only its dirty rectangle is rendered (on the CPU, from the layers
+    // cropped to it) and drawn into the frame on show: a few milliseconds instead of the whole document.
+    QRect region;
+    if (stroked && lastRendered_ && strokeMirror_ && renderedDocument_.size() == snapshot.canvasSize
+        && renderedDocument_.format() == QImage::Format_RGBA8888_Premultiplied && lastRendered_->size() == rendered.size()
+        && LayerRenderer::regionRenderable(snapshot)) {
+        bool onlyStroke = true;
+        for (qsizetype i = 0; i < rendered.size() && onlyStroke; ++i) {
+            const RenderedLayer &before = lastRendered_->at(i), &now = rendered.at(i);
+            if (before == now) continue;
+            onlyStroke = now.layer.id == strokeMirror_->layerId && before.layer == now.layer
+                && (strokeMirror_->mask ? before.image == now.image : before.mask == now.mask);
+        }
+        if (onlyStroke && stroked->isEmpty()) { lastRendered_ = std::move(rendered); renderDirty_ = false; return; } // nothing new
+        if (onlyStroke && qint64(stroked->width()) * stroked->height() * 3 < qint64(snapshot.canvasSize.width()) * snapshot.canvasSize.height())
+            region = *stroked;
+    }
+    lastRendered_ = std::move(rendered);
     renderWatcher_.setProperty("generation", QVariant::fromValue(renderGeneration_));
+    renderWatcher_.setProperty("region", region);
+    renderWatcher_.setProperty("document", QVariant::fromValue(quintptr(document_.get())));
     renderActive_ = true;
-    renderWatcher_.setFuture(QtConcurrent::run([snapshot] { GpuRenderer::PriorityScope canvas(GpuPriority::Canvas); return LayerRenderer::flattened(snapshot, RenderPurpose::Display); }));
+    renderWatcher_.setFuture(QtConcurrent::run([snapshot, region] {
+        if (!region.isEmpty()) return LayerRenderer::flattenedRegion(snapshot, region);
+        GpuRenderer::PriorityScope canvas(GpuPriority::Canvas);
+        QImage frame = LayerRenderer::flattened(snapshot, RenderPurpose::Display);
+        // The display draws 8-bit frames as RGBA8888; converted here, off the GUI thread.
+        if (!DeepImage::isDeep(frame) && frame.format() != QImage::Format_RGBA8888_Premultiplied)
+            frame = frame.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        return frame;
+    }));
+}
+
+std::optional<QRect> CanvasWidget::mirrorStroke(Document &snapshot)
+{
+    const auto writes = session_ && session_->document() == document_ ? session_->takeStrokeWrites() : std::nullopt;
+    const auto layer = writes ? std::find_if(snapshot.layers.begin(), snapshot.layers.end(), [&](const Layer &l) { return l.id == writes->layerId; })
+                              : snapshot.layers.end();
+    if (layer == snapshot.layers.end()) { strokeMirror_.reset(); return std::nullopt; }
+    QImage &painted = writes->mask ? layer->mask : layer->image;
+    // A QImage's serial (the top half of its cache key) changes only when it is given other pixels, not when it is
+    // written in place; any other change (a new stroke, the layer grown, a cancel) starts the copy over.
+    const qint64 serial = painted.cacheKey() >> 32;
+    std::optional<QRect> changed;
+    if (!strokeMirror_ || strokeMirror_->layerId != writes->layerId || strokeMirror_->mask != writes->mask || strokeMirror_->serial != serial
+        || strokeMirror_->image.size() != painted.size() || strokeMirror_->image.format() != painted.format() || painted.depth() % 8) {
+        strokeMirror_ = StrokeMirror{writes->layerId, writes->mask, serial, painted.copy()};
+    } else {
+        const QRect rect = writes->pixels.intersected(painted.rect());
+        if (!rect.isEmpty()) {
+            const int bytes = painted.depth() / 8;
+            QImage &mirror = strokeMirror_->image;
+            for (int y = rect.top(); y <= rect.bottom(); ++y)
+                std::memcpy(mirror.scanLine(y) + qsizetype(rect.left()) * bytes, painted.constScanLine(y) + qsizetype(rect.left()) * bytes,
+                            size_t(rect.width()) * bytes);
+            // Where those pixels show on the canvas, with a pixel to spare for the layer's sampling.
+            const LayerTransform placement = writes->mask ? layer->maskPlacement.value_or(layer->transform) : layer->transform;
+            changed = LayerRenderer::pixelToDocument(placement, painted.size()).mapRect(QRectF(rect)).toAlignedRect()
+                          .adjusted(-2, -2, 2, 2).intersected(QRect(QPoint(), snapshot.canvasSize));
+        } else changed = QRect();
+    }
+    painted = strokeMirror_->image;
+    return changed;
+}
+
+// One power-of-two reduction step over `area` of the destination: each pixel the mean of the 2 x 2 below it (the edge
+// row or column repeated where the source is odd-sized). 8-bit premultiplied RGBA.
+static void reduceHalf(const QImage &source, QImage &destination, const QRect &area)
+{
+    const int lastX = source.width() - 1, lastY = source.height() - 1;
+    uchar *bits = destination.bits(); const qsizetype stride = destination.bytesPerLine(); // writable here, on one thread
+    const auto rows = [&](int top, int bottom) {
+        for (int y = top; y <= bottom; ++y) {
+            const uchar *a = source.constScanLine(std::min(2 * y, lastY)), *b = source.constScanLine(std::min(2 * y + 1, lastY));
+            uchar *out = bits + y * stride;
+            for (int x = area.left(); x <= area.right(); ++x) {
+                const int x0 = std::min(2 * x, lastX) * 4, x1 = std::min(2 * x + 1, lastX) * 4;
+                for (int c = 0; c < 4; ++c) out[x * 4 + c] = uchar((a[x0 + c] + a[x1 + c] + b[x0 + c] + b[x1 + c] + 2) / 4);
+            }
+        }
+    };
+    if (qint64(area.width()) * area.height() <= 65536) { rows(area.top(), area.bottom()); return; }
+    // A whole frame's reduction runs in bands of rows on all cores.
+    QVector<QPair<int, int>> bands;
+    for (int top = area.top(); top <= area.bottom(); top += 64) bands.push_back({top, std::min(area.bottom(), top + 63)});
+    QtConcurrent::blockingMap(bands, [&](const QPair<int, int> &band) { rows(band.first, band.second); });
+}
+
+QImage CanvasWidget::reducedDisplay(int level)
+{
+    if (level < 1) return renderedDocument_;
+    if (reducedKey_ != renderedDocument_.cacheKey()) { reducedLevels_.clear(); reducedKey_ = renderedDocument_.cacheKey(); }
+    while (reducedLevels_.size() < level) {
+        const QImage &previous = reducedLevels_.isEmpty() ? renderedDocument_ : reducedLevels_.constLast();
+        if (previous.width() <= 1 && previous.height() <= 1) break;
+        QImage next(std::max(1, (previous.width() + 1) / 2), std::max(1, (previous.height() + 1) / 2), previous.format());
+        reduceHalf(previous, next, next.rect());
+        reducedLevels_.push_back(std::move(next));
+    }
+    return reducedLevels_.isEmpty() ? renderedDocument_ : reducedLevels_.at(std::min<qsizetype>(level, reducedLevels_.size()) - 1);
+}
+
+void CanvasWidget::patchReductions(const QRect &region)
+{
+    QRect area = region;
+    for (qsizetype i = 0; i < reducedLevels_.size(); ++i) {
+        QImage &level = reducedLevels_[i];
+        area = QRect(QPoint(area.left() / 2, area.top() / 2), QPoint(area.right() / 2, area.bottom() / 2)).intersected(level.rect());
+        if (area.isEmpty()) break;
+        reduceHalf(i == 0 ? renderedDocument_ : reducedLevels_.at(i - 1), level, area);
+    }
 }
 
 void CanvasWidget::setTool(Tool tool)
@@ -451,6 +600,7 @@ void CanvasWidget::setDocument(std::shared_ptr<Document> document, bool invalida
     document_ = std::move(document);
     lastBrushPoint_.reset(); lastBrushLayerId_.reset();
     renderedDocument_ = {};
+    lastRendered_.reset();
     renderDirty_ = true;
     renderAgain_ = false;
     ++renderGeneration_;
@@ -780,6 +930,8 @@ void CanvasWidget::paintCanvas(QPainter &painter)
             Document snapshot = *document_;
             applyPreviewState(snapshot);
             renderedDocument_ = LayerRenderer::flattened(snapshot, RenderPurpose::Display);
+            if (!DeepImage::isDeep(renderedDocument_)) renderedDocument_ = renderedDocument_.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+            lastRendered_.reset();
             renderDirty_ = false;
         } else startBackgroundRender();
     }
@@ -788,7 +940,8 @@ void CanvasWidget::paintCanvas(QPainter &painter)
     const double deviceScale = zoom_ * devicePixelRatioF();
     QImage displaySource=renderedDocument_;
     if(proofProfile_){if(proofCache_.isNull()||proofSourceKey_!=renderedDocument_.cacheKey()){proofCache_=CMYK::proof(renderedDocument_,*proofProfile_,gamutWarning_,proofEnabled_);proofSourceKey_=renderedDocument_.cacheKey();}displaySource=proofCache_;}
-    const QImage reduced=DownsampleCache::shared().image(displaySource,deviceScale);
+    const QImage reduced = !proofProfile_ && renderedDocument_.format() == QImage::Format_RGBA8888_Premultiplied
+        ? reducedDisplay(DownsampleCache::levelForFactor(deviceScale)) : DownsampleCache::shared().image(displaySource,deviceScale);
     if(displayImageKey_!=reduced.cacheKey()) {displayImageCache_=DeepImage::dithered(reduced);displayImageKey_=reduced.cacheKey();}
     const QImage &displayImage=displayImageCache_;
     painter.save();

@@ -354,6 +354,11 @@ public:
     [[nodiscard]] QString paintRefusal() const;
     // Whether the active layer (or its mask) can take paint, a fill, a gradient or a pixel move (mac canPaint).
     [[nodiscard]] bool canPaint() const { return document_ && activeLayer() && paintRefusal().isEmpty(); }
+    // The pixels a brush, Liquify or Smudge stroke has written in place since this was last asked, in the painted
+    // image's own grid (the layer's image, or its mask). The canvas copies just these into its own copy of that
+    // image, so a render in flight never shares the image the next dab writes into. Nothing when no stroke is on.
+    struct StrokeWrites { QUuid layerId; bool mask = false; QRect pixels; };
+    [[nodiscard]] std::optional<StrokeWrites> takeStrokeWrites();
     bool beginCloneStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1, double opacity = 1,
                           bool aligned = true, bool sampleAllLayers = false);
     bool beginHealingStroke(const QPointF &documentPoint, double diameter = 40, double hardness = 1,
@@ -758,6 +763,7 @@ private:
     std::optional<WarpState> warp_;
     std::optional<QPointF> cloneSource_;
     std::optional<QPointF> cloneOffset_;
+    QRect strokeWrites_;
     QColor foreground_ = Qt::black;
     QColor background_ = Qt::white;
     bool maskPaintWhite_ = false;

@@ -723,15 +723,29 @@ void LayerRenderer::draw(QPainter &outputPainter, const Document &document)
 namespace {
 // Canvas renders keep the composite of the unchanged top-level layers below the one being edited, so repeated
 // edits (painting, sliders, moves) re-render only that layer and what is above it.
+// A layer as the prefix cache remembers it: everything but its pixels, which are known by their cache keys.
+// Keeping the layer itself would keep a reference to its pixels, and the next brush dab on that layer would then copy
+// the whole image to write into it: tens of milliseconds a pointer move on a large picture. A QImage's cache key
+// changes on every write access and is never shared by other pixels, so equal keys mean equal pixels (a changed key
+// may still hold the same pixels; that only costs a cache miss).
+struct RememberedLayer {
+    Layer layer;
+    qint64 image = 0, mask = 0;
+    explicit RememberedLayer(const Layer &from) : layer(from), image(from.image.cacheKey()), mask(from.mask.cacheKey())
+    { layer.image = QImage(); layer.mask = QImage(); }
+    bool operator==(const RememberedLayer &) const = default;
+};
+
 struct PrefixCache {
     QUuid document;
     QSize canvas;
     bool deep = false;
     RenderBackend backend = RenderBackend::Auto;
-    QVector<QVector<Layer>> previous; // Each top-level layer with its descendants, from the last render.
-    int count = 0;                    // Top-level layers composited into `image`.
+    QVector<QVector<RememberedLayer>> previous; // Each top-level layer with its descendants, from the last render.
+    int count = 0;                              // Top-level layers composited into `image`.
     QImage image;
 };
+
 std::mutex prefixMutex;
 PrefixCache prefixCache;
 
@@ -775,11 +789,19 @@ static QImage displayed(const Document &document)
         auto &c = prefixCache;
         const bool compatible = c.document == document.id && c.canvas == document.canvasSize && c.deep == deep &&
                                 c.backend == GpuRenderer::backend();
+        QVector<QVector<RememberedLayer>> remembered;
+        remembered.reserve(trees.size());
+        for (const QVector<Layer> &tree : trees) {
+            QVector<RememberedLayer> layers;
+            layers.reserve(tree.size());
+            for (const Layer &layer : tree) layers.push_back(RememberedLayer(layer));
+            remembered.push_back(std::move(layers));
+        }
         if (compatible)
-            while (unchanged < trees.size() && unchanged < c.previous.size() && trees[unchanged] == c.previous[unchanged]) ++unchanged;
+            while (unchanged < remembered.size() && unchanged < c.previous.size() && remembered[unchanged] == c.previous[unchanged]) ++unchanged;
         if (compatible && c.count > 0 && c.count <= unchanged && !c.image.isNull()) { base = c.image; first = c.count; }
         if (!compatible) { c = {}; c.document = document.id; c.canvas = document.canvasSize; c.deep = deep; c.backend = GpuRenderer::backend(); }
-        c.previous = trees;
+        c.previous = std::move(remembered);
     }
     if (first == 0 && unchanged > 0 && unchanged < trees.size()) {
         // A layer above `unchanged` is being edited: composite what is below it once and keep it. A clipped layer
@@ -795,6 +817,45 @@ static QImage displayed(const Document &document)
     }
     if (first > 0 && first >= trees.size()) return base.copy();
     return render(document, base, first);
+}
+
+bool LayerRenderer::regionRenderable(const Document &document)
+{
+    for (const Layer &layer : document.layers) {
+        if (!layer.adjustment.isEmpty() || (layer.effects && !layer.effects->visible().isEmpty())) return false;
+        if (DeepImage::isDeep(layer.image)) return false;
+    }
+    return true;
+}
+
+QImage LayerRenderer::flattenedRegion(const Document &document, const QRect &region)
+{
+    Document part = document;
+    part.canvasSize = region.size();
+    part.selection.reset(); part.selectionHard.reset();
+    for (Layer &layer : part.layers) {
+        layer.transform.origin -= region.topLeft();
+        if (layer.maskPlacement) layer.maskPlacement->origin -= region.topLeft();
+        // Only an upright layer is cropped, and only with a mask in its own grid or none: a mask placed elsewhere is
+        // resampled from its whole extent, which a crop would change.
+        const LayerTransform &placed = layer.transform;
+        const bool maskShared = !layer.mask.isNull() && !layer.maskPlacement && layer.mask.size() == layer.image.size();
+        if (layer.group || layer.image.isNull() || placed.rotation != 0 || placed.flipX || placed.flipY
+            || (!layer.mask.isNull() && !maskShared) || placed.size.isEmpty()) continue;
+        const double sx = placed.size.width() / layer.image.width(), sy = placed.size.height() / layer.image.height();
+        // A reduced layer is sampled over several pixels for each one shown: the margin covers that and the filter.
+        const int margin = int(std::ceil(4.0 / std::min({sx, sy, 1.0}))) + 2;
+        const QRect shown = QRectF(-placed.origin.x() / sx, -placed.origin.y() / sy, region.width() / sx, region.height() / sy)
+                                .toAlignedRect().adjusted(-margin, -margin, margin, margin).intersected(layer.image.rect());
+        if (shown.isEmpty()) { layer.visible = false; continue; }
+        if (shown == layer.image.rect()) continue;
+        layer.image = layer.image.copy(shown);
+        if (maskShared) layer.mask = layer.mask.copy(shown);
+        layer.transform.origin += QPointF(shown.left() * sx, shown.top() * sy);
+        layer.transform.size = QSizeF(shown.width() * sx, shown.height() * sy);
+    }
+    GpuRenderer::CpuScope cpu;
+    return render(part);
 }
 
 QImage LayerRenderer::flattened(const Document &document, RenderPurpose purpose)

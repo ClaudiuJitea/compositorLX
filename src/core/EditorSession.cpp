@@ -20,6 +20,8 @@ extern "C" {
 }
 
 #include <QPainter>
+#include <QThread>
+#include <cstring>
 #include <QPainterPath>
 #include <QFontMetrics>
 #include <QFileInfo>
@@ -1155,7 +1157,7 @@ bool EditorSession::applyGradient(const QPointF &start, const QPointF &end, cons
     if (maskTarget) target.transform = layer->maskPlacement.value_or(layer->transform);
     const auto first = documentToPixel(target, start, original.size()), last = documentToPixel(target, end, original.size());
     if (!first || !last) return false;
-    QImage painted(original.size(), DeepImage::canonical(original).format()); painted.fill(Qt::transparent);
+    const QImage::Format paintFormat = DeepImage::canonical(original).format();
     QColor firstColor = foreground;
     QColor secondColor = foregroundTransparent ? foreground : background;
     firstColor.setAlphaF(opacity);
@@ -1168,17 +1170,40 @@ bool EditorSession::applyGradient(const QPointF &start, const QPointF &end, cons
                            foregroundTransparent ? 0 : qRound(opacity * 255));
     }
     if (reversed) std::swap(firstColor, secondColor);
-    QPainter painter(&painted);
-    if (radial) { QRadialGradient gradient(*first, QLineF(*first, *last).length()); gradient.setColorAt(0, firstColor); gradient.setColorAt(1, secondColor); painter.fillRect(painted.rect(), gradient); }
-    else { QLinearGradient gradient(*first, *last); gradient.setColorAt(0, firstColor); gradient.setColorAt(1, secondColor); painter.fillRect(painted.rect(), gradient); }
-    painter.end();
-    QImage base = maskTarget ? original.convertToFormat(QImage::Format_RGBA8888_Premultiplied)
-                             : DeepImage::canonical(original);
+    // A mask is laid out as opaque RGBA first; a layer's own pixels are copied band by band below, into a new image.
+    QImage source = maskTarget ? original.convertToFormat(QImage::Format_RGBA8888_Premultiplied) : DeepImage::canonical(original);
     if (maskTarget) for (int y = 0; y < original.height(); ++y) {
-        const uchar *gray = original.constScanLine(y); uchar *rgba = base.scanLine(y);
+        const uchar *gray = original.constScanLine(y); uchar *rgba = source.scanLine(y);
         for (int x = 0; x < original.width(); ++x) rgba[x * 4] = rgba[x * 4 + 1] = rgba[x * 4 + 2] = gray[x], rgba[x * 4 + 3] = 255;
     }
-    QPainter composite(&base); composite.setCompositionMode(QPainter::CompositionMode_SourceOver); composite.drawImage(QPoint(), painted); composite.end();
+    QImage base = maskTarget ? std::move(source) : QImage(source.size(), source.format());
+    // The gradient is drawn and laid over the layer in bands of rows on all cores: it runs on every pointer move while
+    // the Gradient tool is dragged, and doing it in one go over a large picture takes tens of milliseconds, much of it
+    // first touching freshly allocated memory. Each band paints the same document-wide gradient through a translated
+    // painter into a scratch image of its own, then lays it over its rows of the result.
+    {
+        const bool copyRows = !maskTarget;
+        uchar *baseBits = base.bits(); // made writable here, on one thread
+        const qsizetype baseStride = base.bytesPerLine(), rowBytes = qsizetype(base.width()) * base.depth() / 8;
+        const int height = base.height(), width = base.width();
+        const int bands = qint64(width) * height < 262144 ? 1 : std::clamp(height / 64, 1, 4 * std::max(1, QThread::idealThreadCount()));
+        const QPointF from = *first, to = *last;
+        #pragma omp parallel for schedule(dynamic, 1) if(bands > 1)
+        for (int band = 0; band < bands; ++band) {
+            const int top = int(qint64(height) * band / bands), rows = int(qint64(height) * (band + 1) / bands) - top;
+            if (rows <= 0) continue;
+            if (copyRows) for (int y = top; y < top + rows; ++y) std::memcpy(baseBits + y * baseStride, source.constScanLine(y), size_t(rowBytes));
+            QImage baseRows(baseBits + top * baseStride, width, rows, baseStride, base.format());
+            QImage paintedRows(width, rows, paintFormat); paintedRows.fill(Qt::transparent);
+            QPainter painter(&paintedRows);
+            painter.translate(0, -top);
+            const QRect area(0, top, width, rows);
+            if (radial) { QRadialGradient gradient(from, QLineF(from, to).length()); gradient.setColorAt(0, firstColor); gradient.setColorAt(1, secondColor); painter.fillRect(area, gradient); }
+            else { QLinearGradient gradient(from, to); gradient.setColorAt(0, firstColor); gradient.setColorAt(1, secondColor); painter.fillRect(area, gradient); }
+            painter.end();
+            QPainter composite(&baseRows); composite.setCompositionMode(QPainter::CompositionMode_SourceOver); composite.drawImage(QPoint(), paintedRows); composite.end();
+        }
+    }
     const QImage result = clippedPixels(maskTarget ? original.convertToFormat(QImage::Format_RGBA8888_Premultiplied) : original,
                                         base, target, document_->selection);
     if (maskTarget) {
@@ -3120,25 +3145,32 @@ void EditorSession::updateBlurStroke(const QRect &dirty)
     const auto format = deep ? QImage::Format_RGBA32FPx4_Premultiplied : QImage::Format_RGBA8888_Premultiplied;
     const QImage base = original.convertToFormat(format);
     soft = soft.convertToFormat(format);
-    QImage result = (deep && !DeepImage::isDeep(layer.image) ? original : layer.image).convertToFormat(format);
+    // Written in place when the layer is already in the working format (the usual case): converting it, or comparing
+    // all of it with the original, on every pointer move would cost far more than the dab on a large picture.
+    const bool inPlace = layer.image.format() == format && original.format() == format && layer.image.size() == original.size();
+    QImage converted = inPlace ? QImage() : (deep && !DeepImage::isDeep(layer.image) ? original : layer.image).convertToFormat(format);
+    QImage &result = inPlace ? layer.image : converted;
+    bool changed = false;
     for (int y = affected.top(); y <= affected.bottom(); ++y) {
         const uchar *coverage = brush_->coverage.constScanLine(y);
         const uchar *clip = brush_->selectionCoverage.isNull() ? nullptr : brush_->selectionCoverage.constScanLine(y);
+        uchar *row = result.scanLine(y); const uchar *baseRow = base.constScanLine(y), *softRow = soft.constScanLine(y - region.y());
         for (int x = affected.left(); x <= affected.right(); ++x) {
             const double t = coverage[x] / 255.0 * brush_->opacity * (clip ? clip[x]/255.0 : 1);
             if (deep) {
-                const auto *a = reinterpret_cast<const float *>(base.constScanLine(y)) + x*4;
-                const auto *b = reinterpret_cast<const float *>(soft.constScanLine(y-region.y())) + (x-region.x())*4;
-                auto *out = reinterpret_cast<float *>(result.scanLine(y)) + x*4;
-                for (int c = 0; c < 4; ++c) out[c] = float(a[c]*(1-t)+b[c]*t);
+                const auto *a = reinterpret_cast<const float *>(baseRow) + x*4;
+                const auto *b = reinterpret_cast<const float *>(softRow) + (x-region.x())*4;
+                auto *out = reinterpret_cast<float *>(row) + x*4;
+                for (int c = 0; c < 4; ++c) { out[c] = float(a[c]*(1-t)+b[c]*t); changed |= out[c] != a[c]; }
             } else {
-                const uchar *a = base.constScanLine(y)+x*4, *b = soft.constScanLine(y-region.y())+(x-region.x())*4;
-                uchar *out = result.scanLine(y)+x*4;
-                for (int c = 0; c < 4; ++c) out[c] = uchar(qRound(a[c]*(1-t)+b[c]*t));
+                const uchar *a = baseRow+x*4, *b = softRow+(x-region.x())*4;
+                uchar *out = row+x*4;
+                for (int c = 0; c < 4; ++c) { out[c] = uchar(qRound(a[c]*(1-t)+b[c]*t)); changed |= out[c] != a[c]; }
             }
         }
     }
-    layer.image = result.convertToFormat(original.format());
+    if (inPlace) { brush_->changed = brush_->changed || changed; return; }
+    layer.image = converted.convertToFormat(original.format());
     brush_->changed = layer.image != original;
 }
 
@@ -3253,6 +3285,7 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
                     }
                 }
             }
+            strokeWrites_ |= QRect(cx - radius, cy - radius, radius * 2 + 1, radius * 2 + 1).intersected(QRect(QPoint(), bounds));
             stampBrushCoverage(warp_->coverage, center, radiusValue + 2, 1); previous = center;
         }
         warp_->previousPixel = *target; warp_->changed = true; return;
@@ -3357,6 +3390,7 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
         if (brush_->samples.size() > 5) brush_->samples.removeFirst();
     }
     if (dirty.isEmpty()) return;
+    strokeWrites_ |= dirty;
     if (brush_->healMode == 3) {
         updateBlurStroke(dirty);
         brush_->previousPixel = *current;
@@ -3396,6 +3430,14 @@ void EditorSession::continueBrushStrokeInternal(const QPointF &documentPoint)
     }
     brush_->previousPixel = *current;
     brush_->changed |= changedPixels;
+}
+
+std::optional<EditorSession::StrokeWrites> EditorSession::takeStrokeWrites()
+{
+    const QRect pixels = std::exchange(strokeWrites_, QRect());
+    if (warp_) return StrokeWrites{warp_->layerId, false, pixels};
+    if (brush_) return StrokeWrites{brush_->layerId, brush_->mask, pixels};
+    return std::nullopt;
 }
 
 bool EditorSession::endBrushStroke()

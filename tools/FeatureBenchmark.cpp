@@ -12,6 +12,7 @@
 #include "rendering/LayerEffectsRenderer.h"
 #include "rendering/LayerRenderer.h"
 #include "rendering/DeepImage.h"
+#include "rendering/DownsampleCache.h"
 #include "rendering/VolumetricLight.h"
 #include "rendering/RimLight.h"
 #include "rendering/RgbSplit.h"
@@ -164,6 +165,93 @@ int main(int argc, char **argv)
         const QImage gray(320, 320, QImage::Format_Grayscale8);
         const QImage up = gray.scaled(image.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
         std::printf("  scaling the mask up: %.0f ms\n", t.nsecsElapsed() / 1e6);
+        return 0;
+    }
+    // --canvas-stroke: one pointer move of each painting tool as the canvas sees it: the dab on the GUI thread (the
+    // canvas renders its own copy of the painted layer, so nothing else shares it), then the display render of the
+    // whole document, which runs on a worker.
+    if (app.arguments().contains(QStringLiteral("--canvas-stroke"))) {
+        for (int tool = 0; tool < 6; ++tool) {
+            EditorSession session;
+            session.createDocument(w, h);
+            session.insertImage(photo(w, h, 3), QStringLiteral("Photo"));
+            const QPointF start(w / 2.0, h / 2.0);
+            // 0 brush, 1 Clone Stamp, 2 Spot Healing, 3 Blur, 4 Smudge, 5 Liquify.
+            if (tool == 0) session.beginBrushStroke(start, QColor(200, 40, 30), 120, .5, 1);
+            else if (tool == 1) { session.setCloneSource(QPointF(w / 4.0, h / 4.0)); session.beginCloneStroke(start, 120, .5, 1); }
+            else if (tool == 2) session.beginHealingStroke(start, 120, .5, 1);
+            else if (tool == 3) session.beginBlurStroke(start, 120, .5, 1, 8);
+            else session.beginWarpStroke(start, tool == 4 ? 1 : 0, 120, .5, .8);
+            std::vector<double> dabs, renders;
+            for (int i = 1; i <= 30; ++i) {
+                QElapsedTimer t; t.start();
+                session.continueBrushStroke(start + QPointF(i * 6, i * 3));
+                dabs.push_back(t.nsecsElapsed() / 1e6);
+                if (i % 5) continue;
+                t.restart();
+                const QImage shown = LayerRenderer::flattened(*session.document(), RenderPurpose::Display);
+                renders.push_back(t.nsecsElapsed() / 1e6);
+            }
+            session.endBrushStroke();
+            std::sort(dabs.begin(), dabs.end()); std::sort(renders.begin(), renders.end());
+            std::printf("%-12s pointer move: dab median %.1f ms (max %.1f), display render median %.1f ms\n",
+                        std::array{"Brush", "Clone Stamp", "Spot Healing", "Blur", "Smudge", "Liquify"}[size_t(tool)],
+                        dabs[dabs.size() / 2], dabs.back(), renders[renders.size() / 2]);
+            std::fflush(stdout);
+        }
+        {
+            // A region of the display rendered alone: the document shifted so the region is its canvas.
+            Document full; full.id = QUuid::createUuid(); full.canvasSize = QSize(w, h);
+            full.layers = {layer(photo(w, h, 0)), layer(photo(w, h, 1), BlendMode::Multiply), layer(photo(w, h, 2), BlendMode::Screen)};
+            full.layers[1].mask = QImage(w, h, QImage::Format_Grayscale8); full.layers[1].mask.fill(180);
+            full.layers[2].opacity = .5;
+            Layer small = layer(photo(w / 3, h / 3, 4), BlendMode::Overlay); // shown at 2.5x its pixels
+            small.transform.origin = QPointF(w / 7.0, h / 9.0); small.transform.size = QSizeF(w / 3 * 2.5, h / 3 * 2.5);
+            full.layers.push_back(small);
+            const QRect region(w / 2 + 3, h / 2 + 1, 260, 250);
+            QImage whole, piece;
+            QElapsedTimer t; t.start();
+            piece = LayerRenderer::flattenedRegion(full, region);
+            const double regionMs = t.nsecsElapsed() / 1e6;
+            { GpuRenderer::CpuScope cpu; whole = LayerRenderer::flattened(full, RenderPurpose::Commit); }
+            const QImage expected = whole.copy(region).convertToFormat(piece.format());
+            int worst = 0;
+            for (int y = 0; y < piece.height(); ++y) for (int x = 0; x < piece.width() * 4; ++x)
+                worst = std::max(worst, std::abs(int(piece.constScanLine(y)[x]) - int(expected.constScanLine(y)[x])));
+            std::printf("Region render 260x250 of 4 layers: %.1f ms, largest difference from the full render %d\n", regionMs, worst);
+        }
+        {
+            // What the canvas does with each new frame on the GUI thread when zoomed out to fit: the reduction.
+            const QImage frame = photo(w, h, 5);
+            for (const double factor : {.5, .25, .15}) {
+                QImage copy = frame.copy(); // a new cache key, as each new render has
+                QElapsedTimer t; t.start();
+                const QImage reduced = DownsampleCache::shared().image(copy, factor);
+                std::printf("Display reduction to %.2f: %.1f ms (%dx%d)\n", factor, t.nsecsElapsed() / 1e6, reduced.width(), reduced.height());
+            }
+        }
+        {
+            EditorSession session;
+            session.createDocument(w, h);
+            session.insertImage(photo(w, h, 3), QStringLiteral("Photo"));
+            std::vector<double> moves;
+            for (int i = 1; i <= 9; ++i) {
+                QElapsedTimer t; t.start();
+                session.applyGradient(QPointF(w / 4.0, h / 2.0), QPointF(w / 4.0 + i * 200, h / 2.0), Qt::black, Qt::white, false, false, false, 1);
+                moves.push_back(t.nsecsElapsed() / 1e6);
+            }
+            std::sort(moves.begin(), moves.end());
+            quint64 hash = 1469598103934665603ull;
+            for (const bool radial : {false, true}) {
+                session.applyGradient(QPointF(w / 3.0, h / 3.0), QPointF(w * .7, h * .6), QColor(200, 40, 30), QColor(20, 90, 250, 128), radial, false, false, .7);
+                const QImage &result = session.activeLayer()->image;
+                for (int y = 0; y < result.height(); ++y)
+                    for (const uchar *p = result.constScanLine(y), *e = p + result.width() * result.depth() / 8; p < e; ++p)
+                        hash = (hash ^ *p) * 1099511628211ull;
+            }
+            std::printf("Gradient     pointer move: fill median %.1f ms (max %.1f), result %016llx\n", moves[moves.size() / 2], moves.back(),
+                        static_cast<unsigned long long>(hash));
+        }
         return 0;
     }
     // --strokes: what one pointer move of Liquify and Smudge costs with a large brush (the dabs, not the canvas).

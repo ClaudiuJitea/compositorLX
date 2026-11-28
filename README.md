@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.7.6.1-blue"></a>
+  <a href="https://github.com/ClaudiuJitea/compositorLX/releases"><img alt="Version" src="https://img.shields.io/badge/version-0.7.6.2-blue"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-5b8def">
   <img alt="Qt" src="https://img.shields.io/badge/Qt-6.5+-41CD52">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20x86__64-orange">
@@ -22,13 +22,12 @@
 
 ## What's new
 
-**0.7.6.1: a cleaner look.**
-- Slim sliders: a thin track and a small flat knob.
-- Flat fields, menus and buttons, with no outlines.
-- Smaller menu text without underlined letters.
-- Dialogs open wide enough to show their whole title.
-- Sizes in whole pixels.
-- An even pair of color swatches in the tool rail.
+**0.7.6.2: smooth painting on large pictures.**
+- Brush, Eraser, Clone Stamp, Healing, Blur, Smudge and Liquify no longer stutter: each dab takes under a millisecond.
+- While you paint, the canvas redraws only what the stroke changed, at about 60 frames a second on a 24-megapixel picture.
+- Gradient drags are twice as fast.
+- Tool shortcuts (S for Clone Stamp, B, E…) work after typing in a number field.
+- A clearer eyedropper cursor and icon.
 
 **0.7.6: synced with macOS Compositor 1.7.6.**
 - **Movie layers.** Import MOV and MP4 files, play them with sound, scrub them on the canvas, grab any frame as a still layer, and relink a moved movie. Projects link to the movie instead of copying it.
@@ -63,11 +62,11 @@ Download the [AppImage or Debian package](https://github.com/ClaudiuJitea/compos
 
 ```sh
 # AppImage: everything bundled
-chmod +x CompositorLX-0.7.6.1-x86_64.AppImage
-./CompositorLX-0.7.6.1-x86_64.AppImage
+chmod +x CompositorLX-0.7.6.2-x86_64.AppImage
+./CompositorLX-0.7.6.2-x86_64.AppImage
 
 # Debian / Ubuntu: use apt, which installs the libraries it needs (dpkg -i doesn't)
-sudo apt install ./compositorlx_0.7.6.1_amd64.deb
+sudo apt install ./compositorlx_0.7.6.2_amd64.deb
 ```
 
 A Vulkan driver is optional; without one the CPU renders everything. Verify downloads with `sha256sum --check SHA256SUMS`.
@@ -89,6 +88,7 @@ The first configure downloads a checksum-pinned ONNX Runtime and the U²-Net mod
 
 ## Version history
 
+- **0.7.6.2**: smooth painting on large pictures, working tool shortcuts, a new eyedropper.
 - **0.7.6.1**: UI polish: slim sliders, flat controls, smaller menus, dialogs sized to their titles.
 - **0.7.6**: macOS 1.7.6 sync. Movie layers, softer brushes, compact GIF timeline ([details](docs/UPSTREAM_SYNC_1.7.6.md)).
 - **0.7.0–0.7.2**: macOS 1.7.0 sync. Sharpen, Reduce Noise, Rim Light, Volumetric Light, editable shapes, Align and Distribute, PSD export ([details](docs/UPSTREAM_SYNC_1.7.0.md)).

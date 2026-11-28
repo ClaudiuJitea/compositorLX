@@ -33,6 +33,78 @@ class TestCanvasOps : public QObject
         return session;
     }
 private slots:
+    // While a stroke paints, neither a render in flight nor the renderer's caches may share the painted image: each
+    // dab would otherwise copy the whole layer to write into it (the Clone Stamp stutter on large pictures). The canvas
+    // still shows every dab, from its own copy kept up to date by the stroke's dirty rectangles.
+    void strokeNeverCopiesTheLayerWhileRendering()
+    {
+        for (const bool clone : {true, false}) {
+            EditorSession session; session.createDocument(1600, 1200);
+            QImage picture(1600, 1200, QImage::Format_RGBA8888_Premultiplied); picture.fill(Qt::blue);
+            QPainter(&picture).fillRect(0, 0, 400, 400, Qt::yellow);
+            session.insertImage(picture, QStringLiteral("Photo"));
+            CanvasWidget canvas; canvas.resize(800, 600); canvas.setEditorSession(&session); canvas.setDocument(session.document());
+            canvas.show(); QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+            QTRY_VERIFY(!canvas.grab().isNull());
+            if (clone) { session.setCloneSource(QPointF(200, 200)); QVERIFY(session.beginCloneStroke(QPointF(1000, 700), 120, 1, 1)); }
+            else QVERIFY(session.beginBrushStroke(QPointF(1000, 700), Qt::yellow, 120, 1, 1));
+            canvas.invalidateDocument();
+            int shared = 0;
+            for (int i = 1; i <= 40; ++i) {
+                QCoreApplication::processEvents(); // lets renders finish and new ones start, as pointer moves do
+                if (i > 2 && !session.activeLayer()->image.isDetached()) ++shared;
+                session.continueBrushStroke(QPointF(1000 + i * 4, 700));
+                canvas.invalidateDocument();
+                if (i % 3 == 0) QTest::qWait(5);
+            }
+            QCOMPARE(shared, 0);
+            // Mid-stroke, once the renders settle, the canvas shows the last dab.
+            QTest::qWait(50);
+            QTRY_VERIFY_WITH_TIMEOUT([&] {
+                const QImage shown = canvas.grab().toImage();
+                const QPointF at = canvas.widgetRectForDocumentRect(QRectF(1150, 700, 1, 1)).center() * canvas.devicePixelRatioF();
+                const QColor color = shown.pixelColor(at.toPoint());
+                return color.red() > 200 && color.green() > 200 && color.blue() < 60;
+            }(), 5000);
+            QVERIFY(session.endBrushStroke());
+        }
+    }
+    // While only a stroke changes the document, the canvas redraws just its dirty rectangles into the frame on show;
+    // the frame must still be what a whole render gives, through blend modes, a mask, a scaled layer and layers above.
+    void strokeRegionsMatchWholeRender()
+    {
+        EditorSession session; session.createDocument(1800, 1200);
+        QImage photo(1800, 1200, QImage::Format_RGBA8888_Premultiplied);
+        for (int y = 0; y < photo.height(); ++y) for (int x = 0; x < photo.width(); ++x)
+            photo.setPixelColor(x, y, QColor((x * 7) & 255, (y * 3) & 255, ((x + y) / 5) & 255));
+        session.insertImage(photo, QStringLiteral("Photo"));
+        QImage overlay(600, 400, QImage::Format_RGBA8888_Premultiplied); overlay.fill(QColor(30, 160, 220, 200));
+        session.insertImage(overlay, QStringLiteral("Overlay"));
+        Layer &over = session.document()->layers.last();
+        over.blendMode = BlendMode::Multiply; over.opacity = .7;
+        over.transform.origin = QPointF(500, 300); over.transform.size = QSizeF(1500, 1000); // shown at 2.5x
+        over.mask = QImage(600, 400, QImage::Format_Grayscale8); over.mask.fill(150);
+        session.document()->activeLayerId = session.document()->layers.first().id;
+        CanvasWidget canvas; canvas.resize(900, 600); canvas.setEditorSession(&session); canvas.setDocument(session.document());
+        canvas.show(); QVERIFY(QTest::qWaitForWindowExposed(&canvas));
+        QTRY_VERIFY(!canvas.renderedImage().isNull());
+        session.setCloneSource(QPointF(300, 300)); QVERIFY(session.beginCloneStroke(QPointF(900, 600), 90, .6, 1));
+        canvas.invalidateDocument();
+        for (int i = 1; i <= 60; ++i) {
+            session.continueBrushStroke(QPointF(900 + i * 9, 600 + std::sin(i / 6.0) * 120));
+            canvas.invalidateDocument();
+            QTest::qWait(4);
+        }
+        QTest::qWait(300); QCoreApplication::processEvents();
+        const QImage expected = LayerRenderer::flattened(*session.document(), RenderPurpose::Commit).convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        const QImage shown = canvas.renderedImage().convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        QCOMPARE(shown.size(), expected.size());
+        int worst = 0;
+        for (int y = 0; y < shown.height(); ++y) for (int x = 0; x < shown.width() * 4; ++x)
+            worst = std::max(worst, std::abs(int(shown.constScanLine(y)[x]) - int(expected.constScanLine(y)[x])));
+        QVERIFY2(worst <= 3, qPrintable(QStringLiteral("largest difference %1").arg(worst)));
+        QVERIFY(session.endBrushStroke());
+    }
     // TransformTests.rotatedResizeKeepsOppositeAnchorAtEveryHandle
     void rotatedResizeKeepsOppositeAnchor()
     {

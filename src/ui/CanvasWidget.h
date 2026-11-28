@@ -177,6 +177,8 @@ public:
     [[nodiscard]] std::optional<QRectF> cropRect() const { return cropRect_; }
     [[nodiscard]] double cropRatio() const { return cropRatio_; }
     void invalidateDocument();
+    // The composite on show (for tests and sampling).
+    [[nodiscard]] const QImage &renderedImage() const { return renderedDocument_; }
     [[nodiscard]] quint64 renderGeneration() const { return renderGeneration_; }
     void setBlendModePreview(const std::optional<QUuid> &layerId, const std::optional<BlendMode> &mode);
     // A movie layer's frame while it plays or is scrubbed, drawn in place of the layer's image without touching the
@@ -284,6 +286,11 @@ private:
     [[nodiscard]] bool transformControlsVisible() const { return tool_ == Tool::Move && (showTransformControls_ || persistentTransform_); }
     void drawCheckerboard(QPainter &painter, const QRectF &area) const;
     void startBackgroundRender();
+    // Syncs the stroke's copy of the painted image into `snapshot`; the canvas rectangle the stroke changed since the
+    // last render, or nothing when that render must be of the whole document.
+    std::optional<QRect> mirrorStroke(Document &snapshot);
+    [[nodiscard]] QImage reducedDisplay(int level);
+    void patchReductions(const QRect &region);
     void zoomTo(double value, const QPointF &anchor);
     void refreshCursor();
     bool spaceHeld_ = false;
@@ -325,6 +332,21 @@ private:
     quint64 renderGeneration_ = 0;
     QFutureWatcher<QImage> renderWatcher_;
     bool renderActive_ = false;
+    // The image a stroke is painting, as the last render was given it. Renders get this copy, kept up to date one dirty
+    // rectangle at a time, instead of the session's own image: a render in flight then never shares the image the
+    // next dab writes into, which would make that dab copy all of it (tens of milliseconds on a large picture).
+    struct StrokeMirror { QUuid layerId; bool mask = false; qint64 serial = 0; QImage image; };
+    std::optional<StrokeMirror> strokeMirror_;
+    // The last document sent to render, without its pixels (known by cache key), so the next render can tell whether
+    // only the stroke's layer changed and redraw just its dirty rectangle into renderedDocument_.
+    struct RenderedLayer {
+        Layer layer; qint64 image = 0, mask = 0;
+        bool operator==(const RenderedLayer &) const = default;
+    };
+    std::optional<QVector<RenderedLayer>> lastRendered_;
+    // The display's power-of-two reductions of renderedDocument_ (8-bit), kept up to date rectangle by rectangle.
+    QVector<QImage> reducedLevels_;
+    qint64 reducedKey_ = 0;
     std::optional<QPair<QUuid, BlendMode>> blendModePreview_;
     std::optional<QPair<QUuid, QImage>> moviePreview_;
     std::optional<QUuid> textEditingLayer_;

@@ -5,10 +5,27 @@
 #include <QPalette>
 #include <QPainter>
 #include <QPainterPath>
+#include <QTransform>
 #include <algorithm>
 #include <functional>
 
 namespace compositor {
+
+// The Eyedropper's pipette in the 24-unit icon grid, shared by its toolbar icon and the canvas cursor: a tapered glass
+// tube with its tip at the lower left, a collar, and a rounded rubber bulb at the upper right, at 45 degrees.
+struct PipetteParts { QPainterPath tube, collar, bulb; };
+inline PipetteParts pipetteParts()
+{
+    // Drawn along +x from the tip, then turned to point down and to the left.
+    QPainterPath tube; tube.moveTo(0, 0); tube.lineTo(2.6, -0.85); tube.lineTo(4.2, -1.7); tube.lineTo(12.2, -1.7);
+    tube.lineTo(12.2, 1.7); tube.lineTo(4.2, 1.7); tube.lineTo(2.6, 0.85); tube.closeSubpath();
+    QPainterPath collar; collar.addRoundedRect(QRectF(11.8, -3.1, 2.6, 6.2), 0.9, 0.9);
+    QPainterPath bulb; bulb.moveTo(14.4, -2.3); bulb.lineTo(18.6, -2.3); bulb.arcTo(QRectF(16.3, -2.3, 4.6, 4.6), 90, -180);
+    bulb.lineTo(14.4, 2.3); bulb.closeSubpath();
+    QTransform turn; turn.translate(4.6, 19.4); turn.rotate(-45);
+    return {turn.map(tube), turn.map(collar), turn.map(bulb)};
+}
+constexpr QPointF pipetteTip(4.6, 19.4);
 
 // Render vector geometry at the requested size instead of scaling a tiny bitmap.
 class EditorIconEngine final : public QIconEngine {
@@ -98,13 +115,9 @@ public:
         }
         case 10: // Shape
             p.drawEllipse(QRectF(5.0, 5.0, 10.0, 10.0)); p.drawRoundedRect(QRectF(10.0, 10.0, 9.0, 9.0), 1.3, 1.3); break;
-        case 11: { // Eyedropper: distinct rubber bulb and glass pipette
-            QPainterPath tube; tube.moveTo(13, 8); tube.lineTo(5.5, 15.5); tube.lineTo(5, 19);
-            tube.lineTo(8.5, 18.5); tube.lineTo(16, 11); p.drawPath(tube);
-            p.drawLine(QPointF(11.5, 6.5), QPointF(17.5, 12.5));
-            QPainterPath bulb; bulb.moveTo(13, 8); bulb.lineTo(15.5, 5.5);
-            bulb.cubicTo(18.5, 2.5, 21.5, 5.5, 18.5, 8.5); bulb.lineTo(16, 11);
-            p.setBrush(ink); p.drawPath(bulb); break;
+        case 11: { // Eyedropper: a tapered glass pipette, its collar and rubber bulb
+            const PipetteParts pipette = pipetteParts();
+            p.drawPath(pipette.tube); p.setBrush(ink); p.drawPath(pipette.collar); p.drawPath(pipette.bulb); break;
         }
         case 12: { // Hand
             QPainterPath hand; hand.moveTo(8.0, 18.0); hand.lineTo(5.7, 12.8); hand.cubicTo(5.0, 11.2, 6.8, 10.2, 7.8, 11.7);

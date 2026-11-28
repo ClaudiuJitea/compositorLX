@@ -8,7 +8,9 @@
 #include <QAction>
 #include <QDialogButtonBox>
 #include <QPushButton>
+#include <QToolButton>
 #include <QSpinBox>
+#include <QDoubleSpinBox>
 #include <QKeyEvent>
 #include <QRegularExpression>
 #include <QTemporaryDir>
@@ -62,6 +64,55 @@ private slots:
         QCOMPARE(canvas->tool(), CanvasWidget::Tool::Brush);       // held: back to the brush
         pressAndRelease(0);
         QCOMPARE(canvas->tool(), CanvasWidget::Tool::Eyedropper);  // tapped: the switch sticks
+    }
+
+    // Every tool key switches the tool when pressed for real, from the canvas and from a tool button that was
+    // clicked; two window shortcuts on one key would make Qt fire neither.
+    void toolKeysSwitchTools()
+    {
+        MainWindow window; window.resize(1200, 800); window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
+        window.session().createDocument(400, 300); window.syncDocumentViews();
+        CanvasWidget *canvas = window.canvas();
+        QHash<QKeySequence, QStringList> owners;
+        for (QAction *action : window.findChildren<QAction *>())
+            for (const QKeySequence &key : action->shortcuts())
+                if (!key.isEmpty() && action->isEnabled()
+                    && (action->parent() == &window || action->associatedObjects().contains(&window)))
+                    owners[key] << (action->objectName().isEmpty() ? action->text() : action->objectName());
+        QStringList clashes;
+        for (auto it = owners.cbegin(); it != owners.cend(); ++it)
+            if (it.value().size() > 1) clashes << it.key().toString() + QStringLiteral(": ") + it.value().join(QStringLiteral(", "));
+        QVERIFY2(clashes.isEmpty(), qPrintable(clashes.join(QStringLiteral(" | "))));
+        using T = CanvasWidget::Tool;
+        const QList<QPair<Qt::Key, T>> keys = {{Qt::Key_B, T::Brush}, {Qt::Key_S, T::Clone}, {Qt::Key_E, T::Eraser},
+            {Qt::Key_J, T::Healing}, {Qt::Key_I, T::Eyedropper}, {Qt::Key_G, T::Gradient}, {Qt::Key_V, T::Move},
+            {Qt::Key_H, T::Hand}, {Qt::Key_Z, T::Zoom}, {Qt::Key_T, T::Text}, {Qt::Key_C, T::Crop}};
+        // After a number in the tool bar was typed in, its field keeps the focus: letters still switch tools there,
+        // digits still edit the number.
+        canvas->setTool(T::Brush);
+        QDoubleSpinBox *size = window.brushSizeField();
+        QVERIFY(size && size->isVisible());
+        size->setFocus(); QTRY_VERIFY(size->hasFocus());
+        size->selectAll(); QTest::keyClicks(QApplication::focusWidget(), QStringLiteral("37"));
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Return);
+        QCOMPARE(size->value(), 37.0);
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_S);
+        QCOMPARE(canvas->tool(), T::Clone);
+        for (const bool fromButton : {false, true}) {
+            canvas->setFocus(); QTRY_VERIFY(canvas->hasFocus());
+            for (const auto &[key, tool] : keys) {
+                QWidget *target = QApplication::focusWidget() ? QApplication::focusWidget() : &window;
+                QTest::keyClick(target, key);
+                QVERIFY2(canvas->tool() == tool, qPrintable(QStringLiteral("key %1 from %2 left tool %3")
+                    .arg(QKeySequence(key).toString(), target->metaObject()->className()).arg(int(canvas->tool()))));
+                if (fromButton) {   // click the tool's own button, as a user would, then go on with keys
+                    for (QToolButton *button : window.findChildren<QToolButton *>())
+                        if (button->isVisible() && button->isCheckable() && button->isChecked() && button->toolTip().contains(QStringLiteral("Brush"))) { QTest::mouseClick(button, Qt::LeftButton); break; }
+                }
+            }
+        }
     }
 
     void zoomOutModeInvertsTheClick()

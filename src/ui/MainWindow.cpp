@@ -42,6 +42,7 @@
 #include "ui/InlineTextEditor.h"
 
 #include <QWidgetAction>
+#include <QAbstractSpinBox>
 #include <QAction>
 #include <QApplication>
 #include <QCoreApplication>
@@ -139,6 +140,30 @@ static inline void initCompositorResources()
 }
 
 namespace compositor {
+
+// A number field in the main window keeps the keyboard after it was typed in, and would swallow the tool keys (S for
+// Clone Stamp, B, [ and ] ...) as text it cannot use. Plain letters and brackets go on to the window's shortcuts
+// instead; digits, arrows and editing keys stay with the field.
+class NumberFieldShortcutPass final : public QObject {
+public:
+    explicit NumberFieldShortcutPass(QWidget *window) : QObject(window), window_(window) {}
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() != QEvent::ShortcutOverride || !watched->isWidgetType()) return false;
+        auto *widget = static_cast<QWidget *>(watched);
+        const auto *spin = qobject_cast<QAbstractSpinBox *>(widget);
+        if (!spin) spin = qobject_cast<QAbstractSpinBox *>(widget->parentWidget());
+        const auto *key = static_cast<QKeyEvent *>(event);
+        return spin && spin->window() == window_
+            && !(key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))
+            && ((key->key() >= Qt::Key_A && key->key() <= Qt::Key_Z) || key->key() == Qt::Key_BracketLeft || key->key() == Qt::Key_BracketRight);
+        // Returning true leaves the override unaccepted, so the window's shortcut takes the key.
+    }
+private:
+    QWidget *window_;
+};
+
 
 static bool refusePaint(const EditorSession &session, QWidget *anchor);
 
@@ -1705,6 +1730,7 @@ MainWindow::MainWindow(QWidget *parent)
     foregroundSwatch_->setObjectName(QStringLiteral("foregroundSwatch"));
     backgroundSwatch_->setObjectName(QStringLiteral("backgroundSwatch"));
     foregroundSwatch_->installEventFilter(this); backgroundSwatch_->installEventFilter(this);
+    qApp->installEventFilter(new NumberFieldShortcutPass(this));
     backgroundSwatch_->lower(); swatchGap->raise(); foregroundSwatch_->raise();
     {   // Swap (X) and default colors (D), as small glyphs at the swatches' corners, so the keys are discoverable.
         // Drawn at 2x and sized to the 16 px buttons; strokes thick enough to read at 1x.
